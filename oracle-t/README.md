@@ -218,6 +218,19 @@ POSTGRES_HOST=localhost .venv/bin/python -m app.cli backfill-cards --limit 500
 cd backend && ./.venv/bin/python -m app.cli check-mail
 ```
 
+## Установка на сервер
+
+Для боевой установки есть отдельный скрипт в корне репозитория — он ставит системные пакеты,
+PostgreSQL, Python-окружение с браузером Playwright, собирает интерфейс и заводит службы
+systemd и nginx:
+
+```bash
+sudo ./install.sh --mode server
+```
+
+Подробности и остальные режимы (`docker`, `local`) — в [README репозитория](../README.md#установка).
+Разделы ниже описывают ручной путь и работу на машине разработчика.
+
 ## Быстрый старт для разработки (без Docker)
 
 Важно: `frontend/index.html` — это Vite-приложение (React/TypeScript), его **нельзя** открыть
@@ -319,14 +332,31 @@ npm install
 npm run dev
 ```
 
-## Docker Compose (опционально, для развёртывания ближе к продакшену)
+## Docker Compose
+
+В `docker-compose.yml` три службы: `db` (PostgreSQL 15), `backend` (образ с tesseract, bsdtar
+и браузером Playwright, миграции накатываются при старте) и `frontend` (сборка Vite, которую
+раздаёт nginx). Наружу открыт один порт — веб-интерфейс; API доступен по тому же адресу на
+`/api/`, а backend и Postgres в хостовую сеть не выставлены.
 
 ```bash
 cp .env.example .env   # заполнить пароли/секреты
-docker compose up --build
+docker compose up -d --build
 ```
 
-Backend поднимется на `http://localhost:8000`, Postgres — на порту 5432.
+Проще запустить это установщиком — он сам сгенерирует секреты и дождётся готовности:
+`./install.sh --mode docker` из корня репозитория. Порт интерфейса меняется переменной
+`HTTP_PORT` в `.env` (или ключом `--http-port`).
+
+**Ключ шифрования учётных данных площадок в контейнере живёт в `.env`**
+(`CREDENTIALS_ENCRYPTION_KEY`), а не в файле `.credentials_key`: файл лежит внутри образа и
+исчез бы при пересборке, а вместе с ним стали бы нечитаемыми все сохранённые пароли от личных
+кабинетов ЭТП. Установщик создаёт этот ключ сам; при ручной настройке сгенерировать его можно
+так:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
 
 ## Структура
 
@@ -334,7 +364,7 @@ Backend поднимется на `http://localhost:8000`, Postgres — на п�
 oracle-t/
 ├── ARCHITECTURE.md   # архитектура всей платформы
 ├── backend/          # FastAPI + SQLAlchemy + Alembic
-├── frontend/          # React + Vite + Tailwind
+├── frontend/         # React + Vite + Tailwind (+ Dockerfile и nginx.conf для продакшена)
 └── docker-compose.yml
 ```
 

@@ -1,0 +1,13 @@
+# Без этого COPY . . затаскивает в образ venv хостовой машины (несовместимые бинарники),
+# скачанную документацию и логи — сотни мегабайт мусора и чужие пути внутри .pth-файлов.
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+storage
+logs
+.env
+.DS_Store

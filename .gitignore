@@ -25,6 +25,7 @@ oracle-t/frontend/dist/
 *.tsbuildinfo
 
 # --- Данные и артефакты рантайма ---
+install.log
 logs/
 storage/
 oracle-t/backend/logs/

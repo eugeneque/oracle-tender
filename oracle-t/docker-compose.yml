@@ -1,3 +1,9 @@
+# Полный стенд ORACLE-T: база, API и веб-интерфейс. Поднимается установщиком
+# (`./install.sh --mode docker`) или вручную: `docker compose up -d --build`.
+#
+# Снаружи открыт только один порт — веб-интерфейс. API доступен по тому же адресу на
+# `/api/`, backend и Postgres в хостовую сеть не выставлены: у backend нет собственной
+# аутентификации на уровне порта, и открытый 8000 — это доступ к API в обход nginx.
 services:
   db:
     image: postgres:15
@@ -8,8 +14,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-oraclet}
     volumes:
       - db_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-oraclet}"]
       interval: 5s
@@ -22,15 +26,31 @@ services:
     env_file:
       - .env
     environment:
+      # Имя сервиса вместо localhost: в .env хост базы записан для нативной установки.
       POSTGRES_HOST: db
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      - "8000:8000"
     volumes:
       - ./storage:/app/storage
       - ./backend/logs:/app/logs
+    healthcheck:
+      # Фронтенд стартует только после живого API — иначе первая же загрузка страницы
+      # упирается в 502, пока идут миграции.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
 
 volumes:
   db_data:
