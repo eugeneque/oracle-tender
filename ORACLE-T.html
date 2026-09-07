@@ -1,0 +1,883 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ORACLE-T — система тендерной разведки</title>
+<meta name="description" content="Презентация системы автоматизированного сбора и анализа тендерной информации ORACLE-T: возможности, интеграция ИИ, уровень автоматизации, сравнение с OPTI, готовность и перспективы.">
+<meta name="color-scheme" content="dark">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+  /* Базовый сброс: в самостоятельном файле его никто не подставит за нас. */
+  html { color-scheme: dark; background: #060608; }
+  img { max-width: 100%; height: auto; }
+  [hidden] { display: none !important; }
+</style>
+<style>
+  :root {
+    --bg: #060608;
+    --tile: #131317;
+    --tile-2: #1b1b21;
+    --tile-3: #232329;
+    --line: #2b2b33;
+    --ink: #f4f4f7;
+    --ink-2: #c3c3cd;
+    --muted: #83838f;
+
+    --volt: #7c5cff;
+    --volt-2: #b388ff;
+    --cyan: #22d3ee;
+    --pink: #ff4d8d;
+    --amber: #ffb020;
+    --green: #34d399;
+    --red: #ff5a52;
+
+    --sans: "Onest", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --r: 20px;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 0 18px 96px; }
+
+  :focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; border-radius: 10px; }
+
+  /* ───────── Обложка ───────── */
+
+  .hero {
+    padding: 68px 0 46px;
+    text-align: center;
+    position: relative;
+  }
+
+  .hero::after {
+    content: "";
+    position: absolute;
+    inset: 12% 18% auto;
+    height: 260px;
+    background: radial-gradient(60% 100% at 50% 40%, rgba(124, 92, 255, .30), transparent 70%);
+    filter: blur(46px);
+    z-index: -1;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .22em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 18px;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: clamp(56px, 12vw, 132px);
+    line-height: .9;
+    font-weight: 800;
+    letter-spacing: -.045em;
+    background: linear-gradient(96deg, #ffffff 8%, var(--volt-2) 46%, var(--cyan) 92%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .thesis {
+    margin: 24px auto 0;
+    max-width: 34ch;
+    font-size: clamp(18px, 2.4vw, 25px);
+    line-height: 1.34;
+    font-weight: 500;
+    letter-spacing: -.015em;
+    color: var(--ink-2);
+    text-wrap: balance;
+  }
+
+  .hero-meta {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 30px;
+  }
+
+  .pill {
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 7px 14px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--tile);
+    color: var(--ink-2);
+    white-space: nowrap;
+  }
+
+  .pill b { color: var(--ink); font-weight: 500; }
+
+  /* ───────── Секции ───────── */
+
+  section { margin-top: 76px; }
+
+  .sec-head { margin-bottom: 22px; }
+
+  .sec-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .2em;
+    text-transform: uppercase;
+    color: var(--volt-2);
+    margin: 0 0 10px;
+  }
+
+  h2 {
+    margin: 0;
+    font-size: clamp(30px, 4.4vw, 46px);
+    line-height: 1.04;
+    font-weight: 700;
+    letter-spacing: -.035em;
+    text-wrap: balance;
+  }
+
+  .sec-lede {
+    margin: 12px 0 0;
+    color: var(--muted);
+    font-size: 16px;
+    max-width: 66ch;
+  }
+
+  /* ───────── Бенто ───────── */
+
+  .bento {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 10px;
+  }
+
+  .t {
+    background: var(--tile);
+    border-radius: var(--r);
+    padding: 22px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    min-height: 152px;
+    justify-content: flex-end;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .t.s2 { grid-column: span 2; }
+  .t.s3 { grid-column: span 3; }
+  .t.s4 { grid-column: span 4; }
+  .t.s6 { grid-column: span 6; }
+  .t.tall { min-height: 226px; }
+  .t.center { justify-content: center; align-items: center; text-align: center; }
+
+  .num {
+    font-size: clamp(34px, 4.8vw, 52px);
+    line-height: .92;
+    font-weight: 700;
+    letter-spacing: -.045em;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .num.volt { color: var(--volt-2); }
+  .num.cyan { color: var(--cyan); }
+  .num.pink { color: var(--pink); }
+  .num.amber { color: var(--amber); }
+  .num.green { color: var(--green); }
+
+  .lbl { font-size: 14.5px; font-weight: 500; color: var(--ink); }
+  .hint { font-size: 12.5px; line-height: 1.5; color: var(--muted); }
+  .cap {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  /* героическая плитка */
+  .marquee {
+    background:
+      radial-gradient(120% 130% at 12% 0%, rgba(124, 92, 255, .34), transparent 62%),
+      radial-gradient(120% 130% at 88% 100%, rgba(34, 211, 238, .26), transparent 60%),
+      var(--tile);
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 14px;
+  }
+
+  .marquee .big {
+    font-size: clamp(38px, 6.4vw, 74px);
+    font-weight: 800;
+    letter-spacing: -.05em;
+    line-height: .94;
+    background: linear-gradient(100deg, #fff, var(--volt-2) 52%, var(--cyan));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    text-wrap: balance;
+  }
+
+  .marquee .under { font-size: 15px; color: var(--ink-2); max-width: 46ch; }
+
+  /* конвейер */
+  .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; width: 100%; }
+
+  .stage {
+    flex: 1 1 128px;
+    background: var(--tile-2);
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    padding: 12px 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+  }
+
+  .stage .k {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+  }
+
+  .stage .n { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
+  .stage .d { font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+  .stage.auto { border-color: rgba(52, 211, 153, .35); }
+  .stage.ai { border-color: rgba(124, 92, 255, .45); background: rgba(124, 92, 255, .07); }
+  .stage.human { border-color: rgba(255, 176, 32, .38); }
+
+  /* список признаков */
+  .feats { display: flex; flex-direction: column; gap: 9px; width: 100%; }
+  .feat { display: grid; grid-template-columns: 18px 1fr; gap: 11px; align-items: start; }
+  .feat .ic { font-size: 14px; line-height: 1.35; }
+  .feat .tx { font-size: 13.5px; color: var(--ink-2); line-height: 1.45; }
+  .feat .tx b { color: var(--ink); font-weight: 600; }
+
+  /* модели */
+  .models { display: flex; flex-direction: column; gap: 7px; width: 100%; }
+  .model {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 12px;
+    align-items: center;
+    padding: 9px 12px;
+    background: var(--tile-2);
+    border-radius: 11px;
+    font-size: 13px;
+  }
+  .model span { color: var(--ink-2); min-width: 0; }
+  .model b { font-family: var(--mono); font-size: 11px; color: var(--volt-2); white-space: nowrap; }
+  .model.off b { color: var(--muted); }
+
+  /* ───────── Сравнение ───────── */
+
+  .versus { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+
+  .vs-card {
+    background: var(--tile);
+    border-radius: var(--r);
+    padding: 24px 26px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .vs-card.ours { background: linear-gradient(168deg, rgba(124, 92, 255, .13), var(--tile) 58%); border: 1px solid rgba(124, 92, 255, .3); }
+  .vs-card.theirs { border: 1px solid var(--line); }
+
+  .vs-name { font-size: 21px; font-weight: 700; letter-spacing: -.025em; }
+  .vs-kind { font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+
+  .rows { display: flex; flex-direction: column; gap: 1px; background: var(--line); border-radius: 16px; overflow: hidden; border: 1px solid var(--line); }
+
+  .row {
+    display: grid;
+    grid-template-columns: 200px 1fr 1fr;
+    gap: 16px;
+    background: var(--tile);
+    padding: 15px 20px;
+    align-items: start;
+  }
+
+  .row.head { background: var(--tile-3); }
+  .row.head span { font-family: var(--mono); font-size: 10.5px; letter-spacing: .15em; text-transform: uppercase; color: var(--muted); }
+  .row .what { font-size: 14px; font-weight: 600; color: var(--ink); }
+  .row .ours { font-size: 13.5px; color: var(--ink-2); }
+  .row .ours b { color: var(--volt-2); font-weight: 600; }
+  .row .theirs { font-size: 13.5px; color: var(--muted); }
+
+  .fair {
+    margin-top: 10px;
+    background: var(--tile);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--amber);
+    border-radius: 14px;
+    padding: 18px 22px;
+  }
+
+  .fair h4 { margin: 0 0 8px; font-size: 15px; font-weight: 600; }
+  .fair p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.55; max-width: 92ch; }
+
+  /* ───────── Готовность ───────── */
+
+  .ready { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+
+  .stage-card {
+    background: var(--tile);
+    border-radius: 16px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .stage-card .top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .stage-card .no { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .stage-card .pct { font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .stage-card .nm { font-size: 14px; font-weight: 600; letter-spacing: -.01em; line-height: 1.3; }
+  .stage-card .track { height: 4px; border-radius: 3px; background: var(--tile-3); overflow: hidden; }
+  .stage-card .track i { display: block; height: 100%; border-radius: 3px; }
+  .stage-card .note { font-size: 11.5px; color: var(--muted); line-height: 1.4; }
+
+  .g-done i { background: var(--green); } .g-done .pct { color: var(--green); }
+  .g-part i { background: var(--amber); } .g-part .pct { color: var(--amber); }
+  .g-open i { background: var(--red); } .g-open .pct { color: var(--red); }
+
+  /* ───────── Перспективы ───────── */
+
+  .horizon { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+
+  .hz {
+    background: var(--tile);
+    border-radius: var(--r);
+    padding: 22px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .hz .when {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .hz.now .when { color: var(--cyan); }
+  .hz.next .when { color: var(--volt-2); }
+  .hz.later .when { color: var(--pink); }
+
+  .hz ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 12px; }
+  .hz li { font-size: 13.5px; color: var(--ink-2); line-height: 1.45; }
+  .hz li b { display: block; color: var(--ink); font-weight: 600; font-size: 14.5px; margin-bottom: 2px; letter-spacing: -.01em; }
+
+  footer {
+    margin-top: 84px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 10px 24px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+
+  @media (max-width: 1000px) {
+    .bento { grid-template-columns: repeat(2, 1fr); }
+    .t.s3, .t.s4, .t.s6 { grid-column: span 2; }
+    .ready, .horizon { grid-template-columns: repeat(2, 1fr); }
+    .row { grid-template-columns: 1fr; gap: 6px; }
+    .row.head { display: none; }
+    .row .ours::before { content: "ORACLE-T · "; font-family: var(--mono); font-size: 11px; color: var(--volt-2); }
+    .row .theirs::before { content: "OPTI · "; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  }
+
+  @media (max-width: 640px) {
+    .bento { grid-template-columns: 1fr; }
+    .t.s2, .t.s3, .t.s4, .t.s6 { grid-column: span 1; }
+    .versus, .ready, .horizon { grid-template-columns: 1fr; }
+  }
+
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="hero">
+    <p class="eyebrow">ООО «МИРТЕК» · система тендерной разведки</p>
+    <h1>ORACLE-T</h1>
+    <p class="thesis">Не находит закупки. Отвечает, идти ли в них — и почему именно так.</p>
+    <div class="hero-meta">
+      <span class="pill"><b>17 559</b> закупок в базе</span>
+      <span class="pill"><b>9</b> площадок опрашиваются</span>
+      <span class="pill"><b>548</b> приборов в каталоге</span>
+      <span class="pill"><b>637</b> автотестов</span>
+      <span class="pill"><b>55 000</b> строк кода</span>
+    </div>
+  </header>
+
+  <section>
+    <div class="sec-head">
+      <p class="sec-tag">Что умеет</p>
+      <h2>Полный путь закупки — от строчки на площадке до решения об участии</h2>
+      <p class="sec-lede">
+        Каждая плитка — работающая функция, проверенная на живых данных 6 сентября,
+        а не пункт плана.
+      </p>
+    </div>
+
+    <div class="bento">
+
+      <div class="t s2">
+        <div class="num volt">12→9</div>
+        <div class="lbl">площадок подключено</div>
+        <div class="hint">ЕИС, Сбербанк-АСТ, Росэлторг, ЭТП ГПБ, Фабрикант, Tektorg, Lot-online, ЕЭТП, ЭТП РФ. Три закрыты аккредитацией на стороне площадок</div>
+      </div>
+
+      <div class="t s2">
+        <div class="num cyan">2×</div>
+        <div class="lbl">опрос в день</div>
+        <div class="hint">09:00 и 14:00 по Москве. Дедупликация внутри площадки и между площадками по реестровому номеру</div>
+      </div>
+
+      <div class="t s2">
+        <div class="num">9</div>
+        <div class="lbl">групп охвата</div>
+        <div class="hint">Поставка, замена, монтаж, поверка, обслуживание, АСКУЭ, комплексные услуги — у каждой свои коды ОКПД2 и слова-исключения</div>
+      </div>
+
+      <div class="t s6 tall marquee">
+        <p class="cap">Ядро продукта</p>
+        <div class="big">Матрица соответствия<br>по 13 производителям</div>
+        <p class="under">
+          Система знает не только закупку, но и приборы. Каждое требование тендера сверяется
+          с характеристиками счётчиков МИРТЕК и двенадцати конкурентов — в один расчёт
+          481 ячейка со статусом, пояснением, источником и меткой уверенности.
+        </p>
+      </div>
+
+      <div class="t s2">
+        <div class="num pink">22 160</div>
+        <div class="lbl">характеристик приборов</div>
+        <div class="hint">13 групп, 146 полей: метрология, интерфейсы, протоколы обмена, совместимость с ИВК и АСКУЭ</div>
+      </div>
+
+      <div class="t s2">
+        <div class="num">632</div>
+        <div class="lbl">типа СИ из Госреестра</div>
+        <div class="hint">ФГИС «Аршин»: описания типа, межповерочный интервал, срок действия, допустимые модификации</div>
+      </div>
+
+      <div class="t s2">
+        <div class="num cyan">9</div>
+        <div class="lbl">сайтов производителей</div>
+        <div class="hint">Энергомера, Тайпит, Нартис, Милур, WAVIoT, Ротек, КПЗ, Промэнерго, МИРТЕК — обход каталогов еженедельно</div>
+      </div>
+
+      <div class="t s3 tall">
+        <p class="cap">Карточка закупки</p>
+        <div class="lbl" style="font-size:17px">Девять вкладок вместо девяти вкладок браузера</div>
+        <div class="feats" style="margin-top:4px">
+          <div class="feat"><span class="ic">◆</span><span class="tx"><b>Дополнительно</b> — 9 разделов условий, извлечённых из документации: лицензии и СРО, требования к участнику, условия контракта, состав заявки</span></div>
+          <div class="feat"><span class="ic">◆</span><span class="tx"><b>Конкуренция</b> — та самая матрица с охватом «учтено N из M»</span></div>
+          <div class="feat"><span class="ic">◆</span><span class="tx"><b>Документы</b> — с автоклассификацией: ТЗ, проект договора, извещение, протокол</span></div>
+          <div class="feat"><span class="ic">◆</span><span class="tx"><b>Заявка</b> — состав пакета и чего в нём не хватает прямо сейчас</span></div>
+        </div>
+      </div>
+
+      <div class="t s3 tall">
+        <p class="cap">Разбор документации</p>
+        <div class="lbl" style="font-size:17px">Читает то, что присылают, а не то, что удобно</div>
+        <div class="feats" style="margin-top:4px">
+          <div class="feat"><span class="ic">◆</span><span class="tx">PDF, DOCX, XLSX, RTF и <b>устаревший .doc</b> — своим разбором, без внешних конвертеров</span></div>
+          <div class="feat"><span class="ic">◆</span><span class="tx"><b>Сканы распознаются</b>: у актов и приложений часто нет текстового слоя</span></div>
+          <div class="feat"><span class="ic">◆</span><span class="tx"><b>Архив внутри архива</b> — техзадание регулярно лежит в zip внутри rar; без распаковки анализ давал ноль требований</span></div>
+          <div class="feat"><span class="ic">◆</span><span class="tx">Порядок разбора важен: техзадание читается первым, чтобы не попасть под обрезку длины</span></div>
+        </div>
+      </div>
+
+      <div class="t s2">
+        <div class="num green">19+5</div>
+        <div class="lbl">полей выгрузки в Excel</div>
+        <div class="hint">В точном порядке приложения D ТЗ, с подсветкой сроков и оценок, фильтрами и ссылками. 0,19 секунды на 200 закупок</div>
+      </div>
+
+      <div class="t s2">
+        <div class="num">4</div>
+        <div class="lbl">повода для письма</div>
+        <div class="hint">Новая релевантная закупка, высокая AI-оценка, близкий срок подачи, критическая ошибка. Плюс ручная рассылка по адресатам</div>
+      </div>
+
+      <div class="t s2">
+        <div class="num amber">CRM</div>
+        <div class="lbl">выгрузка лидов Bitrix24</div>
+        <div class="hint">Готовые лиды и CSV, внешний API с отдельными ключами для сторонних систем</div>
+      </div>
+
+      <div class="t s3">
+        <p class="cap">Работа команды</p>
+        <div class="lbl" style="font-size:16px">Канбан по этапам сделки</div>
+        <div class="hint">Новая → На проверке → Заявка подана → Выиграли / Проиграли. Ответственный на закупке, комментарии, исправление классификации. Каждое действие — в журнале с именем сотрудника</div>
+      </div>
+
+      <div class="t s3">
+        <p class="cap">Аналитика</p>
+        <div class="lbl" style="font-size:16px">228,4 млрд ₽ в поле зрения</div>
+        <div class="hint">Динамика по месяцам, распределение по регионам, топ заказчиков, средняя AI-оценка и средний процент соответствия. Два справочника — 89 регионов и 8 федеральных округов — с ответственными менеджерами</div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="sec-tag">Искусственный интеллект</p>
+      <h2>Восемь задач для модели — и четыре, куда её сознательно не пустили</h2>
+      <p class="sec-lede">
+        Уровень интеграции измеряется не количеством вызовов, а тем, где проходит граница.
+        ИИ отвечает там, где нужно суждение; там, где нужна воспроизводимость, работает алгоритм.
+      </p>
+    </div>
+
+    <div class="bento">
+
+      <div class="t s4 tall">
+        <p class="cap">Где работает Yandex AI Studio</p>
+        <div class="models" style="margin-top:6px">
+          <div class="model"><span>Отбор «наша закупка или нет»</span><b>1 вызов</b></div>
+          <div class="model"><span>Тип конкурса, ОКПД2, регион, краткое описание</span><b>1 вызов</b></div>
+          <div class="model"><span>Извлечение требований к прибору с критичностью</span><b>1 вызов</b></div>
+          <div class="model"><span>Сопоставление требования с характеристикой по смыслу</span><b>пачками</b></div>
+          <div class="model"><span>Оценка «Задача» и «Компетенции» с обоснованиями</span><b>2 вызова</b></div>
+          <div class="model"><span>Девять разделов условий закупки</span><b>2 вызова</b></div>
+          <div class="model"><span>Характеристики из руководств производителей</span><b>по кнопке</b></div>
+          <div class="model"><span>Векторы похожих закупок · Embeddings API</span><b>1 вызов</b></div>
+        </div>
+      </div>
+
+      <div class="t s2 tall">
+        <p class="cap">Строгий вывод</p>
+        <div class="lbl" style="font-size:17px">Модель не сочиняет структуру</div>
+        <div class="hint">
+          Каждый ответ описан схемой, все поля обязательны, значений по умолчанию нет.
+          Модель не может «забыть» вернуть обоснование — а мы не можем принять пустое поле
+          за ноль. Длинная генерация разбита на пачки, чтобы ответ не оборвался на лимите.
+        </div>
+      </div>
+
+      <div class="t s3 tall">
+        <p class="cap">Двухслойный отбор</p>
+        <div class="lbl" style="font-size:17px">Сначала слова, потом модель</div>
+        <div class="hint">
+          Профиль ключевых слов — бесплатный и слепой — прогоняется по всему потоку:
+          из 17 559 закупок проходят 4 312. Модель включается только на них и отвечает
+          на один вопрос: правда ли это наше.
+        </div>
+        <div class="hint" style="color:var(--ink-2);margin-top:2px">
+          На боевой проверке из 20 прошедших слова закупок модель подтвердила
+          <b style="color:var(--green)">16</b> и отклонила <b style="color:var(--red)">4</b> —
+          все четыре оказались стройкой, где приборы учёта лишь упомянуты в составе объекта.
+        </div>
+      </div>
+
+      <div class="t s3 tall">
+        <p class="cap">Куда ИИ не пустили — и почему</p>
+        <div class="feats" style="margin-top:2px">
+          <div class="feat"><span class="ic" style="color:var(--amber)">✕</span><span class="tx"><b>Регион заказчика.</b> Это справочное соответствие, а не суждение: адрес, ИНН, справочник. Модель здесь медленнее, дороже и способна выдумать регион</span></div>
+          <div class="feat"><span class="ic" style="color:var(--amber)">✕</span><span class="tx"><b>Код ОКПД2.</b> Берётся из таблицы лотов карточки и перезаписывает найденное в тексте: достоверный источник должен побеждать догадку</span></div>
+          <div class="feat"><span class="ic" style="color:var(--amber)">✕</span><span class="tx"><b>Формула процента.</b> Веса по критичности и арифметика — код, а не модель: одинаковый вход всегда даёт одинаковый ответ</span></div>
+          <div class="feat"><span class="ic" style="color:var(--amber)">✕</span><span class="tx"><b>Финальное решение.</b> Система даёт оценку, вердикт и уверенность. Идти или нет — решает человек</span></div>
+        </div>
+      </div>
+
+      <div class="t s6">
+        <p class="cap">Правило, которое отличает систему от красивой демонстрации</p>
+        <div class="lbl" style="font-size:19px;letter-spacing:-.02em">«Нет данных» никогда не превращается в ноль</div>
+        <div class="hint" style="max-width:none">
+          Сбой сети или кончившаяся квота оставляют закупку непроверенной, а не «нерелевантной» —
+          иначе наша авария прячет чужой тендер. Требование без данных исключается из знаменателя,
+          а не считается невыполненным. Измерение «История» отказывается считать долю побед,
+          если вся выборка пришла из реестра контрактов, где по устройству есть только победы:
+          иначе получилось бы 100 % — цифра убедительная и бессмысленная.
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="sec-tag">Автоматизация</p>
+      <h2>Семь заданий по расписанию и конвейер, который доводит закупку до оценки</h2>
+      <p class="sec-lede">
+        Зелёное идёт само, фиолетовое — с участием модели, жёлтое остаётся человеку.
+        Тяжёлые расчёты уходят в фоновую очередь: пользователь видит статус задачи, а не песочные часы.
+      </p>
+    </div>
+
+    <div class="bento">
+
+      <div class="t s6" style="min-height:auto;padding:22px 20px">
+        <div class="flow">
+          <div class="stage auto"><span class="k" style="color:var(--green)">авто</span><span class="n">Сбор</span><span class="d">9 площадок, 2 раза в день, дедупликация</span></div>
+          <div class="stage auto"><span class="k" style="color:var(--green)">авто</span><span class="n">Профиль слов</span><span class="d">9 групп с исключениями, бесплатно</span></div>
+          <div class="stage ai"><span class="k" style="color:var(--volt-2)">ии</span><span class="n">Отбор</span><span class="d">до 25 новых закупок сразу после сбора</span></div>
+          <div class="stage auto"><span class="k" style="color:var(--green)">авто</span><span class="n">Документы</span><span class="d">скачивание, архивы, распознавание сканов</span></div>
+          <div class="stage ai"><span class="k" style="color:var(--volt-2)">ии</span><span class="n">Требования</span><span class="d">извлечение, критичность, ОКПД2, регион</span></div>
+          <div class="stage ai"><span class="k" style="color:var(--volt-2)">ии</span><span class="n">Матрица</span><span class="d">13 производителей, 3 источника данных</span></div>
+          <div class="stage ai"><span class="k" style="color:var(--volt-2)">ии</span><span class="n">Оценка</span><span class="d">вердикт, слабые места, стратегия</span></div>
+          <div class="stage human"><span class="k" style="color:var(--amber)">человек</span><span class="n">Решение</span><span class="d">этап сделки, ответственный, заявка</span></div>
+        </div>
+      </div>
+
+      <div class="t s2">
+        <div class="num green">10 с</div>
+        <div class="lbl">AI-оценка закупки</div>
+        <div class="hint">При норме ТЗ «до 5 минут». Матрица соответствия — 7 минут при норме 20</div>
+      </div>
+
+      <div class="t s2">
+        <div class="num">7</div>
+        <div class="lbl">заданий по расписанию</div>
+        <div class="hint">Опрос площадок, письма о сроках, ревалидация ФГИС, обход сайтов производителей, очередь каталога, чистка журнала, пинг доступности</div>
+      </div>
+
+      <div class="t s2">
+        <div class="num cyan">60 с</div>
+        <div class="lbl">проверка площадок</div>
+        <div class="hint">Каждую минуту: доступна, недоступна, заблокирована. Падение одной площадки не останавливает остальные, три повтора с нарастающей паузой</div>
+      </div>
+
+      <div class="t s3">
+        <p class="cap">Что человек больше не делает руками</p>
+        <div class="feats">
+          <div class="feat"><span class="ic" style="color:var(--green)">✓</span><span class="tx">Не открывает девять площадок по очереди и не сверяет, не тот же ли это тендер</span></div>
+          <div class="feat"><span class="ic" style="color:var(--green)">✓</span><span class="tx">Не скачивает архивы, чтобы найти техзадание на пятнадцатой странице приложения</span></div>
+          <div class="feat"><span class="ic" style="color:var(--green)">✓</span><span class="tx">Не выписывает характеристики конкурентов в таблицу перед каждой закупкой</span></div>
+          <div class="feat"><span class="ic" style="color:var(--green)">✓</span><span class="tx">Не собирает отчёт для руководителя — выгрузка готова в его форме</span></div>
+        </div>
+      </div>
+
+      <div class="t s3">
+        <p class="cap">Что осталось за человеком — намеренно</p>
+        <div class="feats">
+          <div class="feat"><span class="ic" style="color:var(--amber)">→</span><span class="tx">Решение об участии: система показывает вердикт и уверенность, но не подаёт заявку</span></div>
+          <div class="feat"><span class="ic" style="color:var(--amber)">→</span><span class="tx">Подтверждение данных каталога: 47 ячеек из 481 помечены «проверить человеком»</span></div>
+          <div class="feat"><span class="ic" style="color:var(--amber)">→</span><span class="tx">Коды средств измерений конкурентов — автопоиск предлагает, человек утверждает</span></div>
+          <div class="feat"><span class="ic" style="color:var(--amber)">→</span><span class="tx">Профиль компании: реквизиты и бланк вводятся только вручную</span></div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="sec-tag">Сравнение</p>
+      <h2>ORACLE-T против OPTI</h2>
+      <p class="sec-lede">
+        OPTI — внешний сервис тендерной аналитики, который брали за образец интерфейса.
+        Он универсален: одинаково работает для поставщика счётчиков и поставщика спецодежды.
+        Отсюда и разница.
+      </p>
+    </div>
+
+    <div class="versus" style="margin-bottom:10px">
+      <div class="vs-card ours">
+        <div>
+          <p class="vs-kind">Ваша система</p>
+          <p class="vs-name" style="margin:6px 0 0">ORACLE-T</p>
+        </div>
+        <p class="hint" style="font-size:13.5px;color:var(--ink-2)">
+          Знает не только рынок закупок, но и приборы: 548 моделей, 22 160 характеристик,
+          632 типа из Госреестра. Данные и код принадлежат МИРТЕК, база стоит на вашем сервере,
+          логика меняется под ваш процесс.
+        </p>
+      </div>
+      <div class="vs-card theirs">
+        <div>
+          <p class="vs-kind">Внешний сервис</p>
+          <p class="vs-name" style="margin:6px 0 0">OPTI</p>
+        </div>
+        <p class="hint" style="font-size:13.5px">
+          Универсальный агрегатор закупок по подписке. Готов к работе сразу, ничего
+          не нужно разворачивать. Про счётчики электроэнергии знает ровно столько же,
+          сколько про любой другой товар.
+        </p>
+      </div>
+    </div>
+
+    <div class="rows">
+      <div class="row head"><span>Что сравниваем</span><span>ORACLE-T</span><span>OPTI</span></div>
+
+      <div class="row">
+        <div class="what">Знание продукции</div>
+        <div class="ours"><b>Каталог из 548 приборов</b> МИРТЕК и 12 конкурентов, собранный из Госреестра СИ и с сайтов производителей</div>
+        <div class="theirs">Нет. Сервис работает с текстом закупки, а не с характеристиками счётчиков</div>
+      </div>
+
+      <div class="row">
+        <div class="what">Сравнение с конкурентами</div>
+        <div class="ours"><b>Матрица по 13 производителям</b> с пояснением по каждому требованию и указанием источника: описание типа, каталог, руководство пользователя</div>
+        <div class="theirs">Нет. Кто ещё подходит под это ТЗ — вопрос, который сервис не задаёт</div>
+      </div>
+
+      <div class="row">
+        <div class="what">Прослеживаемость оценки</div>
+        <div class="ours"><b>Ссылка на источник у каждого измерения</b> — конкретное требование, документ, поле профиля. Плюс снимок профиля компании на момент расчёта: старая оценка воспроизводима</div>
+        <div class="theirs">Оценка показывается как готовое число</div>
+      </div>
+
+      <div class="row">
+        <div class="what">История участий</div>
+        <div class="ours"><b>Реестр контрактов ЕИС по ИНН</b> — открытый источник, без ключей и подписок</div>
+        <div class="theirs">Свои данные внутри сервиса. Публичного API и токенов нам не дают — только сессия чужого браузера</div>
+      </div>
+
+      <div class="row">
+        <div class="what">Честность метрик</div>
+        <div class="ours"><b>Отказывается считать</b> долю побед по выборке, где есть только победы, и пишет об этом в интерфейсе</div>
+        <div class="theirs">Показывает агрегаты без пояснения, как они собраны</div>
+      </div>
+
+      <div class="row">
+        <div class="what">Охват поиска</div>
+        <div class="ours"><b>9 групп потребностей</b> с исключениями по смежным сферам: газ, вода, тепло, связь, медицина. Паритет с эталоном, но правится под вас</div>
+        <div class="theirs">9 групп в профиле МИРТЕК, менять — через поддержку сервиса</div>
+      </div>
+
+      <div class="row">
+        <div class="what">Глубина разбора</div>
+        <div class="ours"><b>Архивы внутри архивов, сканы, .doc</b> — техзадание достаётся оттуда, где оно реально лежит</div>
+        <div class="theirs">Карточка закупки и приложенные файлы</div>
+      </div>
+
+      <div class="row">
+        <div class="what">Данные и интеграции</div>
+        <div class="ours"><b>База у вас</b>. Excel по форме МИРТЕК, лиды для Bitrix24, внешний API для смежных систем</div>
+        <div class="theirs">Данные у поставщика услуги, выгрузка в его форматах</div>
+      </div>
+
+      <div class="row">
+        <div class="what">Стоимость владения</div>
+        <div class="ours"><b>Разовая разработка</b> плюс оплата вызовов модели по факту</div>
+        <div class="theirs">Подписка, растущая с числом пользователей и площадок</div>
+      </div>
+    </div>
+
+    <div class="fair">
+      <h4>Где OPTI пока впереди — честно</h4>
+      <p>
+        Статистика по нишам: кто обычно выигрывает такие закупки, типичное снижение цены,
+        сколько бывает участников. У нас эта таблица создана, но пуста — источник агрегатов
+        закрыт, и наполнять её придётся собственным расчётом по протоколам ЕИС.
+        Плюс сам факт готовности: OPTI работает сегодня и не требует сервера, тогда как
+        ORACLE-T ещё нужно развернуть. Это разрыв в неделях, а не в возможностях.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="sec-tag">Степень готовности</p>
+      <h2>Тринадцать этапов из пятнадцати закрыты</h2>
+      <p class="sec-lede">
+        Оценка учитывает и написанный код, и то, что этап реально отработал на данных.
+        Проценты сняты 6 сентября при внешней ревизии на рабочей базе.
+      </p>
+    </div>
+
+    <div class="ready">
+      <div class="stage-card g-done"><div class="top"><span class="no">Этап 0</span><span class="pct">95%</span></div><div class="nm">Инфраструктура</div><div class="track"><i style="width:95%"></i></div><div class="note">36 миграций, 22 таблицы, журнал, проверка здоровья</div></div>
+      <div class="stage-card g-done"><div class="top"><span class="no">Этап 1</span><span class="pct">100%</span></div><div class="nm">Роли и доступ</div><div class="track"><i style="width:100%"></i></div><div class="note">Администратор и пользователь, блокировка, 56 точек проверки прав</div></div>
+      <div class="stage-card g-done"><div class="top"><span class="no">Этап 2</span><span class="pct">85%</span></div><div class="nm">Сбор закупок</div><div class="track"><i style="width:85%"></i></div><div class="note">9 адаптеров, расписание, дедупликация между площадками</div></div>
+      <div class="stage-card g-part"><div class="top"><span class="no">Этап 3</span><span class="pct">70%</span></div><div class="nm">Разбор документов</div><div class="track"><i style="width:70%"></i></div><div class="note">Все форматы работают, прогнано на 30 закупках из 17 559</div></div>
+      <div class="stage-card g-done"><div class="top"><span class="no">Этап 4</span><span class="pct">95%</span></div><div class="nm">Каталог продукции</div><div class="track"><i style="width:95%"></i></div><div class="note">ФГИС и 9 сайтов, импорт из файла, правка вручную</div></div>
+      <div class="stage-card g-part"><div class="top"><span class="no">Этап 5</span><span class="pct">65%</span></div><div class="nm">ИИ-анализ требований</div><div class="track"><i style="width:65%"></i></div><div class="note">Логика готова, массовый прогон не запускался</div></div>
+      <div class="stage-card g-part"><div class="top"><span class="no">Этап 6</span><span class="pct">75%</span></div><div class="nm">Сопоставление и оценка</div><div class="track"><i style="width:75%"></i></div><div class="note">Матрица и оценка считаются; «История» ждёт данных</div></div>
+      <div class="stage-card g-done"><div class="top"><span class="no">Этап 7</span><span class="pct">92%</span></div><div class="nm">Список и карточка</div><div class="track"><i style="width:92%"></i></div><div class="note">Три режима, девять вкладок, действия в журнале</div></div>
+      <div class="stage-card g-done"><div class="top"><span class="no">Этап 8</span><span class="pct">92%</span></div><div class="nm">Аналитика и настройки</div><div class="track"><i style="width:92%"></i></div><div class="note">Восемь разделов настроек, профиль компании заполнен</div></div>
+      <div class="stage-card g-done"><div class="top"><span class="no">Этап 9</span><span class="pct">100%</span></div><div class="nm">Выгрузка в Excel</div><div class="track"><i style="width:100%"></i></div><div class="note">19 обязательных полей плюс пять дополнительных</div></div>
+      <div class="stage-card g-done"><div class="top"><span class="no">Этап 10</span><span class="pct">95%</span></div><div class="nm">Уведомления</div><div class="track"><i style="width:95%"></i></div><div class="note">Четыре триггера, почта настроена, журнал отправок</div></div>
+      <div class="stage-card g-done"><div class="top"><span class="no">Этап 11</span><span class="pct">90%</span></div><div class="nm">Журнал и устойчивость</div><div class="track"><i style="width:90%"></i></div><div class="note">3 441 запись, изоляция сбоев, повторы с паузой</div></div>
+      <div class="stage-card g-part"><div class="top"><span class="no">Этап 12</span><span class="pct">75%</span></div><div class="nm">Расширение площадок</div><div class="track"><i style="width:75%"></i></div><div class="note">Три площадки закрыты аккредитацией и защитой от роботов</div></div>
+      <div class="stage-card g-done"><div class="top"><span class="no">Этап 13</span><span class="pct">100%</span></div><div class="nm">Задел под Bitrix24</div><div class="track"><i style="width:100%"></i></div><div class="note">Лиды, CSV, ключи внешнего API</div></div>
+      <div class="stage-card g-open"><div class="top"><span class="no">Этап 14</span><span class="pct">35%</span></div><div class="nm">Развёртывание на сервере</div><div class="track"><i style="width:35%"></i></div><div class="note">Документация есть, боевого контура нет — главная оставшаяся работа</div></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="sec-tag">Перспективы</p>
+      <h2>Что даёт следующий месяц, квартал и год</h2>
+      <p class="sec-lede">
+        В ближайшем горизонте нет ни одной задачи вида «дописать функцию»: всё, что осталось, —
+        это запуск, данные и эксплуатация.
+      </p>
+    </div>
+
+    <div class="horizon">
+
+      <div class="hz now">
+        <p class="when">Две недели · запуск</p>
+        <ul>
+          <li><b>Прогон по всей базе</b>Документы и анализ по 4 312 отобранным закупкам вместо нынешних 30. Только после этого качество извлечения можно измерять, а не предполагать</li>
+          <li><b>Векторное расширение базы</b>Ставится до массового расчёта, иначе поиск похожих закупок на 17 тысячах записей встанет</li>
+          <li><b>Боевой сервер</b>Автозапуск, резервные копии, оповещение о падении. Расписание «два раза в день» имеет смысл только на постоянно включённой машине</li>
+        </ul>
+      </div>
+
+      <div class="hz next">
+        <p class="when">Квартал · глубина</p>
+        <ul>
+          <li><b>Измерение «История» заработает</b>Своя статистика по нишам из протоколов ЕИС: кто выигрывает такие закупки, типичное снижение цены, сколько участников. Это же закрывает единственное преимущество OPTI</li>
+          <li><b>Автосборка заявки</b>Состав пакета система уже знает и видит, чего не хватает. Следующий шаг — подставлять реквизиты и бланк в готовые формы</li>
+          <li><b>Живая интеграция с Bitrix24</b>Не выгрузка файла, а сделка, которая создаётся сама и обновляет этап</li>
+          <li><b>Три закрытые площадки</b>Подключаются за день каждая, как только появится аккредитация</li>
+        </ul>
+      </div>
+
+      <div class="hz later">
+        <p class="when">Год · преимущество</p>
+        <ul>
+          <li><b>Прогноз вместо оценки</b>Когда накопятся исходы своих закупок, процент победы считает обученная модель на признаках «соответствие, цена, прошлые поставки этому заказчику», а не формула</li>
+          <li><b>Двадцать площадок застройщиков</b>ПС Фонд, ЛСР, ФСК, Эталон, Setl и другие — заведены в справочник и ждут доступа</li>
+          <li><b>Каталог как актив</b>22 160 характеристик по 13 производителям — это готовая база для отдела продаж и маркетинга, а не только для тендеров</li>
+          <li><b>Другие ресурсы учёта</b>Архитектура каталога не привязана к электричеству: вода, газ и тепло добавляются как типы приборов</li>
+        </ul>
+      </div>
+
+    </div>
+  </section>
+
+  <footer>
+    <span>ORACLE-T · система автоматизированного сбора и анализа тендерной информации</span>
+    <span>Данные ревизии от 06.09.2026 · ТЗ вер. 3.3</span>
+  </footer>
+
+</div>
+
+</body>
+</html>

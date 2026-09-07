@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "oracle-t-frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "oracle-t/frontend", "--", "--port", "5173", "--strictPort"],
+      "port": 5173
+    }
+  ]
+}

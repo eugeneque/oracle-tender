@@ -1,0 +1,60 @@
+"""Waviot, РиМ, Милур, Инкотекс, НПО МИР и Пульсар как источники справочника продукции
+
+Третья волна сайтов производителей. Отдельной миграцией по той же причине, что и предыдущие
+волны: на базах, где 0034 уже применена, повторное сидирование упало бы на уникальном
+`sources.key`.
+
+Revision ID: 0036_wave3_catalog_sources
+Revises: 0035_document_extraction_version
+Create Date: 2026-09-06
+
+"""
+
+from typing import Sequence, Union
+
+import sqlalchemy as sa
+from alembic import op
+
+from app.seed.sources_data import COMPETITOR_CATALOG_SOURCES_WAVE3
+
+revision: str = "0036_wave3_catalog_sources"
+down_revision: Union[str, None] = "0035_document_extraction_version"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    sources = sa.table(
+        "sources",
+        sa.column("key", sa.String),
+        sa.column("name", sa.String),
+        sa.column("url", sa.String),
+        sa.column("type", sa.String),
+        sa.column("status", sa.String),
+        sa.column("polling_schedule", sa.String),
+        sa.column("adapter_key", sa.String),
+        sa.column("adapter_status", sa.String),
+        sa.column("note", sa.Text),
+    )
+    op.bulk_insert(
+        sources,
+        [
+            {
+                "key": key,
+                "name": name,
+                "url": url,
+                "type": type_,
+                "status": "active",
+                "polling_schedule": schedule,
+                "adapter_key": adapter_key,
+                "adapter_status": adapter_status,
+                "note": note,
+            }
+            for key, name, url, type_, adapter_key, adapter_status, schedule, note in COMPETITOR_CATALOG_SOURCES_WAVE3
+        ],
+    )
+
+
+def downgrade() -> None:
+    keys = tuple(item[0] for item in COMPETITOR_CATALOG_SOURCES_WAVE3)
+    op.execute(f"DELETE FROM sources WHERE key IN {keys}")

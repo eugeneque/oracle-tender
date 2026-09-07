@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+logs/
+storage/
+backend/logs/
+node_modules/
+frontend/dist/
+.DS_Store
+*.egg-info/
+.credentials_key

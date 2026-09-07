@@ -1,0 +1,33 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqlalchemy==2.0.36
+alembic==1.14.0
+psycopg2-binary==2.9.10
+pydantic==2.10.4
+pydantic-settings==2.7.0
+passlib[argon2]==1.7.4
+# Шифрование учётных данных площадок (app/core/crypto.py). Приходит и транзитивно, но
+# зависимость объявлена явно: от неё зависит читаемость уже сохранённых паролей.
+cryptography==50.0.1
+argon2-cffi==23.1.0
+pyjwt==2.10.1
+loguru==0.7.3
+python-multipart==0.0.20
+apscheduler==3.11.0
+httpx==0.28.1
+beautifulsoup4==4.12.3
+lxml==5.3.0
+playwright==1.49.1
+pdfplumber==0.11.4
+pytesseract==0.3.13
+python-docx==1.1.2
+openpyxl==3.1.5
+# Старые форматы документации площадок (раздел 5.2 ТЗ). Внешние конвертеры (antiword/catdoc)
+# больше не поставляются в Homebrew, LibreOffice ради одного формата — полтора гигабайта в
+# образе, поэтому .doc разбирается своим кодом поверх olefile (app/services/doc_binary.py).
+xlrd==2.0.2
+striprtf==0.0.33
+olefile==0.47
+# 7z-архивы документации (Росэлторг, Lot-online) — чистый Python, без внешнего бинарника.
+py7zr==0.22.0
+yandex-ai-studio-sdk==0.22.1

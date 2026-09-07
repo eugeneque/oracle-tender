@@ -1,0 +1,165 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family:
+    "Inter",
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  background-color: #09090b;
+  color: #e4e4e7;
+}
+
+::selection {
+  background-color: rgba(99, 102, 241, 0.35);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: #3f3f46;
+  border-radius: 8px;
+}
+
+
+/* --- Светящаяся сфера ИИ (см. src/components/AiOrb.tsx) --------------------------------
+   Цветные пятна крутятся внутри круглой маски; кольцо сверху даёт край сферы. Размытие
+   задаётся в процентах от размера, поэтому один и тот же класс одинаково выглядит и на
+   иконке 28px, и на крупной сфере в шапке блока. */
+.ai-orb {
+  position: relative;
+  border-radius: 9999px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: radial-gradient(circle at 50% 50%, rgba(24, 24, 27, 0.9), rgba(9, 9, 11, 1));
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 0 18px rgba(129, 140, 248, 0.35),
+    inset 0 0 12px rgba(255, 255, 255, 0.06);
+}
+
+.ai-orb__blob {
+  position: absolute;
+  inset: -30%;
+  border-radius: 9999px;
+  filter: blur(6px);
+  opacity: 0.85;
+  transform-origin: 50% 50%;
+}
+
+.ai-orb__blob--pink {
+  background: radial-gradient(circle at 35% 35%, rgba(244, 114, 182, 0.95), transparent 55%);
+  animation: ai-orb-spin 7s linear infinite;
+}
+
+.ai-orb__blob--blue {
+  background: radial-gradient(circle at 65% 60%, rgba(125, 211, 252, 0.9), transparent 55%);
+  /* Обратное направление и другая длительность: одинаковое вращение читалось бы как один
+     статичный градиент, который просто крутится. */
+  animation: ai-orb-spin 11s linear infinite reverse;
+}
+
+.ai-orb__blob--violet {
+  background: radial-gradient(circle at 50% 75%, rgba(167, 139, 250, 0.85), transparent 60%);
+  animation: ai-orb-spin 15s linear infinite;
+}
+
+.ai-orb__ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
+    inset 0 0 14px rgba(186, 230, 253, 0.35);
+}
+
+.ai-orb[data-busy="true"] {
+  animation: ai-orb-pulse 1.6s ease-in-out infinite;
+}
+
+.ai-orb[data-busy="true"] .ai-orb__blob--pink { animation-duration: 2.4s; }
+.ai-orb[data-busy="true"] .ai-orb__blob--blue { animation-duration: 3.2s; }
+.ai-orb[data-busy="true"] .ai-orb__blob--violet { animation-duration: 4s; }
+
+@keyframes ai-orb-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes ai-orb-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 0 18px rgba(129,140,248,0.35); }
+  50% { box-shadow: 0 0 0 1px rgba(255,255,255,0.14), 0 0 30px rgba(244,114,182,0.55); }
+}
+
+/* Полоса-волна в шапке ИИ-блока: тот же набор цветов, но растянутый по горизонтали. */
+.ai-wave {
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(120deg,
+      rgba(244, 114, 182, 0.16) 0%,
+      rgba(167, 139, 250, 0.16) 35%,
+      rgba(125, 211, 252, 0.16) 70%,
+      rgba(244, 114, 182, 0.16) 100%);
+  background-size: 300% 100%;
+  animation: ai-wave-slide 12s linear infinite;
+}
+
+@keyframes ai-wave-slide {
+  from { background-position: 0% 50%; }
+  to { background-position: 300% 50%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-orb__blob,
+  .ai-orb[data-busy="true"],
+  .ai-wave {
+    animation: none;
+  }
+}
+
+/*
+ * Тело письма — в редакторе рассылки и в просмотре журнала уведомлений.
+ *
+ * Tailwind preflight снимает у списков маркеры, а у заголовков — размер: это правильно для
+ * интерфейса, где всё оформляется классами, и неправильно здесь. Разметку письма ставит
+ * администратор кнопками редактора, классов на ней нет, и без этих правил маркированный
+ * список выглядел бы обычным абзацем — то есть не так, как придёт получателю.
+ *
+ * Набор селекторов повторяет белый список тегов из app/services/email_html.py: всё, что
+ * может уйти в письмо, должно быть видно и здесь.
+ */
+.letter-body h1 { font-size: 1.25rem; font-weight: 600; margin: 0.6em 0 0.3em; }
+.letter-body h2 { font-size: 1.1rem; font-weight: 600; margin: 0.6em 0 0.3em; }
+.letter-body h3 { font-size: 1rem; font-weight: 600; margin: 0.6em 0 0.3em; }
+.letter-body p { margin: 0.4em 0; }
+.letter-body ul { list-style: disc; padding-left: 1.4em; margin: 0.4em 0; }
+.letter-body ol { list-style: decimal; padding-left: 1.6em; margin: 0.4em 0; }
+.letter-body li { margin: 0.15em 0; }
+.letter-body a { color: #a5b4fc; text-decoration: underline; }
+.letter-body blockquote {
+  margin: 0.5em 0;
+  padding-left: 0.8em;
+  border-left: 2px solid rgba(255, 255, 255, 0.15);
+  color: #a1a1aa;
+}
+.letter-body pre,
+.letter-body code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+.letter-body hr { margin: 0.8em 0; border-color: rgba(255, 255, 255, 0.12); }

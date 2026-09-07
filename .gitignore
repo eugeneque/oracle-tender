@@ -1,0 +1,33 @@
+# --- Секреты ---
+.env
+.env.*
+!.env.example
+*.credentials_key
+.credentials_key
+
+# --- macOS ---
+.DS_Store
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Node ---
+node_modules/
+frontend/dist/
+oracle-t/frontend/dist/
+*.tsbuildinfo
+
+# --- Данные и артефакты рантайма ---
+logs/
+storage/
+oracle-t/backend/logs/
+oracle-t/backend/storage/
+transcriber/out/
+*.log
