@@ -1,9 +1,0 @@
-faster-whisper==1.1.1
-torch==2.6.0
-torchaudio==2.6.0
-pyannote.audio==3.3.2
-speechbrain==1.0.2
-scikit-learn==1.6.1
-numpy<2.2
-huggingface-hub<1.0
-requests

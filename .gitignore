@@ -29,5 +29,8 @@ logs/
 storage/
 oracle-t/backend/logs/
 oracle-t/backend/storage/
-transcriber/out/
 *.log
+
+# --- Вне скоупа сканера тендеров ---
+transcriber/
+ТЗ/
