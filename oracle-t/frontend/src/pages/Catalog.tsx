@@ -28,9 +28,16 @@ import type {
   Manufacturer,
   ManualExtractionOutcome,
   Product,
+  ProductDocumentation,
+  ProductSupport,
   SiType,
 } from "../api/types";
 import { AppShell } from "../components/AppShell";
+import { CatalogDocumentsSection } from "../components/catalog/CatalogDocumentsSection";
+import { RegistryLearningSection } from "../components/catalog/RegistryLearningSection";
+import { UpperSoftwareSection } from "../components/catalog/UpperSoftwareSection";
+import { ProductRegistrySection } from "../components/catalog/ProductRegistrySection";
+import { formatDate } from "../utils/format";
 import { PageHeader } from "../components/PageHeader";
 import { useAuth } from "../context/useAuth";
 
@@ -39,6 +46,7 @@ const SOURCE_LABELS: Record<string, string> = {
   manufacturer_site: "сайт производителя",
   user_manual: "руководство пользователя",
   manual_entry: "введено вручную",
+  web_search: "поиск в интернете (официальный сайт)",
 };
 
 const SI_SOURCE_LABELS: Record<string, string> = {
@@ -78,6 +86,10 @@ export function CatalogPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
   const [characteristics, setCharacteristics] = useState<Characteristic[]>([]);
+  // В каких списках ПО верхнего уровня есть выбранная модель (замечание тестировщика
+  // 16.09.2026). Рядом с характеристиками, потому что на вопрос «интегрирован ли прибор
+  // в Пирамиду» отвечают именно здесь, а не в блоке площадок.
+  const [productSupport, setProductSupport] = useState<ProductSupport[]>([]);
 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -144,11 +156,25 @@ export function CatalogPage() {
   }, [selectedId]);
 
   useEffect(() => {
+    setProductSupport([]);
     if (!selectedProductId) return;
     void run("characteristics", async () => {
-      setCharacteristics(await api.get<Characteristic[]>(`/products/${selectedProductId}/characteristics`));
+      const [rows, support] = await Promise.all([
+        api.get<Characteristic[]>(`/products/${selectedProductId}/characteristics`),
+        api.get<ProductSupport[]>(`/products/${selectedProductId}/upper-software`),
+      ]);
+      setCharacteristics(rows);
+      setProductSupport(support);
     });
   }, [selectedProductId]);
+
+  // Одна площадка может покрывать модель несколькими записями (у Пирамиды семейство и
+  // исполнение с СПОДЭС стоят отдельными строками) — в подписи каждая площадка один раз.
+  const productPlatforms = useMemo(() => {
+    const seen = new Map<string, ProductSupport>();
+    for (const row of productSupport) if (!seen.has(row.adapter_key)) seen.set(row.adapter_key, row);
+    return [...seen.values()];
+  }, [productSupport]);
 
   const selectedSite = useMemo(
     () => catalogSites.find((site) => site.manufacturer_id === selectedId) ?? null,
@@ -287,6 +313,18 @@ export function CatalogPage() {
         outcome.message ??
           `Из «${outcome.manual_title ?? "руководства"}»: ${summariseExtraction(outcome.extraction)}.`
       );
+    });
+
+  // Документация одной модели через поиск в интернете (замечание заказчика 15.09.2026):
+  // для исполнения, которого нет в каталоге на сайте производителя, это единственный
+  // автоматический путь к руководству — обход каталога на него не выйдет.
+  const handleFindDocumentation = () =>
+    run("find-docs", async () => {
+      const outcome = await api.post<ProductDocumentation>(
+        `/products/${selectedProductId}/find-documentation`
+      );
+      setCharacteristics(await api.get<Characteristic[]>(`/products/${selectedProductId}/characteristics`));
+      setNotice(outcome.message);
     });
 
   const handleVerifyCharacteristic = (characteristic: Characteristic) =>
@@ -478,6 +516,29 @@ export function CatalogPage() {
                           <Badge tone="amber">требует проверки</Badge>
                         )}
                         {s.has_description_type_text && <Badge tone="green">описание типа загружено</Badge>}
+                        {s.tested_modifications.length > 0 && (
+                          <span title={s.tested_modifications.join("\n")}>
+                            <Badge tone="zinc">исполнений в реестре: {s.tested_modifications.length}</Badge>
+                          </span>
+                        )}
+                        {s.description_type_changed_at && (
+                          // Новая редакция «Описания типа» — то самое изменение, о котором
+                          // заказчик просил узнавать; дата обязательна, без неё пометка не
+                          // отличима от давно известного.
+                          <span
+                            title={`Редакция ${s.description_type_version ?? "—"}; характеристики разнесены из редакции ${
+                              s.description_type_extracted_version ?? "—"
+                            }`}
+                          >
+                            <Badge
+                              tone={
+                                s.description_type_extracted_version === s.description_type_version ? "zinc" : "amber"
+                              }
+                            >
+                              описание типа изменилось {formatDate(s.description_type_changed_at)}
+                            </Badge>
+                          </span>
+                        )}
                         {s.review_status === "needs_review" && (
                           // Причина показывается целиком в подсказке: без неё пометка
                           // бесполезна — человек всё равно пойдёт искать в ФГИС руками.
@@ -581,6 +642,11 @@ export function CatalogPage() {
                       {p.status === "discontinued" && (
                         <span className="ml-1.5 text-[10px] text-amber-400">снят с производства</span>
                       )}
+                      {p.data_source === "fgis" && (
+                        <span className="ml-1.5 text-[10px] text-sky-400" title={p.registry_modification ?? undefined}>
+                          из реестра ФГИС
+                        </span>
+                      )}
                       {p.review_status === "needs_review" && (
                         <span className="ml-1.5 text-[10px] text-amber-400" title={p.review_reason ?? undefined}>
                           ⚠ проверить
@@ -599,6 +665,19 @@ export function CatalogPage() {
               </div>
             </div>
 
+            {/* Обучение по Аршину: исполнения и характеристики из реестра, документация через поиск */}
+            <RegistryLearningSection
+              manufacturerId={selectedId}
+              isAdmin={isAdmin}
+              onChanged={() => (selectedId ? loadManufacturerData(selectedId) : Promise.resolve())}
+            />
+
+            {/* Документы по СИ и руководства — актуальные даты и результат еженедельной сверки */}
+            <CatalogDocumentsSection manufacturerId={selectedId} isAdmin={isAdmin} />
+
+            {/* Списки поддерживаемого оборудования ПО верхнего уровня: статус производителя на каждом */}
+            <UpperSoftwareSection manufacturerId={selectedId} isAdmin={isAdmin} />
+
             {/* Характеристики */}
             {selectedProduct && (
               <div className="rounded-xl border border-white/[0.08] bg-white/[0.03]">
@@ -609,6 +688,30 @@ export function CatalogPage() {
                     </h2>
                     <p className="mt-0.5 text-xs text-zinc-500">
                       Приложение C ТЗ. Извлечённое ИИ отмечено как требующее проверки, ручной ввод имеет приоритет.
+                    </p>
+                    {selectedProduct.registry_modification && (
+                      <p className="mt-0.5 font-mono text-[11px] text-sky-400/80" title="Полное условное обозначение исполнения из реестра ФГИС">
+                        {selectedProduct.registry_modification}
+                      </p>
+                    )}
+                    {selectedProduct.review_status === "needs_review" && selectedProduct.review_reason && (
+                      <p className="mt-0.5 text-[11px] text-amber-400/90">⚠ {selectedProduct.review_reason}</p>
+                    )}
+                    <p className="mt-1 flex flex-wrap items-center gap-1 text-[11px]">
+                      <span className="text-zinc-500">ПО верхнего уровня:</span>
+                      {productPlatforms.length === 0 ? (
+                        <span className="text-zinc-600">ни в одном списке поддерживаемого оборудования</span>
+                      ) : (
+                        productPlatforms.map((row) => (
+                          <span
+                            key={row.adapter_key}
+                            title={`${row.device_raw} — ${row.section}`}
+                            className="rounded-full bg-emerald-500/10 px-2 py-0.5 font-medium text-emerald-400"
+                          >
+                            {row.name}
+                          </span>
+                        ))
+                      )}
                     </p>
                   </div>
                   {isAdmin && (
@@ -638,6 +741,19 @@ export function CatalogPage() {
                           <Globe size={13} />
                         )}
                         С сайта производителя
+                      </button>
+                      <button
+                        onClick={handleFindDocumentation}
+                        disabled={busy === "find-docs"}
+                        title="Найти руководство на официальном сайте через поиск в интернете и разобрать его (до минуты)"
+                        className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+                      >
+                        {busy === "find-docs" ? (
+                          <Loader2 size={13} className="animate-spin" />
+                        ) : (
+                          <Search size={13} />
+                        )}
+                        Найти документацию
                       </button>
                     </div>
                   )}
@@ -704,6 +820,10 @@ export function CatalogPage() {
                     </div>
                   )}
 
+                  {/* Реестры допуска — под характеристиками: это не свойство прибора, а
+                      его допуск с датами (замечание тестировщика 16.09.2026). */}
+                  <ProductRegistrySection productId={selectedProduct.id} isAdmin={isAdmin} />
+
                   {Object.keys(selectedProduct.extra_specifications ?? {}).length > 0 && (
                     // Характеристики, снятые с сайта производителя, которым не нашлось поля
                     // в Приложении C. Показываются отдельно и как есть: это данные, а не
@@ -714,7 +834,7 @@ export function CatalogPage() {
                         Вне справочника Приложения C
                       </h3>
                       <p className="mb-2 text-[11px] text-zinc-600">
-                        Сняты с сайта производителя, но подходящего поля в справочнике нет.
+                        Извлечены из документации, но подходящего поля в справочнике нет.
                         Значение можно перенести в нужное поле вручную.
                       </p>
                       <table className="w-full text-left text-sm">

@@ -94,6 +94,7 @@ def to_out(db: Session, settings: NotificationSettings) -> NotificationSettingsO
         trigger_high_ai_score=settings.trigger_high_ai_score,
         trigger_deadline_soon=settings.trigger_deadline_soon,
         trigger_critical_error=settings.trigger_critical_error,
+        trigger_documents_updated=settings.trigger_documents_updated,
         ai_score_threshold=settings.ai_score_threshold,
         deadline_days_threshold=settings.deadline_days_threshold,
         updated_at=settings.updated_at if settings.smtp_host else None,
@@ -132,6 +133,7 @@ def update_settings(
         "trigger_high_ai_score",
         "trigger_deadline_soon",
         "trigger_critical_error",
+        "trigger_documents_updated",
         "ai_score_threshold",
         "deadline_days_threshold",
     )
@@ -585,6 +587,18 @@ def notify_critical_error(db: Session, *, subject: str, details: str) -> Notific
         body=f"{subject}\n\n{details}",
         to_admins=True,
     )
+
+
+def notify_documents_updated(db: Session, *, subject: str, body: str) -> Notification | None:
+    """Отчёт еженедельной сверки документов по СИ и руководств (правка по итогам показа
+    15.09.2026). Уходит общему списку получателей: документами интересуются те же люди, что
+    следят за тендерами, — на них строится сопоставление требований. Тему и текст собирает
+    `document_registry_service.build_report`; здесь только флаг триггера и отправка."""
+
+    settings = get_or_create(db)
+    if not settings.trigger_documents_updated:
+        return None
+    return _dispatch(db, trigger=NotificationTrigger.DOCUMENTS_UPDATED, subject=subject, body=body)
 
 
 def send_test_notification(db: Session, *, actor: User) -> Notification:

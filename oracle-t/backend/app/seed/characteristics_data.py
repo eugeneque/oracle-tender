@@ -237,8 +237,21 @@ ALL_FIELDS: list[tuple[str, str]] = [
 
 
 def fields_for_source(source: str) -> list[tuple[str, str]]:
-    """Поля, которые имеет смысл искать в документе данного типа (раздел 5.3 ТЗ)."""
+    """Поля, которые имеет смысл искать в документе данного типа (раздел 5.3 ТЗ).
 
+    `any` — все поля, кроме заполняемых только руками. Нужен для «Описания типа» из Аршина
+    при обучении справочника: в нём, помимо метрологии, описаны корпуса, интерфейсы и
+    функции (у НАРТИС-И100 — структура условного обозначения с типами корпусов и
+    интерфейсами), и ограничивать разбор тремя группами значило бы выбросить половину
+    документа."""
+
+    if source == "any":
+        return [
+            (group, field)
+            for group, fields in CHARACTERISTIC_GROUPS.items()
+            if PRIMARY_SOURCE.get(group) != "manual"
+            for field in fields
+        ]
     return [
         (group, field)
         for group, fields in CHARACTERISTIC_GROUPS.items()

@@ -16,7 +16,7 @@ from app.models.user import User
 from app.services import notification_service, tender_card_service, tender_insights
 from app.services.ai_profile_service import compute_profile_score
 from app.services.compliance_service import evaluate_tender
-from app.services.document_service import sync_tender_documents
+from app.services.document_service import sync_tender_documents_with_status
 from app.services.similarity_service import refresh_similar
 from app.services.tender_analysis import analyze_tender
 
@@ -24,10 +24,19 @@ from app.services.tender_analysis import analyze_tender
 def _run_analysis(db: Session, tender: Tender, actor: User | None) -> str:
     # Документы должны быть скачаны и распознаны — иначе анализировать нечего, кроме
     # наименования (раздел 5.2 ТЗ). Раньше это делал HTTP-эндпоинт до вызова анализа.
-    sync_tender_documents(db, tender)
+    _, documents_error = sync_tender_documents_with_status(db, tender)
     outcome = analyze_tender(db, tender, actor=actor)
 
     parts = [f"требований сохранено: {outcome.requirements_saved}"]
+    # Несостоявшаяся загрузка документов называется первой и прямо: «требований сохранено: 0»
+    # после сброшенного соединения с ЕИС — не итог анализа, а его отсутствие, и человек
+    # должен понять, что нужно восстановить доступ к площадке и запустить анализ ещё раз, а
+    # не искать в закупке ТЗ, которого система не видела.
+    if documents_error:
+        parts.append(
+            f"документы с площадки не получены ({documents_error}) — анализ выполнен только "
+            "по наименованию; восстановите доступ к площадке и запустите анализ ещё раз"
+        )
     if outcome.requirements_skipped:
         parts.append(f"пропущено: {outcome.requirements_skipped}")
     if outcome.chunks_failed:

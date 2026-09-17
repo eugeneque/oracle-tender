@@ -262,17 +262,25 @@ def _save_characteristic(
     # «Интерфейсы и связь». `resolve_field` приводит такое к справочнику — вместе с группой,
     # потому что группа однозначно определяется полем. Что опознать не удалось, по-прежнему
     # отбрасывается: иначе схема Приложения C перестанет быть предсказуемой.
-    resolved = resolve_field(item.group_name, _normalise_field_name(item.group_name, item.field_name))
+    if not item.value or not item.value.strip():
+        return _SaveVerdict.SKIPPED_UNKNOWN_FIELD
+
+    normalised_name = _normalise_field_name(item.group_name, item.field_name)
+    resolved = resolve_field(item.group_name, normalised_name)
     if resolved is None:
+        # Поля нет в Приложении C — но значение не выбрасывается, а откладывается в
+        # `extra_specifications`, как это давно делает обход сайта. Новые характеристики
+        # приборов (замечание заказчика 15.09.2026) появляются в документации раньше, чем в
+        # справочнике, и отброшенное здесь значение пришлось бы добывать заново после
+        # расширения справочника; отложенное — видно в карточке и в сводке кандидатов на
+        # новые поля (`unknown_fields_summary`).
+        _stash_unknown_field(product, normalised_name, item.value.strip())
         logger.debug(
-            f"Экстракция: поле вне справочника Приложения C отброшено: "
-            f"{item.group_name!r} → {item.field_name!r}"
+            f"Экстракция: поле вне справочника Приложения C отложено: "
+            f"{item.group_name!r} → {normalised_name!r}"
         )
         return _SaveVerdict.SKIPPED_UNKNOWN_FIELD
     group_name, field_name = resolved
-
-    if not item.value or not item.value.strip():
-        return _SaveVerdict.SKIPPED_UNKNOWN_FIELD
 
     existing = db.scalar(
         select(ProductCharacteristic).where(
@@ -310,6 +318,49 @@ def _save_characteristic(
     # то есть потерялись бы и все остальные характеристики документа.
     db.flush()
     return _SaveVerdict.SAVED
+
+
+# Предел числа отложенных полей у одной модели: модель иногда возвращает документ целиком
+# построчно, и без предела JSON-поле разрасталось бы на сотни строк.
+MAX_EXTRA_SPECIFICATIONS = 120
+
+
+def _stash_unknown_field(product: Product, field_name: str, value: str) -> None:
+    key = field_name.strip()[:150]
+    if not key:
+        return
+    extra = dict(product.extra_specifications or {})
+    if key not in extra and len(extra) >= MAX_EXTRA_SPECIFICATIONS:
+        return
+    extra[key] = value[:500]
+    # Новый словарь, а не правка на месте: SQLAlchemy замечает изменение JSONB только при
+    # переприсваивании атрибута.
+    product.extra_specifications = extra
+
+
+def unknown_fields_summary(db: Session, manufacturer_id: uuid.UUID | None = None, *, limit: int = 50) -> list[dict]:
+    """Сводка характеристик вне Приложения C по всем моделям — кандидаты на расширение
+    справочника. Считается по `extra_specifications`: сколько моделей несут поле и пример
+    значения. Именно так 06.09.2026 в справочник попали СПОДЭС и Bluetooth — но тогда список
+    собирали руками из лога, теперь он на виду."""
+
+    from collections import Counter
+
+    query = select(Product).where(Product.extra_specifications != {})
+    if manufacturer_id is not None:
+        query = query.where(Product.manufacturer_id == manufacturer_id)
+
+    counter: Counter[str] = Counter()
+    samples: dict[str, str] = {}
+    for product in db.scalars(query):
+        for key, value in (product.extra_specifications or {}).items():
+            normalised = key.strip().lower()
+            counter[normalised] += 1
+            samples.setdefault(normalised, f"{key}: {value}")
+    return [
+        {"field_name": samples[key].split(":", 1)[0], "products": count, "sample": samples[key]}
+        for key, count in counter.most_common(limit)
+    ]
 
 
 def _clamp_confidence(value: float | None) -> float | None:
@@ -350,16 +401,39 @@ def extract_characteristics_from_manufacturer_site(
     Все неудачи — штатный результат с текстом причины, а не исключение: сайт производителя
     внешний и может не содержать руководства вовсе (раздел 5.9 ТЗ)."""
 
-    from app.adapters.manufacturer_site import ManufacturerSiteAdapter, download_document_text
+    from app.adapters.manufacturer_site import (
+        ManualCandidate,
+        ManufacturerSiteAdapter,
+        download_document_text,
+    )
+    from app.models.manufacturer import Manufacturer
+    from app.services import document_discovery
 
     outcome = ManualExtractionOutcome()
     adapter = adapter or ManufacturerSiteAdapter()
 
-    try:
-        candidates = adapter.find_user_manual(website, product.model_name)
-    except Exception as exc:  # noqa: BLE001 - внешний сайт не должен ронять запрос
-        logger.warning(f"Сайт производителя: обход {website} не удался: {exc}")
-        candidates = []
+    # Сначала — поисковик по официальному сайту (замечание заказчика 15.09.2026): документ
+    # на новое исполнение лежит на сайте, но каталог на него не ссылается, и обход вслепую
+    # его не найдёт. Обход остаётся запасным путём — когда поиск не настроен или ничего не
+    # дал.
+    candidates: list = []
+    manufacturer = db.get(Manufacturer, product.manufacturer_id)
+    if manufacturer is not None:
+        found = document_discovery.find_manual_for_product(db, product, manufacturer)
+        if found is not None:
+            document_discovery.save_manual_link(db, product, found.url)
+            candidates = [
+                ManualCandidate(
+                    url=found.url, title=found.title, found_on="поиск Яндекс", score=float(found.score)
+                )
+            ]
+
+    if not candidates:
+        try:
+            candidates = adapter.find_user_manual(website, product.model_name)
+        except Exception as exc:  # noqa: BLE001 - внешний сайт не должен ронять запрос
+            logger.warning(f"Сайт производителя: обход {website} не удался: {exc}")
+            candidates = []
 
     if not candidates:
         outcome.message = (

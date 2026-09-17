@@ -355,6 +355,20 @@ def cmd_backfill_cards(args: argparse.Namespace) -> None:
     print(f"Обработано: {processed}; регион определён у: {filled}")
 
 
+def cmd_fill_gaps(args: argparse.Namespace) -> None:
+    """Дозаполнение полей для фильтров (замечание тестировщика 16.09.2026) — то же, что
+    делает планировщик после каждого опроса, но руками и с выбранной порцией."""
+
+    from app.services import tender_gaps_service
+
+    db = SessionLocal()
+    try:
+        outcome = tender_gaps_service.run(db, fetch_limit=args.fetch_limit, delay=args.delay)
+    finally:
+        db.close()
+    print(f"Дозаполнение: {outcome.summary()}")
+
+
 def main() -> None:
     configure_logging()
     parser = argparse.ArgumentParser(prog="oracle-t-cli")
@@ -433,6 +447,17 @@ def main() -> None:
         help="Включая закупки без реестрового номера ЕИС (у них карточки может не быть)",
     )
     backfill_parser.set_defaults(func=cmd_backfill_cards)
+
+    gaps_parser = subparsers.add_parser(
+        "fill-gaps",
+        help=(
+            "Дозаполнить ОКПД2, регион и тип конкурса для фильтров списка: из сохранённых "
+            "карточек (без сети), затем карточки открытых релевантных закупок с сайта"
+        ),
+    )
+    gaps_parser.add_argument("--fetch-limit", type=int, default=100)
+    gaps_parser.add_argument("--delay", type=float, default=1.5)
+    gaps_parser.set_defaults(func=cmd_fill_gaps)
 
     args = parser.parse_args()
     args.func(args)

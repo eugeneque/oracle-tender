@@ -9,7 +9,7 @@ import shutil
 import pytest
 
 from app.services import document_extraction as extraction_module
-from app.services.document_extraction import extract_pdf_text
+from app.services.document_extraction import extract_pdf_text, extract_text
 
 
 def _build_scanned_pdf(text: str) -> bytes:
@@ -252,3 +252,30 @@ def test_same_document_in_two_formats_is_read_once():
     assert text is not None
     assert "=== ТЗ.docx ===" in text
     assert "ТЗ.pdf" not in text
+
+
+def test_docx_tables_are_read_in_place():
+    """Таблица docx читается там, где стоит в документе, строкой «ячейка | ячейка».
+
+    Раньше все таблицы дописывались после всех абзацев: на договоре в сотню страниц таблица
+    с количеством приборов уезжала на двести тысяч символов от своего заголовка, а пара
+    «Класс точности» / «1,0» в столбик читалась моделью как два обрывка."""
+
+    from docx import Document
+
+    document = Document()
+    document.add_paragraph("Таблица 3")
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Параметр"
+    table.cell(0, 1).text = "Значение"
+    table.cell(1, 0).text = "Класс точности"
+    table.cell(1, 1).text = "1,0"
+    document.add_paragraph("Раздел 3. Работы по монтажу")
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    text = extract_text(".docx", buffer.getvalue())
+
+    assert text == (
+        "Таблица 3\nПараметр | Значение\nКласс точности | 1,0\nРаздел 3. Работы по монтажу"
+    )

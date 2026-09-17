@@ -41,7 +41,12 @@ function EmptyRequirements({ analysis }: { analysis: AnalysisState | null }) {
   const shell =
     "rounded-xl border border-dashed border-white/10 p-6 text-center text-sm text-zinc-500";
 
-  if (analysis === null) {
+  // Сведения о документах приходят отдельным запросом, и он небыстрый: у закупки без
+  // документов сервер сначала пробует запасной путь через ЕИС, а когда тот сбрасывает
+  // соединение — ждёт все повторы. Пока ответа нет, `documentsWithText === null`, и
+  // выбирать между «не из чего извлекать» и «документы разобраны» нельзя: второе
+  // утверждение через полминуты окажется ложью.
+  if (analysis === null || (analysis.ran && analysis.documentsWithText === null)) {
     return <div className={shell}>Загрузка…</div>;
   }
 

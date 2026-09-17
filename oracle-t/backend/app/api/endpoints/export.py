@@ -51,10 +51,12 @@ def get_tenders_xlsx(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ,
     okpd2: str | None = Query(default=None, max_length=20),
     win_percentage_min: Decimal | None = Query(default=None, ge=0, le=100),
     win_percentage_max: Decimal | None = Query(default=None, ge=0, le=100),
+    bookmarked: bool = Query(default=False, description="Только избранное текущего пользователя"),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Response:
     filters = TenderFilters(
+        bookmarked_by_user_id=user.id if bookmarked else None,
         search=search,
         source_keys=source or [],
         publish_date_from=publish_date_from,

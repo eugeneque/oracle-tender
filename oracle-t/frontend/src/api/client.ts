@@ -85,6 +85,34 @@ export async function uploadFile<T>(path: string, file: File): Promise<T> {
 }
 
 /**
+ * Отправляет произвольную форму как multipart/form-data — поля и несколько файлов сразу
+ * (ручная заявка, загрузка документов к тендеру). Отдельно от `uploadFile`: тот собирает
+ * форму из одного файла сам, а здесь её собирает вызывающий код. Content-Type так же не
+ * выставляется — boundary добавит браузер.
+ */
+export async function postForm<T>(path: string, form: FormData): Promise<T> {
+  const token = getToken();
+  const headers = new Headers();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+
+  const response = await fetch(`/api${path}`, { method: "POST", headers, body: form });
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      const body = await response.json();
+      // FastAPI отдаёт ошибки валидации формы списком — показываем первую человеку.
+      detail = Array.isArray(body.detail)
+        ? body.detail[0]?.msg ?? detail
+        : body.detail ?? detail;
+    } catch {
+      // тело не JSON — оставляем statusText
+    }
+    throw new ApiError(response.status, detail);
+  }
+  return (await response.json()) as T;
+}
+
+/**
  * Скачивает файл, отдаваемый API (выгрузка в Excel, раздел 5.7 ТЗ).
  *
  * Через fetch, а не `window.open`/`<a href>`: эндпоинт закрыт Bearer-токеном, который в

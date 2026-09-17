@@ -14,7 +14,14 @@ from app.db.session import SessionLocal
 from app.middleware.audit import AuditLogMiddleware
 # Импорт регистрирует обработчики фоновых задач в очереди (см. app/core/jobs.py).
 from app.services import job_runner  # noqa: F401
-from app.services import catalog_queue_service, catalog_site_sync, fgis_catalog_sync
+from app.services import (
+    catalog_learning,
+    catalog_queue_service,
+    catalog_site_sync,
+    document_registry_service,
+    fgis_catalog_sync,
+    upper_software_service,
+)
 from app.services.notification_service import bootstrap_from_env as bootstrap_notifications
 from app.services.user_service import bootstrap_admin
 
@@ -42,6 +49,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # плановая ревалидация ФГИС и обход каталога МИРТЕК идут через эту же очередь.
     fgis_catalog_sync.register()
     catalog_site_sync.register()
+    document_registry_service.register()
+    catalog_learning.register()
+    upper_software_service.register()
     catalog_queue_service.recover_interrupted_tasks()
     start_scheduler()
     yield

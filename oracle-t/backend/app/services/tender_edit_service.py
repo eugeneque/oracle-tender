@@ -54,6 +54,7 @@ FIELD_LABELS: dict[str, str] = {
     "stage": "Этап работы",
     "assignee_id": "Ответственный за тендер",
     "ai_comment": "Комментарий ИИ",
+    "bookmark": "Избранное",
 }
 
 

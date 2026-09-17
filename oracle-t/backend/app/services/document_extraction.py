@@ -16,6 +16,8 @@ import zipfile
 from dataclasses import dataclass
 
 from docx import Document as DocxDocument
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 from loguru import logger
 from openpyxl import load_workbook
 
@@ -27,7 +29,9 @@ from app.core.config import get_settings
 #   1 — исходные правила;
 #   2 — разворачиваются вложенные архивы, дубли одного документа в разных форматах читаются
 #       один раз.
-EXTRACTION_VERSION = 2
+#   3 — таблицы docx читаются на своём месте в документе, строка таблицы — одной строкой
+#       текста (см. `extract_docx_text`).
+EXTRACTION_VERSION = 3
 
 # Предел на распаковку архива: защита от zip-бомбы и просто от гигантских комплектов
 # документации, которые незачем разбирать целиком. Считается на всё дерево архива сразу, а не
@@ -162,14 +166,36 @@ def extract_pdf_text(content: bytes) -> str | None:
 
 
 def extract_docx_text(content: bytes) -> str | None:
+    """Текст docx в порядке документа: абзацы и таблицы вперемежку, как они идут в теле.
+
+    Раньше все таблицы дописывались после всех абзацев. На проекте договора в сотню страниц
+    «Таблица 3» с количеством приборов уезжала за двести тысяч символов от своего заголовка —
+    за предел того, что анализ вообще читает, — а в техническом задании на месте таблицы
+    оставалась пустота. Строка таблицы собирается в одну строку текста через « | »: «Класс
+    точности | 1,0» модель читает как пару «параметр — значение», а те же ячейки в столбик —
+    как два не связанных обрывка. Объединённые ячейки python-docx отдаёт по разу на каждую
+    поглощённую колонку — повторы в строке схлопываются.
+    """
+
     document = DocxDocument(io.BytesIO(content))
-    paragraphs = [p.text for p in document.paragraphs if p.text]
-    for table in document.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                if cell.text:
-                    paragraphs.append(cell.text)
-    text = "\n".join(paragraphs).strip()
+    body = document.element.body
+    lines: list[str] = []
+    for child in body.iterchildren():
+        tag = child.tag.rsplit("}", 1)[-1]
+        if tag == "p":
+            text = Paragraph(child, document).text
+            if text:
+                lines.append(text)
+        elif tag == "tbl":
+            for row in Table(child, document).rows:
+                cells: list[str] = []
+                for cell in row.cells:
+                    value = " ".join(cell.text.split())
+                    if value and (not cells or cells[-1] != value):
+                        cells.append(value)
+                if cells:
+                    lines.append(" | ".join(cells))
+    text = "\n".join(lines).strip()
     return text or None
 
 

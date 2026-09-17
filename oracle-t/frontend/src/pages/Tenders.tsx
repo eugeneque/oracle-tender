@@ -6,27 +6,37 @@ import {
   Database,
   Download,
   Columns2,
+  FilePlus2,
   Filter,
   KanbanSquare,
   Loader2,
   RefreshCw,
   RotateCcw,
   Search,
+  Star,
   Table as TableIcon,
   X,
 } from "lucide-react";
 
 import { ApiError, api, downloadFile } from "../api/client";
 import type {
+  ManualRequestOut,
   Region,
   Source,
   Tender,
   TenderBoard,
   TenderPage,
+  TenderStats,
 } from "../api/types";
-import { CATALOG_SOURCE_TYPES, STAGE_LABELS, STAGE_ORDER } from "../api/types";
+import {
+  CATALOG_SOURCE_TYPES,
+  MANUAL_SOURCE_TYPE,
+  STAGE_LABELS,
+  STAGE_ORDER,
+} from "../api/types";
 import { AppShell } from "../components/AppShell";
 import { ConfidenceBar } from "../components/ConfidenceBar";
+import { NewRequestModal } from "../components/NewRequestModal";
 import { PageHeader } from "../components/PageHeader";
 import { TenderDetailModal } from "../components/TenderDetailModal";
 import { TenderSplitView } from "../components/tender-views/TenderSplitView";
@@ -127,6 +137,9 @@ function TenderCard({
       </div>
 
       <h3 className="mb-2.5 text-sm font-medium leading-snug text-zinc-100">
+        {tender.is_bookmarked && (
+          <Star size={12} fill="currentColor" className="mr-1 inline -translate-y-px text-amber-400" aria-label="В избранном" />
+        )}
         {tender.title}
       </h3>
 
@@ -271,6 +284,10 @@ interface TendersFilters {
   winPercentMax: string;
   aiScoreMin: string;
   aiScoreMax: string;
+  /** Раздел «Избранное» (замечание тестировщика 16.09.2026): только отложенные текущим
+   * пользователем закупки — и вне фильтров по умолчанию (срок подачи, профиль), иначе
+   * отложенная закупка исчезала бы из раздела, как только у неё истекал срок. */
+  favouritesOnly: boolean;
 }
 
 // По умолчанию скрываем тендеры с истёкшим сроком подачи: собранные тендеры — это broad-поиск
@@ -288,6 +305,7 @@ const DEFAULT_FILTERS: TendersFilters = {
   hideExpired: true,
   onlyRelevant: true,
   onlyAiSelected: false,
+  favouritesOnly: false,
   regionCodes: [],
   tenderTypes: [],
   statuses: [],
@@ -350,8 +368,9 @@ function buildFilterParams(filters: TendersFilters): URLSearchParams {
   if (filters.deadlineTo) params.set("deadline_to", filters.deadlineTo);
   if (filters.priceMin) params.set("price_min", filters.priceMin);
   if (filters.priceMax) params.set("price_max", filters.priceMax);
-  if (filters.hideExpired) params.set("hide_expired", "true");
-  if (filters.onlyRelevant) params.set("only_profile_relevant", "true");
+  if (filters.favouritesOnly) params.set("bookmarked", "true");
+  if (filters.hideExpired && !filters.favouritesOnly) params.set("hide_expired", "true");
+  if (filters.onlyRelevant && !filters.favouritesOnly) params.set("only_profile_relevant", "true");
   if (filters.onlyAiSelected) params.set("only_ai_selected", "true");
   for (const code of filters.regionCodes) params.append("region", code);
   for (const value of filters.tenderTypes) params.append("tender_type", value);
@@ -877,6 +896,7 @@ export function TendersPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [isResourcesOpen, setIsResourcesOpen] = useState(false);
+  const [isNewRequestOpen, setIsNewRequestOpen] = useState(false);
   // Свёрнуто по умолчанию: базовые поля видны и так, а редкие фильтры отодвигали список
   // тендеров за сгиб экрана.
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
@@ -895,6 +915,9 @@ export function TendersPage() {
   // открывается модалкой поверх списка, здесь живёт в правой панели постоянно.
   const [selectedTender, setSelectedTender] = useState<Tender | null>(null);
   const [regions, setRegions] = useState<Region[]>([]);
+  // Сколько закупок собрано всего — знаменатель для строки «показано N из M»: список по
+  // умолчанию отфильтрован (открытые, прошедшие профиль), и без знаменателя это не видно.
+  const [collectedTotal, setCollectedTotal] = useState<number | null>(null);
   const [total, setTotal] = useState(0);
   const [board, setBoard] = useState<TenderBoard | null>(null);
   const [offset, setOffset] = useState(0);
@@ -966,6 +989,10 @@ export function TendersPage() {
       .get<Source[]>("/sources")
       .then((all) => setSources(all.filter((s) => !CATALOG_SOURCE_TYPES.includes(s.type))));
     void api.get<Region[]>("/dictionaries/regions").then(setRegions);
+    void api
+      .get<TenderStats>("/tenders/stats")
+      .then((stats) => setCollectedTotal(stats.total))
+      .catch(() => setCollectedTotal(null));
   }, []);
 
   // Перезагрузка при любом изменении фильтров, сортировки или страницы, с небольшим
@@ -1101,6 +1128,22 @@ export function TendersPage() {
     }
   };
 
+  /** Заявка создана: закрываем форму, перечитываем список (она должна появиться в нём и на
+   * доске) и сразу открываем карточку — там виден ход анализа и извлечённые требования. */
+  const handleRequestCreated = (result: ManualRequestOut) => {
+    setIsNewRequestOpen(false);
+    setNotice(
+      result.job
+        ? `Заявка ${result.tender.external_id} создана, ИИ-анализ документов запущен`
+        : `Заявка ${result.tender.external_id} создана`,
+    );
+    void (activeView === "kanban"
+      ? loadBoard(filters, sort)
+      : loadTenders(filters, sort, offset));
+    if (activeView === "split") setSelectedTender(result.tender);
+    else setOpenTender(result.tender);
+  };
+
   const handleSaveResources = (keys: string[]) => {
     setSelectedSourceKeys(keys);
     saveSelectedSourceKeys(keys);
@@ -1127,6 +1170,14 @@ export function TendersPage() {
           }
           actions={
             <div className="flex items-center gap-2">
+              <button
+                onClick={() => setIsNewRequestOpen(true)}
+                title="Завести закупку, которую заказчик прислал напрямую, и приложить документы"
+                className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-sm text-zinc-300 hover:bg-white/5"
+              >
+                <FilePlus2 size={15} />
+                Новая заявка
+              </button>
               <button
                 onClick={() => setIsResourcesOpen(true)}
                 className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-sm text-zinc-300 hover:bg-white/5"
@@ -1239,6 +1290,23 @@ export function TendersPage() {
             />
           </button>
 
+          <button
+            onClick={() => {
+              setOffset(0);
+              updateFilters({ favouritesOnly: !filters.favouritesOnly });
+            }}
+            aria-pressed={filters.favouritesOnly}
+            title="Отложенные закупки: то, что отмечено звёздочкой в карточке. Показываются независимо от срока подачи и профиля."
+            className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm ${
+              filters.favouritesOnly
+                ? "border-amber-400/40 bg-amber-500/10 text-amber-300"
+                : "border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:bg-white/5"
+            }`}
+          >
+            <Star size={15} fill={filters.favouritesOnly ? "currentColor" : "none"} />
+            Избранное
+          </button>
+
           <span
             className="rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-sm text-zinc-400"
             title="Число закупок, подходящих под текущие фильтры"
@@ -1256,6 +1324,53 @@ export function TendersPage() {
             )}
           </span>
         </div>
+
+        {/* Что именно показано. Список по умолчанию — не «все собранные закупки», а
+            открытые и прошедшие профиль релевантности; без этой строки два включённых
+            переключателя в свёрнутой панели фильтров выглядели как «система собрала
+            только 52 тендера» (вопрос тестировщика 16.09.2026). */}
+        {!isLoading && (
+          <p className="-mt-2 flex flex-wrap items-center gap-x-2 text-xs text-zinc-500">
+            {filters.favouritesOnly ? (
+              <span>
+                Раздел «Избранное»: закупки, которые вы отметили звёздочкой, — независимо от
+                срока подачи и профиля релевантности.
+              </span>
+            ) : (
+              <>
+                <span>
+                  Показано{" "}
+                  <span className="text-zinc-300">{total.toLocaleString("ru-RU")}</span>
+                  {collectedTotal !== null && (
+                    <>
+                      {" "}
+                      из <span className="text-zinc-300">{collectedTotal.toLocaleString("ru-RU")}</span>{" "}
+                      собранных
+                    </>
+                  )}
+                  {filters.hideExpired && filters.onlyRelevant
+                    ? " — только открытые закупки, прошедшие профиль релевантности."
+                    : filters.hideExpired
+                      ? " — только открытые закупки (закрытые скрыты)."
+                      : filters.onlyRelevant
+                        ? " — только прошедшие профиль релевантности."
+                        : "."}
+                </span>
+                {(filters.hideExpired || filters.onlyRelevant) && (
+                  <button
+                    onClick={() => {
+                      setOffset(0);
+                      updateFilters({ hideExpired: false, onlyRelevant: false });
+                    }}
+                    className="text-indigo-400 hover:text-indigo-300"
+                  >
+                    Показать все собранные
+                  </button>
+                )}
+              </>
+            )}
+          </p>
+        )}
 
         {isFiltersOpen && (
         <FiltersPanel
@@ -1374,9 +1489,18 @@ export function TendersPage() {
         </div>
       </div>
 
+      {isNewRequestOpen && (
+        <NewRequestModal
+          onCancel={() => setIsNewRequestOpen(false)}
+          onCreated={handleRequestCreated}
+        />
+      )}
+
       {isResourcesOpen && (
         <ResourcesModal
-          sources={sources}
+          // Источник ручных заявок — не площадка: синхронизировать по нему нечего, а в
+          // фильтре «Площадки» он остаётся, чтобы можно было показать одни заявки.
+          sources={sources.filter((s) => s.type !== MANUAL_SOURCE_TYPE)}
           initialSelected={new Set(selectedSourceKeys ?? [])}
           onCancel={() => setIsResourcesOpen(false)}
           onSave={handleSaveResources}

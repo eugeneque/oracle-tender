@@ -1,5 +1,5 @@
 import { Fragment, useMemo, useState } from "react";
-import { AlertTriangle, ChevronRight } from "lucide-react";
+import { AlertTriangle, BookOpen, ChevronDown, ChevronRight } from "lucide-react";
 
 import type { ComplianceEntry, ComplianceMatrix } from "../../api/types";
 import { CriticalityBadge } from "./TenderRequirementsTab";
@@ -88,6 +88,55 @@ function WinPercentageCard({
  * короткие статусы, а пояснения раскрываются по клику на строку: пользователь смотрит их для
  * одного требования за раз, ровно когда вердикт вызывает вопрос.
  */
+/** Методика оценки — коротко, там, где на неё смотрят (полный текст — `CRITERIA.md` в корне
+ * проекта). Свёрнута по умолчанию: тендерщик читает её один раз, а матрицу — каждый день. */
+function MethodologyHint() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mb-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-xs">
+      <button
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex items-center gap-1.5 text-zinc-400 hover:text-zinc-200"
+      >
+        <BookOpen size={13} className="text-indigo-400" />
+        Как считается соответствие
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+      </button>
+      {open && (
+        <ul className="mt-2 space-y-1 text-zinc-400">
+          <li>
+            <span className="text-zinc-300">Источник истины по классам требований:</span>{" "}
+            метрология и электрика — «Описание типа» ФГИС; интерфейсы, протоколы, конструктив
+            — каталог, затем руководство; допуски (ПП 719, ЗАК Россетей, реестр ПО) — записи в
+            карточке модели; интеграция в ПО верхнего уровня — списки разработчиков ПО.
+          </li>
+          <li>
+            <span className="text-zinc-300">Вердикт:</span> подтверждающий факт — «соответствует»
+            (1,0); часть исполнений или косвенно — «частично» (0,5); опровергающий факт — «не
+            соответствует» (0). Отсутствие факта — «нет данных», оно не участвует в проценте и
+            не считается несоответствием. Исключения: истекшая или отсутствующая запись в реестре
+            допуска и отсутствие в официальном списке ПО — это «не соответствует».
+          </li>
+          <li>
+            <span className="text-zinc-300">Вес:</span> критичное 3 (класс точности, номиналы,
+            фазы, тип прибора, Госреестр СИ, допуски), важное 2 (интерфейсы, протоколы, реле, МПИ,
+            интеграция), второстепенное 1.
+          </li>
+          <li>
+            <span className="text-zinc-300">Процент</span> = Σ(вес × вклад) / Σ(вес оценённых) ×
+            100. Оценено меньше 30 % требований — процент ненадёжен; невыполненное критичное
+            требование названо в пояснении: заявку отклонят независимо от процента.
+          </li>
+          <li>
+            <span className="text-zinc-300">Уверенность</span> ниже 0,6 — вердикт помечен как
+            требующий проверки человеком.
+          </li>
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export function TenderComplianceTab({
   matrix,
   requirementsCount,
@@ -170,6 +219,8 @@ export function TenderComplianceTab({
           <WinPercentageCard key={row.manufacturer_id} row={row} />
         ))}
       </div>
+
+      <MethodologyHint />
 
       {reviewCount > 0 && (
         <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-xs text-amber-300">

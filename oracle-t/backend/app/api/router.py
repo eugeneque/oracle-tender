@@ -17,6 +17,8 @@ from app.api.endpoints import (
     relevance,
     sources,
     tenders,
+    upper_software,
+    registry_records,
     users,
 )
 
@@ -31,6 +33,7 @@ api_router.include_router(manufacturers.router)
 api_router.include_router(dictionaries.router)
 api_router.include_router(credentials.router)
 api_router.include_router(company_profile.router)
+api_router.include_router(company_profile.profiles_router)
 api_router.include_router(company_participations.router)
 api_router.include_router(analytics.router)
 api_router.include_router(export.router)
@@ -38,3 +41,5 @@ api_router.include_router(logs.router)
 api_router.include_router(notifications.router)
 api_router.include_router(relevance.router)
 api_router.include_router(integration_api.router)
+api_router.include_router(upper_software.router)
+api_router.include_router(registry_records.router)

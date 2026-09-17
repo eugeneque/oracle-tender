@@ -49,6 +49,12 @@ class CharacteristicSource(str, enum.Enum):
     MANUFACTURER_SITE = "manufacturer_site"
     USER_MANUAL = "user_manual"
     MANUAL_ENTRY = "manual_entry"
+    # Ссылка на документ, найденная поиском в интернете (Яндекс) на официальном сайте
+    # производителя — когда в каталоге сайта документа о приборе ещё нет, а через поиск он
+    # находится (случай НАРТИС-И100-W115). Отдельный источник, а не `manufacturer_site`:
+    # человек при проверке должен видеть, что ссылку подобрала поисковая выдача, а не обход
+    # каталога.
+    WEB_SEARCH = "web_search"
 
 
 class ProductDataSource(str, enum.Enum):
@@ -138,7 +144,23 @@ class SiType(Base):
     description_type_mirror_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     description_type_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     description_type_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Редакция «Описания типа», из которой характеристики уже разнесены по привязанным
+    # моделям. Не совпадает с `description_type_version` — вышла новая редакция, разбор
+    # надо повторить: характеристики в справочнике описывают отменённую редакцию.
+    description_type_extracted_version: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+    # Когда ревалидация заметила новую редакцию документа. Человеку в интерфейсе нужна
+    # именно дата: «описание типа изменилось» без неё не отличить от давно известного.
+    description_type_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     allowed_modifications: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Исполнения, представленные на испытания, из карточки типа — список полных условных
+    # обозначений («НАРТИС-И100-W115-2-A1R1-230-5-80A-ST-RS485-P1-HKLMOQ1V3-D»). Реестр
+    # узнаёт о новом исполнении раньше сайта производителя: у НАРТИС-И100 корпус W115
+    # появился в редакции 2 «Описания типа», а в каталоге на сайте его нет до сих пор.
+    tested_modifications: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     mpi_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
     valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
     is_actual: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -204,6 +226,10 @@ class Product(Base):
     # комплектом документов — проверено на МИРТЕК-12-РУ-D17 (Таганрог 48 лет / Владивосток
     # 35 лет). Поэтому исполнение — отдельная запись каталога, а не атрибут одной.
     execution: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Полное условное обозначение исполнения из реестра ФГИС — у записей, заведённых из
+    # Аршина, а не с сайта. В нём закодированы характеристики (корпус, ток, интерфейсы), и
+    # вместе с легендой структуры обозначения из карточки типа оно расшифровывается моделью.
+    registry_modification: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=ProductStatus.ACTIVE.value
     )

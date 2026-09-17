@@ -23,7 +23,18 @@ export type AvailabilityStatus = "available" | "unavailable" | null;
  * (`CATALOG_SOURCE_TYPES` в app/models/source.py). `/sources` отдаёт и те, и другие одним
  * списком, поэтому всё, что считает или фильтрует площадки закупок, обязано их отбросить —
  * иначе в счётчиках появляются сайты производителей. */
-export const CATALOG_SOURCE_TYPES: string[] = ["fgis", "manufacturer_site"];
+export const CATALOG_SOURCE_TYPES: string[] = [
+  "fgis",
+  "manufacturer_site",
+  "upper_software",
+  "admission_registry",
+];
+
+/** Тип системного источника ручных заявок (`SourceType.MANUAL` в app/models/source.py).
+ * Закупки, которые заказчик прислал напрямую, минуя площадки (решение 15.09.2026). В фильтре
+ * «Площадки» он полезен — «показать только заявки», — а в «Ресурсах», настройках и
+ * счётчиках площадок ему не место: синхронизировать и пинговать там нечего. */
+export const MANUAL_SOURCE_TYPE = "manual";
 
 /** Сколько площадок закупок описано в разделе 4.1 ТЗ — знаменатель для плиток «источников
  * доступно». Используется только как запасное значение, пока список не загружен. */
@@ -102,6 +113,13 @@ export interface SiType {
   si_code: string;
   description_type_url: string | null;
   has_description_type_text: boolean;
+  // Исполнения, представленные на испытания, из карточки Аршина; редакция «Описания
+  // типа», из которой характеристики уже разнесены по моделям; дата, когда ревалидация
+  // заметила новую редакцию (замечание заказчика 15.09.2026).
+  tested_modifications: string[];
+  description_type_version: string | null;
+  description_type_extracted_version: string | null;
+  description_type_changed_at: string | null;
   source: SiTypeSource;
   verified_by_user: boolean;
   // «Системе не хватило оснований решить самой»: реестр вернул несколько кандидатов или
@@ -127,6 +145,9 @@ export interface Product {
   // Заводское исполнение («Таганрог», «Владивосток»). У одной модели исполнения
   // различаются сроком службы и комплектом документов, поэтому это отдельные записи.
   execution: string | null;
+  // Полное условное обозначение исполнения из реестра ФГИС — у записей, заведённых из
+  // Аршина, а не с сайта производителя.
+  registry_modification: string | null;
   status: string;
   source_url: string | null;
   data_source: string | null;
@@ -179,6 +200,135 @@ export interface CatalogSite {
   categories: number;
   // Профиль сайта может быть описан, а строки производителя в справочнике не быть.
   manufacturer_id: string | null;
+}
+
+// Справочник документов по СИ и руководств с датой актуальности (правка по итогам показа
+/** Площадка ПО верхнего уровня (Пирамида, Энфорс, Энергосфера, яЭнергетик, АльфаЦЕНТР,
+ * Некта, ЛЭРС — замечание тестировщика 16.09.2026) и состояние её списка поддерживаемого
+ * оборудования. По этим спискам проверяется требование «интеграция в ПО верхнего уровня». */
+export interface UpperSoftwarePlatform {
+  adapter_key: string;
+  name: string;
+  vendor: string;
+  url: string;
+  source_id: string | null;
+  devices_total: number;
+  /** Сколько записей списка отнесено к производителям из справочника. */
+  devices_matched: number;
+  last_synced_at: string | null;
+  availability_status: AvailabilityStatus;
+}
+
+export interface UpperSoftwareSyncOutcome {
+  adapter_key: string;
+  devices_read: number;
+  created: number;
+  updated: number;
+  disappeared: number;
+  with_manufacturer: number;
+  products_linked: number;
+  errors: string[];
+}
+
+/** Запись списка как на сайте плюс результат разбора и модели каталога, которые она покрывает. */
+export interface UpperSoftwareDevice {
+  id: string;
+  section: string;
+  device_raw: string;
+  device_names: string[];
+  manufacturer_raw: string | null;
+  si_codes: string[];
+  is_generic: boolean;
+  details: Record<string, unknown>;
+  manufacturer_matched_by: "si_code" | "manufacturer_name" | "device_brand" | null;
+  products: string[];
+}
+
+/** `supported` — модели производителя есть в списке; `not_listed` — список прочитан, их нет;
+ * `protocol_only` — в списке нет, но заявлена поддержка любых счётчиков по протоколу СПОДЭС;
+ * `not_synced` — список ещё не читали. */
+export type PlatformSupportStatus = "supported" | "not_listed" | "protocol_only" | "not_synced";
+
+export interface PlatformSupport {
+  key: string;
+  name: string;
+  vendor: string;
+  url: string;
+  status: PlatformSupportStatus;
+  last_synced_at: string | null;
+  devices: UpperSoftwareDevice[];
+  note: string | null;
+}
+
+export interface ProductSupport extends UpperSoftwareDevice {
+  adapter_key: string;
+  name: string;
+  url: string | null;
+}
+
+export interface TenderIntegrationRequirement {
+  id: string;
+  text: string;
+  criticality: string | null;
+  platforms: string[];
+  generic: boolean;
+}
+
+export interface TenderUpperSoftware {
+  requirements: TenderIntegrationRequirement[];
+  named_platforms: string[];
+  generic_requirement: boolean;
+  platforms: (UpperSoftwarePlatform & { mentioned: boolean })[];
+  manufacturers: {
+    manufacturer_id: string;
+    name: string;
+    is_mirtek: boolean;
+    support: Record<
+      string,
+      {
+        status: PlatformSupportStatus;
+        devices: { device_raw: string; si_codes: string[]; products: string[] }[];
+        devices_total: number;
+        note: string | null;
+      }
+    >;
+  }[];
+}
+
+// 15.09.2026). Сверяется с источниками раз в неделю; об изменениях уходит письмо-отчёт.
+export interface CatalogDocument {
+  id: string;
+  manufacturer_id: string;
+  product_id: string | null;
+  si_type_id: string | null;
+  model_name: string | null;
+  execution: string | null;
+  si_code: string | null;
+  kind: "manual" | "passport" | "description_type" | "certificate" | "declaration";
+  kind_title: string;
+  source: "manufacturer_site" | "fgis";
+  title: string;
+  url: string;
+  document_date: string | null;
+  // Откуда взята дата: сообщил сервер (last_modified), редакция в ФГИС (fgis_version)
+  // или день фиксации системой (observed).
+  document_date_source: "last_modified" | "fgis_version" | "observed" | null;
+  version_label: string | null;
+  // Ссылка всё ещё стоит в справочнике продукции; погасшие строки — пропали с сайта.
+  is_active: boolean;
+  check_status: "ok" | "unavailable" | "forbidden_by_robots" | "not_checked";
+  check_error: string | null;
+  first_seen_at: string;
+  last_checked_at: string | null;
+  changed_at: string | null;
+  change_count: number;
+}
+
+export interface CatalogDocumentsSummary {
+  total: number;
+  last_checked_at: string | null;
+  changed_recently: number;
+  unavailable: number;
 }
 
 export interface CatalogSyncOutcome {
@@ -327,6 +477,8 @@ export interface Tender {
    * метрика: с 03.09.2026 в списке показывается `ai_score`. */
   win_percentage: string | null;
   requirements_count: number;
+  /** В избранном ли у текущего пользователя (замечание тестировщика 16.09.2026). */
+  is_bookmarked: boolean;
   /** Решение модели «это правда наша закупка». `null` — не проверяли (не то же, что false). */
   ai_relevant: boolean | null;
   ai_relevance_reason: string | null;
@@ -354,7 +506,9 @@ export type ComplianceSourceCode =
   | "si_type"
   | "product_catalog"
   | "user_manual_fallback"
-  | "ai_semantic";
+  | "ai_semantic"
+  | "upper_software"
+  | "admission_registry";
 
 export interface Requirement {
   id: string;
@@ -487,6 +641,14 @@ export type DocumentClassCode =
   | "notice"
   | "protocol"
   | "other";
+
+/** Ответ на создание ручной заявки (`POST /tenders/manual`): тендер, приложенные файлы и
+ * поставленная задача анализа (`null`, если анализ не запрашивали или файлов нет). */
+export interface ManualRequestOut {
+  tender: Tender;
+  documents: TenderDocument[];
+  job: BackgroundJob | null;
+}
 
 export interface TenderDocument {
   id: string;
@@ -631,6 +793,7 @@ export interface NotificationSettings {
   trigger_high_ai_score: boolean;
   trigger_deadline_soon: boolean;
   trigger_critical_error: boolean;
+  trigger_documents_updated: boolean;
   ai_score_threshold: number;
   deadline_days_threshold: number;
   updated_at: string | null;
@@ -813,7 +976,11 @@ export interface FieldSource {
 
 export interface CompanyProfile {
   id: string;
-  manufacturer_id: string;
+  /** Есть только у основной компании — она же «наш производитель» в справочнике. */
+  manufacturer_id: string | null;
+  /** Основная компания: с ней AI-оценка сравнивает требования тендера, по её ИНН тянется
+   * история участий. Ровно одна на систему. */
+  is_primary: boolean;
   legal_name: string | null;
   inn: string | null;
   kpp: string | null;
@@ -1010,4 +1177,132 @@ export interface AiCheckResult {
   failed: number;
   messages: string[];
   pending: number;
+}
+
+// --- Обучение справочника по Аршину и поиск документации (замечание заказчика 15.09.2026) ---
+
+export interface ModificationsOutcome {
+  si_types_scanned: number;
+  modifications_seen: number;
+  products_created: number;
+  products_linked: number;
+  already_known: number;
+  created_names: string[];
+}
+
+export interface DescriptionIngestOutcome {
+  si_types_scanned: number;
+  documents_fetched: number;
+  documents_read: number;
+  products_updated: number;
+  modifications_decoded: number;
+  characteristics_saved: number;
+  skipped_up_to_date: number;
+  skipped_no_url: number;
+  failed: number;
+  messages: string[];
+}
+
+export interface DiscoveryOutcome {
+  products_checked: number;
+  found: number;
+  not_found: number;
+  skipped_have_link: number;
+  queries: number;
+  messages: string[];
+}
+
+export interface ProductDocumentation {
+  manual_url: string | null;
+  reasons: string[];
+  ingest: ManualIngestOutcome | null;
+  message: string;
+}
+
+// Характеристика вне Приложения C — кандидат на расширение справочника.
+export interface UnknownField {
+  field_name: string;
+  products: number;
+  sample: string;
+}
+
+// ---------------------------------------------------------------------------
+// Реестры допуска: ПП 719 (ГИСП), ЗАК ПАО «Россети», реестр российского ПО
+// (замечание тестировщика 16.09.2026). Записи заводятся вручную в карточке модели;
+// состояние по датам считает сервер (`registry_records_service.record_state`).
+
+export type AdmissionRegistryKey = "industrial_products" | "rosseti_attestation" | "software_registry";
+
+export type RegistryRecordState = "active" | "expiring" | "expired" | "absent" | "unknown";
+
+export interface RegistryInfo {
+  key: AdmissionRegistryKey;
+  label: string;
+  official_name: string;
+  url: string | null;
+  mentioned?: boolean;
+}
+
+export interface RegistryRecord {
+  id: string;
+  product_id: string;
+  registry: AdmissionRegistryKey;
+  presence: "present" | "absent";
+  record_number: string | null;
+  issued_at: string | null;
+  valid_to: string | null;
+  url: string | null;
+  note: string | null;
+  verified_by_user: boolean;
+  verified_at: string | null;
+  state: RegistryRecordState;
+  summary: string;
+  updated_at: string;
+}
+
+export interface RegistryRecordUpsert {
+  presence: "present" | "absent";
+  record_number?: string | null;
+  issued_at?: string | null;
+  valid_to?: string | null;
+  url?: string | null;
+  note?: string | null;
+  verified?: boolean;
+}
+
+export interface ProductRegistryRow extends RegistryInfo {
+  registry: AdmissionRegistryKey;
+  state: RegistryRecordState;
+  record: RegistryRecord | null;
+}
+
+export interface TenderRegistryCheck {
+  requirements: {
+    id: string;
+    text: string;
+    criticality: Criticality | null;
+    registries: AdmissionRegistryKey[];
+  }[];
+  mentioned_registries: AdmissionRegistryKey[];
+  registries: RegistryInfo[];
+  manufacturers: {
+    manufacturer_id: string;
+    name: string;
+    is_mirtek: boolean;
+    registries: Record<
+      string,
+      {
+        state: RegistryRecordState;
+        products: {
+          product_id: string;
+          model_name: string;
+          state: RegistryRecordState;
+          summary: string;
+          record_number: string | null;
+          valid_to: string | null;
+          url: string | null;
+        }[];
+      }
+    >;
+  }[];
 }

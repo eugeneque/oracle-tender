@@ -8,6 +8,8 @@ from app.db.session import get_db
 from app.models.manufacturer import CharacteristicSource, Product, ProductCharacteristic, SiType
 from app.models.user import User
 from app.schemas.manufacturer import (
+    CatalogDocumentOut,
+    CatalogDocumentsSummaryOut,
     CatalogLookupRequest,
     CatalogTaskOut,
     CharacteristicOut,
@@ -21,6 +23,11 @@ from app.schemas.manufacturer import (
     ManufacturerOut,
     CatalogSiteOut,
     CatalogSyncOutcomeOut,
+    DescriptionIngestOutcomeOut,
+    DiscoveryOutcomeOut,
+    ModificationsOutcomeOut,
+    ProductDocumentationOut,
+    UnknownFieldOut,
     ProductCreate,
     ProductOut,
     ProductUpdate,
@@ -29,12 +36,17 @@ from app.schemas.manufacturer import (
 )
 from app.services import (
     catalog_import,
+    catalog_learning,
     catalog_queue_service,
     characteristic_extraction,
+    document_discovery,
+    document_registry_service,
     fgis_catalog_sync,
+    fgis_description_ingest,
     product_manual_ingest,
     catalog_site_sync,
     product_catalog_service,
+    registry_modifications,
     si_type_linking,
 )
 from app.services.yandex_ai_client import YandexAiNotConfiguredError
@@ -517,3 +529,218 @@ def post_link_si_types(
         db, manufacturer, actor_id=admin.id, relink=relink
     )
     return LinkSiTypesOutcomeOut(**vars(outcome))
+
+
+# --- Справочник документов по СИ и руководств (правка по итогам показа 15.09.2026) ---
+
+
+@router.get("/catalog/documents", response_model=list[CatalogDocumentOut])
+def get_catalog_documents(
+    manufacturer_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Документы производителя с актуальными датами: руководства и паспорта моделей,
+    «Описания типа», сертификаты и декларации. Погасшие строки (ссылка пропала из
+    справочника) отдаются тоже — они в конце списка."""
+
+    _get_manufacturer_or_404(db, manufacturer_id)
+    return document_registry_service.list_documents(db, manufacturer_id=manufacturer_id)
+
+
+@router.get("/catalog/documents/summary", response_model=CatalogDocumentsSummaryOut)
+def get_catalog_documents_summary(
+    manufacturer_id: uuid.UUID | None = None,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    return document_registry_service.summary(db, manufacturer_id=manufacturer_id)
+
+
+@router.post(
+    "/catalog/documents/check",
+    response_model=CatalogTaskOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def post_catalog_documents_check(
+    manufacturer_id: uuid.UUID | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Ручной запуск сверки документов с источниками — по одному производителю или по
+    всем. Плановая идёт раз в неделю; здесь та же операция по кнопке. В фоне, через
+    очередь справочника: сверка — сотни запросов к чужим сайтам с паузами, это минуты."""
+
+    if manufacturer_id is not None:
+        _get_manufacturer_or_404(db, manufacturer_id)
+    task = document_registry_service.enqueue_check(
+        db, manufacturer_id=manufacturer_id, actor_id=admin.id
+    )
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Исполнитель сверки документов не зарегистрирован — обратитесь к администратору",
+        )
+    return task
+
+
+# --- Обучение справочника по Аршину и поиск документации (замечание заказчика 15.09.2026) ---
+#
+# Система должна учиться характеристикам приборов всех производителей по Аршину, замечать
+# изменения в «Описании типа» и находить документацию на новые исполнения, которых на сайте
+# производителя ещё нет (НАРТИС-И100-W115). Полный проход — в фоне через очередь; отдельные
+# шаги доступны и синхронно, чтобы администратор видел результат сразу.
+
+
+@router.post(
+    "/manufacturers/{manufacturer_id}/learn",
+    response_model=CatalogTaskOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def post_learn_manufacturer(
+    manufacturer_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Полный проход обучения по производителю в фоне: карточки Аршина → исполнения →
+    «Описание типа» → поиск документации → руководства. Итог — в задаче очереди
+    (`GET /catalog/queue?adapter_key=catalog_learning`) и в журнале."""
+
+    manufacturer = _get_manufacturer_or_404(db, manufacturer_id)
+    task = catalog_learning.enqueue(db, manufacturer, actor_id=admin.id)
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Исполнитель обучения справочника не зарегистрирован — обратитесь к администратору",
+        )
+    return task
+
+
+@router.post("/catalog/learn", status_code=status.HTTP_202_ACCEPTED)
+def post_learn_all(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> dict:
+    """Проход обучения по всем производителям — то же, что делает планировщик раз в неделю."""
+
+    queued = catalog_learning.enqueue_all(db, actor_id=admin.id)
+    catalog_queue_service.process_queue_in_background()
+    return {"queued": queued}
+
+
+@router.post(
+    "/manufacturers/{manufacturer_id}/discover-modifications",
+    response_model=ModificationsOutcomeOut,
+)
+def post_discover_modifications(
+    manufacturer_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Исполнения из карточек Аршина → каталог. Карточки без списка исполнений
+    перечитываются из ФГИС. Быстрый шаг без обращений к модели."""
+
+    manufacturer = _get_manufacturer_or_404(db, manufacturer_id)
+    catalog_learning.refresh_cards(db, manufacturer)
+    outcome = registry_modifications.discover_modifications(db, manufacturer, actor_id=admin.id)
+    return ModificationsOutcomeOut(**vars(outcome))
+
+
+@router.post(
+    "/manufacturers/{manufacturer_id}/ingest-description-types",
+    response_model=DescriptionIngestOutcomeOut,
+)
+def post_ingest_description_types(
+    manufacturer_id: uuid.UUID,
+    limit: int = 10,
+    refresh: bool = False,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Загрузить «Описания типа» электросчётчиков производителя и разнести характеристики
+    по привязанным моделям. `limit` — документов за проход (каждый — обращения к модели);
+    `refresh=true` перечитывает и уже разобранные."""
+
+    manufacturer = _get_manufacturer_or_404(db, manufacturer_id)
+    outcome = fgis_description_ingest.ingest_description_types(
+        db, manufacturer, actor_id=admin.id, limit=limit, refresh=refresh
+    )
+    return DescriptionIngestOutcomeOut(**vars(outcome))
+
+
+@router.post(
+    "/manufacturers/{manufacturer_id}/discover-documents",
+    response_model=DiscoveryOutcomeOut,
+)
+def post_discover_documents(
+    manufacturer_id: uuid.UUID,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Найти через Яндекс руководства на официальном сайте для моделей без ссылки на
+    руководство. Только ссылки; разбор — «Разобрать руководства»."""
+
+    manufacturer = _get_manufacturer_or_404(db, manufacturer_id)
+    outcome = document_discovery.discover_documents(
+        db, manufacturer, actor_id=admin.id, limit=limit
+    )
+    return DiscoveryOutcomeOut(**vars(outcome))
+
+
+@router.post("/products/{product_id}/find-documentation", response_model=ProductDocumentationOut)
+def post_find_documentation(
+    product_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Найти документацию одной модели поиском в интернете (официальный сайт) и сразу
+    разобрать её. Для прибора, которого нет в каталоге на сайте производителя, это
+    единственный автоматический путь к характеристикам помимо «Описания типа»."""
+
+    product = _get_product_or_404(db, product_id)
+    manufacturer = _get_manufacturer_or_404(db, product.manufacturer_id)
+
+    discovery = document_discovery.DiscoveryOutcome()
+    found = document_discovery.find_manual_for_product(db, product, manufacturer, outcome=discovery)
+    if found is None:
+        return ProductDocumentationOut(
+            message=(
+                discovery.messages[0]
+                if discovery.messages
+                else (
+                    f"На официальном сайте документация для «{product.model_code or product.model_name}» "
+                    f"поиском не найдена (запросов: {discovery.queries}). Ссылку можно указать вручную."
+                )
+            )
+        )
+    document_discovery.save_manual_link(db, product, found.url)
+    ingest = product_manual_ingest.ingest_manuals(
+        db, manufacturer, actor=admin, limit=1, refresh=True, products=[product]
+    )
+    return ProductDocumentationOut(
+        manual_url=found.url,
+        reasons=found.reasons,
+        ingest=ManualIngestOutcomeOut(**vars(ingest)),
+        message=(
+            f"Найдено {found.url} ({', '.join(found.reasons)}); характеристик сохранено "
+            f"{ingest.characteristics_saved}"
+            + ("; документ закрыт robots.txt сайта" if ingest.skipped_by_robots else "")
+            + ("; документ не загрузился" if ingest.failed else "")
+        ),
+    )
+
+
+@router.get("/manufacturers/{manufacturer_id}/unknown-fields", response_model=list[UnknownFieldOut])
+def get_unknown_fields(
+    manufacturer_id: uuid.UUID,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Характеристики вне Приложения C у моделей производителя — кандидаты на расширение
+    справочника (новые характеристики приборов появляются в документации раньше, чем в
+    справочнике)."""
+
+    _get_manufacturer_or_404(db, manufacturer_id)
+    return characteristic_extraction.unknown_fields_summary(db, manufacturer_id, limit=min(limit, 200))

@@ -521,6 +521,15 @@ def sync_catalog(
     outcome.si_types_linked = link_outcome.linked
     outcome.marked_for_review += link_outcome.needs_review
 
+    # Новые модели должны сразу увидеть списки ПО верхнего уровня, а не ждать их
+    # еженедельного чтения: связь «запись списка → модель» строится по каталогу.
+    try:
+        from app.services.upper_software_service import link_devices
+
+        link_devices(db)
+    except Exception as exc:  # noqa: BLE001 - сбой связи со списками ПО не отменяет обход
+        logger.warning(f"Связь моделей со списками ПО верхнего уровня не обновлена: {exc}")
+
     log_action(
         db,
         component=COMPONENT,

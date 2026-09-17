@@ -92,6 +92,20 @@ class RobotsGate:
         # и считать это запретом значило бы не скачать ничего ни с одного такого сайта.
         return True if parser is None else parser.can_fetch(self._user_agent, url)
 
+    def crawl_delay(self, url: str) -> float | None:
+        """Пауза между запросами к сайту, если `robots.txt` её требует (Инкотекс просит
+        десять секунд). `None` — сайт ничего не требует."""
+
+        parts = urlparse(url)
+        origin = f"{parts.scheme}://{parts.netloc}"
+        if origin not in self._parsers:
+            self._parsers[origin] = self._load(origin)
+        parser = self._parsers[origin]
+        if parser is None:
+            return None
+        delay = parser.crawl_delay(self._user_agent)
+        return float(delay) if delay else None
+
     def _load(self, origin: str) -> RobotFileParser | None:
         parser = RobotFileParser()
         parser.set_url(f"{origin}/robots.txt")
@@ -120,8 +134,12 @@ def ingest_manuals(
     limit: int = 20,
     use_ai: bool = True,
     refresh: bool = False,
+    products: list[Product] | None = None,
 ) -> IngestOutcome:
     """Скачивает руководства моделей производителя и извлекает из них характеристики.
+
+    `products` — ограничить проход перечисленными моделями (одна модель после поиска её
+    документации в интернете); по умолчанию берутся все модели производителя.
 
     Берутся только модели, у которых ссылка есть, а характеристик из руководства ещё нет:
     повторный запуск не переплачивает за уже разобранные документы. `limit` ограничивает
@@ -139,13 +157,14 @@ def ingest_manuals(
     # оплачивалось бы по числу исполнений, а не по числу документов.
     parsed: dict[str, list] = {}
 
-    products = list(
-        db.scalars(
-            select(Product)
-            .where(Product.manufacturer_id == manufacturer.id)
-            .order_by(Product.model_name)
+    if products is None:
+        products = list(
+            db.scalars(
+                select(Product)
+                .where(Product.manufacturer_id == manufacturer.id)
+                .order_by(Product.model_name)
+            )
         )
-    )
 
     with httpx.Client(
         headers={"User-Agent": DEFAULT_USER_AGENT},

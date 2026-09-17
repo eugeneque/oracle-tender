@@ -1,5 +1,16 @@
 import { useEffect, useState } from "react";
-import { Loader2, Plus, Search, Trash2 } from "lucide-react";
+import {
+  Building2,
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  Pencil,
+  Plus,
+  Search,
+  Star,
+  Trash2,
+  X,
+} from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
 import type {
@@ -11,82 +22,460 @@ import type {
 } from "../../api/types";
 
 /**
- * Профиль компании (раздел 5.6 «Настройки», раздел 7 ТЗ).
+ * Профили компаний (раздел 5.6 «Моя компания», раздел 7 ТЗ).
  *
  * Вход главной метрики: измерения «Задача» и «Компетенции» AI-оценки (раздел 5.5.1)
  * сравнивают требования закупки не с каталогом приборов, а с самой компанией — её
  * допусками, стажем и выполненными проектами. Пока раздел пуст, оценка не считается вовсе,
  * и карточка тендера прямо об этом говорит.
  *
- * Форма правится целиком и сохраняется одной кнопкой: лицензий и проектов немного, а
- * построчное сохранение здесь означало бы CRUD ради двух десятков строк.
+ * Компаний с 07.09.2026 может быть несколько, ограничения на количество нет: работа с
+ * закупками идёт от разных юрлиц, и разложить участие по ним без отдельных карточек нельзя.
+ * Одна компания помечена основной — с ней и считается оценка, по её ИНН синхронизируется
+ * история участий. Остальные пока только хранятся: аналитика по юрлицам появится позже, но
+ * данные для неё копятся с этого момента.
  *
- * Юридические данные (наименование, ИНН, КПП, ОГРН, дата регистрации, адрес) ищутся
- * автопоиском, но **не сохраняются сами**: найденное подставляется в поля, а записывает его в
- * профиль человек кнопкой «Сохранить». Профиль подаётся в обоснования AI-оценки, и
- * непроверенный результат внешнего сервиса там неотличим от подтверждённого факта.
+ * Список — свёрнутые строки, правка — модальное окно. Форма профиля длинная (реквизиты,
+ * стаж, допуски, проекты), и держать её раскрытой для каждой компании значило бы прятать сам
+ * список за экранами полей.
+ *
+ * Юридические данные ищутся автопоиском, но **не сохраняются сами**: найденное подставляется
+ * в поля, а записывает его человек кнопкой «Сохранить». Профиль подаётся в обоснования
+ * AI-оценки, и непроверенный результат внешнего сервиса там неотличим от подтверждённого
+ * факта.
  *
  * Источников автопоиска два, и выбираются они по виду запроса: ссылка на карточку
  * rusprofile.ru разбирается напрямую (единственный путь, дающий КПП, — в выдаче ЕГРЮЛ его
  * нет), всё остальное — ИНН, ОГРН, название — уходит в ЕГРЮЛ как в первоисточник.
- *
- * ИНН здесь — не просто реквизит: по нему синхронизируется история участий (вкладка рядом),
- * то есть без него не считается измерение «История».
  */
 
 const inputClass =
   "mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none";
 
-export function CompanyProfileForm({
+export function CompanyProfilesPanel({
   isAdmin,
-  onProfileLoaded,
+  onPrimaryLoaded,
 }: {
   isAdmin: boolean;
-  /** Соседняя вкладка «История участий» показывает кнопку синхронизации только когда ИНН
-   * заполнен — иначе синхронизировать не по чему. */
-  onProfileLoaded?: (profile: CompanyProfile | null) => void;
+  /** Соседняя вкладка «История участий» синхронизируется по ИНН основной компании — и
+   * показывает кнопку только когда он заполнен. */
+  onPrimaryLoaded?: (profile: CompanyProfile | null) => void;
 }) {
-  // Загруженный профиль наружу отдаётся колбэком, а не хранится здесь: состояние
-  // «заполнен / есть ли ИНН» нужно обёртке «Моя компания» и соседней вкладке, и вторая
-  // копия того же факта в этой форме разошлась бы с первой.
-  const [legalName, setLegalName] = useState("");
-  const [inn, setInn] = useState("");
-  const [kpp, setKpp] = useState("");
-  const [ogrn, setOgrn] = useState("");
-  const [registrationDate, setRegistrationDate] = useState("");
-  const [legalAddress, setLegalAddress] = useState("");
-  const [lookupQuery, setLookupQuery] = useState("");
-  const [candidates, setCandidates] = useState<EgrulCandidate[] | null>(null);
-  const [isLookingUp, setIsLookingUp] = useState(false);
-  const [years, setYears] = useState<string>("");
-  const [licenses, setLicenses] = useState<CompanyLicense[]>([]);
-  const [projects, setProjects] = useState<CompanyPastProject[]>([]);
-  const [isSaving, setIsSaving] = useState(false);
+  const [profiles, setProfiles] = useState<CompanyProfile[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  // null — модалка закрыта, undefined-профиль внутри — режим добавления новой компании.
+  const [editing, setEditing] = useState<{ profile: CompanyProfile | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  // Подтверждение удаления живёт в самой строке, а не в системном `confirm`: карточка
+  // компании — не мелочь, которую сносят не глядя, а спрашивать о ней окном браузера поверх
+  // тёмного интерфейса значит выдёргивать человека из страницы.
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+
+  const publish = (list: CompanyProfile[]) => {
+    setProfiles(list);
+    onPrimaryLoaded?.(list.find((item) => item.is_primary) ?? null);
+  };
 
   const load = async () => {
     try {
-      const data = await api.get<CompanyProfile | null>("/company-profile");
-      setLegalName(data?.legal_name ?? "");
-      setInn(data?.inn ?? "");
-      setKpp(data?.kpp ?? "");
-      setOgrn(data?.ogrn ?? "");
-      setRegistrationDate(data?.registration_date ?? "");
-      setLegalAddress(data?.legal_address ?? "");
-      setYears(data?.years_of_experience ? String(data.years_of_experience) : "");
-      setLicenses(data?.licenses ?? []);
-      setProjects(data?.past_projects ?? []);
-      onProfileLoaded?.(data);
+      publish(await api.get<CompanyProfile[]>("/company-profiles"));
       setError(null);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Не удалось загрузить профиль компании");
+      setError(err instanceof ApiError ? err.message : "Не удалось загрузить список компаний");
+    } finally {
+      setIsLoading(false);
     }
   };
 
   useEffect(() => {
     void load();
   }, []);
+
+  const makePrimary = async (profile: CompanyProfile) => {
+    setBusyId(profile.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.post<CompanyProfile>(`/company-profiles/${profile.id}/primary`);
+      await load();
+      setNotice(
+        `Основная компания — «${companyTitle(profile)}». Уже посчитанные оценки не ` +
+          "пересчитываются: каждая хранит снимок профиля и остаётся объяснимой.",
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось сменить основную компанию");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const remove = async (profile: CompanyProfile) => {
+    setConfirmingId(null);
+    setBusyId(profile.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.delete(`/company-profiles/${profile.id}`);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось удалить компанию");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div>
+      {error && (
+        <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
+          {error}
+        </div>
+      )}
+      {notice && (
+        <div className="mb-4 rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-4 py-2.5 text-sm text-indigo-300">
+          {notice}
+        </div>
+      )}
+
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-[11px] leading-relaxed text-zinc-600">
+          Компаний может быть сколько угодно. Оценку тендеров и историю участий питает
+          основная — остальные карточки копят данные для аналитики по юрлицам.
+        </p>
+        {isAdmin && (
+          <button
+            onClick={() => setEditing({ profile: null })}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+          >
+            <Plus size={13} />
+            Добавить компанию
+          </button>
+        )}
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center gap-2 py-6 text-xs text-zinc-500">
+          <Loader2 size={14} className="animate-spin" />
+          Загружаем компании…
+        </div>
+      ) : profiles.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-white/10 px-4 py-8 text-center text-xs text-zinc-600">
+          Компаний пока нет. Без профиля не считаются измерения «Задача» и «Компетенции» —
+          {isAdmin ? " добавьте первую компанию." : " попросите администратора завести профиль."}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {profiles.map((profile) => (
+            <CompanyRow
+              key={profile.id}
+              profile={profile}
+              isAdmin={isAdmin}
+              isExpanded={expandedId === profile.id}
+              isBusy={busyId === profile.id}
+              isConfirmingDelete={confirmingId === profile.id}
+              onToggle={() =>
+                setExpandedId((prev) => (prev === profile.id ? null : profile.id))
+              }
+              onEdit={() => setEditing({ profile })}
+              onMakePrimary={() => void makePrimary(profile)}
+              onAskDelete={() => setConfirmingId(profile.id)}
+              onCancelDelete={() => setConfirmingId(null)}
+              onConfirmDelete={() => void remove(profile)}
+            />
+          ))}
+        </div>
+      )}
+
+      {!isAdmin && profiles.length > 0 && (
+        <p className="mt-3 text-[11px] text-zinc-600">
+          Компании правит администратор: они влияют на оценку всех тендеров сразу.
+        </p>
+      )}
+
+      {editing && (
+        <CompanyProfileModal
+          profile={editing.profile}
+          isAdmin={isAdmin}
+          onClose={() => setEditing(null)}
+          onSaved={(saved) => {
+            setEditing(null);
+            setExpandedId(saved.id);
+            setNotice(
+              saved.is_filled
+                ? `Компания «${companyTitle(saved)}» сохранена.`
+                : `Компания «${companyTitle(saved)}» сохранена, но профиль пуст: без стажа, ` +
+                    "допусков и проектов оценка по ней не считается.",
+            );
+            void load();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function companyTitle(profile: CompanyProfile): string {
+  return profile.legal_name?.trim() || (profile.inn ? `ИНН ${profile.inn}` : "Без наименования");
+}
+
+/**
+ * Одна компания свёрнутой строкой. Раскрытие показывает то, что реально уходит в AI-оценку —
+ * реквизиты, стаж, допуски и проекты, — чтобы не приходилось открывать форму ради проверки.
+ */
+function CompanyRow({
+  profile,
+  isAdmin,
+  isExpanded,
+  isBusy,
+  isConfirmingDelete,
+  onToggle,
+  onEdit,
+  onMakePrimary,
+  onAskDelete,
+  onCancelDelete,
+  onConfirmDelete,
+}: {
+  profile: CompanyProfile;
+  isAdmin: boolean;
+  isExpanded: boolean;
+  isBusy: boolean;
+  isConfirmingDelete: boolean;
+  onToggle: () => void;
+  onEdit: () => void;
+  onMakePrimary: () => void;
+  onAskDelete: () => void;
+  onCancelDelete: () => void;
+  onConfirmDelete: () => void;
+}) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-white/[0.08] bg-black/20">
+      <div className="flex items-center gap-2 px-3 py-2.5">
+        <button
+          onClick={onToggle}
+          className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+          title={isExpanded ? "Свернуть" : "Развернуть"}
+        >
+          <span className="text-zinc-600">
+            {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </span>
+          <span
+            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
+              profile.is_primary
+                ? "bg-indigo-500/10 text-indigo-400"
+                : "bg-white/[0.04] text-zinc-500"
+            }`}
+          >
+            <Building2 size={14} />
+          </span>
+          <span className="min-w-0">
+            <span className="block truncate text-sm text-zinc-200">
+              {companyTitle(profile)}
+            </span>
+            <span className="block truncate text-[11px] text-zinc-600">
+              {[
+                profile.inn ? `ИНН ${profile.inn}` : "ИНН не указан",
+                profile.kpp ? `КПП ${profile.kpp}` : null,
+                profile.years_of_experience ? `стаж ${profile.years_of_experience} лет` : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
+          </span>
+        </button>
+
+        {isConfirmingDelete ? (
+          <div className="flex shrink-0 items-center gap-2 text-[11px] text-zinc-400">
+            Удалить компанию?
+            <button
+              onClick={onConfirmDelete}
+              className="rounded-lg border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-red-300 hover:bg-red-500/20"
+            >
+              Удалить
+            </button>
+            <button
+              onClick={onCancelDelete}
+              className="rounded-lg border border-white/10 px-2.5 py-1 text-zinc-300 hover:bg-white/5"
+            >
+              Отмена
+            </button>
+          </div>
+        ) : (
+        <div className="flex shrink-0 items-center gap-1.5">
+          {profile.is_primary && (
+            <span className="rounded-md border border-indigo-500/30 bg-indigo-500/10 px-2 py-0.5 text-[11px] text-indigo-300">
+              основная
+            </span>
+          )}
+          {!profile.is_filled && (
+            <span className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
+              не заполнен
+            </span>
+          )}
+          {isBusy && <Loader2 size={13} className="animate-spin text-zinc-500" />}
+          {isAdmin && !profile.is_primary && (
+            <button
+              onClick={onMakePrimary}
+              disabled={isBusy}
+              className="rounded-lg border border-white/10 px-2 py-1 text-zinc-500 hover:bg-white/5 hover:text-indigo-300 disabled:opacity-50"
+              title="Сделать основной — с неё будет считаться AI-оценка"
+            >
+              <Star size={13} />
+            </button>
+          )}
+          {isAdmin && (
+            <button
+              onClick={onEdit}
+              className="rounded-lg border border-white/10 px-2 py-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
+              title="Изменить"
+            >
+              <Pencil size={13} />
+            </button>
+          )}
+          {isAdmin && !profile.is_primary && (
+            <button
+              onClick={onAskDelete}
+              disabled={isBusy}
+              className="rounded-lg border border-white/10 px-2 py-1 text-zinc-500 hover:bg-white/5 hover:text-red-400 disabled:opacity-50"
+              title="Удалить"
+            >
+              <Trash2 size={13} />
+            </button>
+          )}
+        </div>
+        )}
+      </div>
+
+      {isExpanded && (
+        <div className="border-t border-white/[0.06] px-3 py-3">
+          <dl className="grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
+            <Detail label="Юридическое наименование" value={profile.legal_name} />
+            <Detail label="ОГРН" value={profile.ogrn} />
+            <Detail
+              label="Дата регистрации"
+              value={
+                profile.registration_date
+                  ? new Date(profile.registration_date).toLocaleDateString("ru-RU")
+                  : null
+              }
+            />
+            <Detail
+              label="Стаж работы"
+              value={
+                profile.years_of_experience ? `${profile.years_of_experience} лет` : null
+              }
+            />
+            <div className="sm:col-span-2">
+              <Detail label="Юридический адрес" value={profile.legal_address} />
+            </div>
+          </dl>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div>
+              <h4 className="mb-1 text-[11px] font-medium text-zinc-400">
+                Допуски и лицензии
+              </h4>
+              {profile.licenses.length === 0 ? (
+                <p className="text-[11px] text-zinc-600">
+                  Не указаны — «Компетенции» посчитают, что формальных подтверждений нет.
+                </p>
+              ) : (
+                <ul className="space-y-0.5 text-[11px] text-zinc-400">
+                  {profile.licenses.map((license, index) => (
+                    <li key={index}>
+                      {[license.name, license.number, license.valid_until]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div>
+              <h4 className="mb-1 text-[11px] font-medium text-zinc-400">
+                Реализованные проекты
+              </h4>
+              {profile.past_projects.length === 0 ? (
+                <p className="text-[11px] text-zinc-600">
+                  Не указаны — «Задаче» не с чем сопоставлять предмет закупки.
+                </p>
+              ) : (
+                <ul className="space-y-0.5 text-[11px] text-zinc-400">
+                  {profile.past_projects.map((project, index) => (
+                    <li key={index}>
+                      {[project.work_type, project.customer, project.volume, project.year]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Detail({ label, value }: { label: string; value: string | null }) {
+  return (
+    <div>
+      <dt className="text-[11px] text-zinc-600">{label}</dt>
+      <dd className="text-zinc-300">{value?.trim() ? value : "—"}</dd>
+    </div>
+  );
+}
+
+/**
+ * Форма компании в модальном окне.
+ *
+ * Форма правится целиком и сохраняется одной кнопкой: лицензий и проектов немного, а
+ * построчное сохранение здесь означало бы CRUD ради двух десятков строк.
+ *
+ * Новая компания создаётся POST-ом, существующая правится PUT-ом по своему id — основной
+ * от этого никто не становится: смена основной компании меняет входы оценки по всем
+ * тендерам сразу и делается отдельной кнопкой в списке.
+ */
+export function CompanyProfileModal({
+  profile,
+  isAdmin,
+  onClose,
+  onSaved,
+}: {
+  /** null — создаём новую компанию. */
+  profile: CompanyProfile | null;
+  isAdmin: boolean;
+  onClose: () => void;
+  onSaved: (profile: CompanyProfile) => void;
+}) {
+  const [legalName, setLegalName] = useState(profile?.legal_name ?? "");
+  const [inn, setInn] = useState(profile?.inn ?? "");
+  const [kpp, setKpp] = useState(profile?.kpp ?? "");
+  const [ogrn, setOgrn] = useState(profile?.ogrn ?? "");
+  const [registrationDate, setRegistrationDate] = useState(profile?.registration_date ?? "");
+  const [legalAddress, setLegalAddress] = useState(profile?.legal_address ?? "");
+  const [lookupQuery, setLookupQuery] = useState("");
+  const [candidates, setCandidates] = useState<EgrulCandidate[] | null>(null);
+  const [isLookingUp, setIsLookingUp] = useState(false);
+  const [years, setYears] = useState<string>(
+    profile?.years_of_experience ? String(profile.years_of_experience) : "",
+  );
+  const [licenses, setLicenses] = useState<CompanyLicense[]>(profile?.licenses ?? []);
+  const [projects, setProjects] = useState<CompanyPastProject[]>(profile?.past_projects ?? []);
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
 
   const lookup = async () => {
     const query = lookupQuery.trim() || inn.trim() || legalName.trim();
@@ -126,7 +515,7 @@ export function CompanyProfileForm({
     setLegalAddress(candidate.legal_address ?? "");
     setNotice(
       `Данные подставлены из источника «${candidate.source === "rusprofile" ? "rusprofile.ru" : "ЕГРЮЛ"}». ` +
-        "Проверьте их и нажмите «Сохранить профиль» — до этого они никуда не записаны.",
+        "Проверьте их и нажмите «Сохранить» — до этого они никуда не записаны.",
     );
   };
 
@@ -148,18 +537,12 @@ export function CompanyProfileForm({
         licenses: licenses.filter((item) => item.name.trim() !== ""),
         past_projects: projects.filter((item) => item.work_type.trim() !== ""),
       };
-      const updated = await api.put<CompanyProfile>("/company-profile", payload);
-      setLicenses(updated.licenses);
-      setProjects(updated.past_projects);
-      setCandidates(null);
-      onProfileLoaded?.(updated);
-      setNotice(
-        updated.is_filled
-          ? "Профиль сохранён — AI-оценку по профилю теперь можно считать."
-          : "Профиль сохранён, но пуст: без стажа, допусков и проектов оценка не считается.",
-      );
+      const saved = profile
+        ? await api.put<CompanyProfile>(`/company-profiles/${profile.id}`, payload)
+        : await api.post<CompanyProfile>("/company-profiles", payload);
+      onSaved(saved);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Не удалось сохранить профиль");
+      setError(err instanceof ApiError ? err.message : "Не удалось сохранить компанию");
     } finally {
       setIsSaving(false);
     }
@@ -172,8 +555,33 @@ export function CompanyProfileForm({
     setProjects((prev) => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)));
 
   return (
-    <div>
-      <div>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 py-8"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-white/10 bg-zinc-900 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-white/[0.08] px-5 py-3">
+          <h2 className="text-sm text-zinc-200">
+            {profile ? "Компания" : "Новая компания"}
+            {profile?.is_primary && (
+              <span className="ml-2 rounded-md border border-indigo-500/30 bg-indigo-500/10 px-2 py-0.5 text-[11px] text-indigo-300">
+                основная
+              </span>
+            )}
+          </h2>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
+            title="Закрыть"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4">
           {error && (
             <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
               {error}
@@ -220,7 +628,7 @@ export function CompanyProfileForm({
                   ИНН, ОГРН или название ищутся в ЕГРЮЛ. Ссылка на карточку rusprofile
                   разбирается напрямую — только этот путь даёт КПП, в выдаче ЕГРЮЛ его нет.
                   Найденное подставляется в поля и никуда не записывается, пока вы не нажмёте
-                  «Сохранить профиль».
+                  «Сохранить».
                 </p>
               </div>
             )}
@@ -264,8 +672,8 @@ export function CompanyProfileForm({
                   className={inputClass}
                 />
                 <span className="mt-1 block text-[11px] text-zinc-600">
-                  По нему синхронизируется история участий — без ИНН измерение «История» не
-                  считается.
+                  По ИНН основной компании синхронизируется история участий — без него
+                  измерение «История» не считается.
                 </span>
               </label>
               <label className="block text-xs text-zinc-400">
@@ -458,26 +866,31 @@ export function CompanyProfileForm({
             </div>
           </div>
 
-          {isAdmin ? (
+          <p className="text-[11px] leading-relaxed text-zinc-600">
+            Уже посчитанные оценки после правки профиля не пересчитываются автоматически —
+            каждая хранит снимок профиля на момент расчёта и остаётся объяснимой. Нужные
+            тендеры пересчитываются кнопкой в карточке.
+          </p>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-white/[0.08] px-5 py-3">
+          <button
+            onClick={onClose}
+            className="rounded-lg border border-white/10 px-3 py-2 text-sm text-zinc-300 hover:bg-white/5"
+          >
+            {isAdmin ? "Отмена" : "Закрыть"}
+          </button>
+          {isAdmin && (
             <button
               onClick={() => void save()}
               disabled={isSaving}
               className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
             >
               {isSaving && <Loader2 size={14} className="animate-spin" />}
-              Сохранить профиль
+              Сохранить
             </button>
-          ) : (
-            <p className="text-xs text-zinc-600">
-              Профиль правит администратор: он влияет на оценку всех тендеров сразу.
-            </p>
           )}
-
-          <p className="mt-3 text-[11px] text-zinc-600">
-            Уже посчитанные оценки после правки профиля не пересчитываются автоматически —
-            каждая хранит снимок профиля на момент расчёта и остаётся объяснимой. Нужные
-            тендеры пересчитываются кнопкой в карточке.
-          </p>
+        </div>
       </div>
     </div>
   );

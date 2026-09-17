@@ -13,6 +13,7 @@ import {
 
 import { ApiError, api } from "../api/client";
 import type { Source, SourcePollResult, YandexAiStudioSettings } from "../api/types";
+import { MANUAL_SOURCE_TYPE } from "../api/types";
 import { AppShell } from "../components/AppShell";
 import { BitrixSection } from "../components/settings/BitrixSection";
 import { CredentialsSection } from "../components/settings/CredentialsSection";
@@ -271,7 +272,10 @@ export function SettingsPage() {
 
   const loadSources = async () => {
     try {
-      setSources(await api.get<Source[]>("/sources"));
+      // Источник ручных заявок — не площадка: ни адреса, ни опроса, ни доступности.
+      setSources(
+        (await api.get<Source[]>("/sources")).filter((s) => s.type !== MANUAL_SOURCE_TYPE),
+      );
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Не удалось загрузить источники");

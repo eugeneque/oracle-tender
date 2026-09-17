@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Ban,
@@ -19,10 +19,11 @@ import {
   Scale,
   Sparkles,
   Star,
+  Upload,
   X,
 } from "lucide-react";
 
-import { ApiError, api, downloadFile } from "../api/client";
+import { ApiError, api, downloadFile, postForm } from "../api/client";
 import type {
   AiProfileScore,
   BackgroundJob,
@@ -46,6 +47,8 @@ import { TenderApplicationTab } from "./tender-detail/TenderApplicationTab";
 import { TenderCalculationTab } from "./tender-detail/TenderCalculationTab";
 import { TenderCardTab } from "./tender-detail/TenderCardTab";
 import { TenderComplianceTab } from "./tender-detail/TenderComplianceTab";
+import { TenderUpperSoftwareBlock } from "./tender-detail/TenderUpperSoftwareBlock";
+import { TenderRegistryBlock } from "./tender-detail/TenderRegistryBlock";
 import { TenderExtraTab } from "./tender-detail/TenderExtraTab";
 import { TenderHistoryTab } from "./tender-detail/TenderHistoryTab";
 import { TenderOverviewTab } from "./tender-detail/TenderOverviewTab";
@@ -166,6 +169,8 @@ export function TenderDetailPanel({
   const [documents, setDocuments] = useState<TenderDocument[] | null>(null);
   const [docsError, setDocsError] = useState<string | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const [requirements, setRequirements] = useState<Requirement[] | null>(null);
   // Последний запуск анализа документов. Нужен пустой вкладке «Требования»: без него она
@@ -406,6 +411,30 @@ export function TenderDetailPanel({
     }
   };
 
+  /** Файл, присланный заказчиком письмом, — к любой закупке, не только к заявке: уточнённое
+   * ТЗ по собранному тендеру тоже должно попасть в анализ. */
+  const uploadDocuments = async (files: FileList) => {
+    if (files.length === 0) return;
+    setIsUploading(true);
+    setError(null);
+    try {
+      const form = new FormData();
+      for (const file of Array.from(files)) form.append("files", file, file.name);
+      const added = await postForm<TenderDocument[]>(
+        `/tenders/${tender.id}/documents/upload`,
+        form,
+      );
+      setDocuments((prev) => [...(prev ?? []), ...added]);
+      setActionMessage(
+        `Добавлено файлов: ${added.length} — запустите «Анализ документов», чтобы учесть их`,
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось загрузить файлы");
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   const togglePriority = async (document: TenderDocument) => {
     setError(null);
     try {
@@ -500,6 +529,23 @@ export function TenderDetailPanel({
 
   const setRelevance = async (status: "confirmed" | "rejected") => {
     await saveChanges({ relevance_status: status });
+  };
+
+  // Избранное (замечание тестировщика 16.09.2026): отложить закупку, чтобы вернуться к ней
+  // позже. Личное — у каждого пользователя своё; раздел «Избранное» на странице тендеров
+  // показывает отложенное вне фильтров по умолчанию.
+  const toggleBookmark = async () => {
+    setError(null);
+    try {
+      applyTender(
+        tender.is_bookmarked
+          ? await api.delete<Tender>(`/tenders/${tender.id}/bookmark`)
+          : await api.put<Tender>(`/tenders/${tender.id}/bookmark`, {}),
+      );
+      if (history !== null) await loadHistory();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось изменить избранное");
+    }
   };
 
   const changeStage = async (stage: TenderStage) => {
@@ -620,14 +666,33 @@ export function TenderDetailPanel({
           </div>
           <h2 className="text-base font-semibold leading-snug text-white">{tender.title}</h2>
         </div>
-        {onClose && (
+        <div className="flex shrink-0 items-center gap-1">
           <button
-            onClick={onClose}
-            className="shrink-0 rounded-md p-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
+            onClick={toggleBookmark}
+            title={
+              tender.is_bookmarked
+                ? "Убрать из избранного"
+                : "В избранное — чтобы вернуться к закупке позже (раздел «Избранное» на странице тендеров)"
+            }
+            aria-pressed={tender.is_bookmarked}
+            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+              tender.is_bookmarked
+                ? "border-amber-400/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                : "border-white/10 text-zinc-400 hover:bg-white/5 hover:text-zinc-200"
+            }`}
           >
-            <X size={18} />
+            <Star size={14} fill={tender.is_bookmarked ? "currentColor" : "none"} />
+            {tender.is_bookmarked ? "В избранном" : "В избранное"}
           </button>
-        )}
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="rounded-md p-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
+            >
+              <X size={18} />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Тоже одна строка с прокруткой, а не перенос: вторая строка кнопок съедала у
@@ -823,6 +888,35 @@ export function TenderDetailPanel({
 
         {activeTab === "documents" && (
           <div>
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <span className="text-xs text-zinc-500">
+                Документы закупки — с площадки и приложенные вручную
+              </span>
+              <button
+                onClick={() => uploadInputRef.current?.click()}
+                disabled={isUploading}
+                title="Приложить файл, присланный заказчиком: проект договора, ТЗ, спецификацию"
+                className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+              >
+                {isUploading ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <Upload size={13} />
+                )}
+                {isUploading ? "Загружаю…" : "Добавить файл"}
+              </button>
+              <input
+                ref={uploadInputRef}
+                type="file"
+                multiple
+                accept=".pdf,.doc,.docx,.rtf,.xls,.xlsx,.xlsm,.txt,.zip,.7z,.rar"
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files) void uploadDocuments(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+            </div>
             {documents === null && !docsError && (
               <div className="flex items-center gap-2 text-sm text-zinc-500">
                 <Loader2 size={14} className="animate-spin" />
@@ -831,7 +925,9 @@ export function TenderDetailPanel({
             )}
             {docsError && <div className="text-sm text-red-400">{docsError}</div>}
             {documents && documents.length === 0 && (
-              <div className="text-sm text-zinc-500">Документы не найдены</div>
+              <div className="text-sm text-zinc-500">
+                Документов нет — приложите файл кнопкой «Добавить файл»
+              </div>
             )}
             {documents && documents.length > 0 && (
               <div className="space-y-2">
@@ -880,10 +976,17 @@ export function TenderDetailPanel({
               Загрузка матрицы соответствия…
             </div>
           ) : (
-            <TenderComplianceTab
-              matrix={matrix}
-              requirementsCount={requirements === null ? null : requirements.length}
-            />
+            <>
+              {/* Интеграция в ПО верхнего уровня — отдельно и над матрицей: ответ на самое
+                  частое требование ТЗ должен быть виден сразу (замечание тестировщика 16.09.2026). */}
+              <TenderUpperSoftwareBlock tenderId={tender.id} />
+              {/* Допуски (ПП 719, ЗАК Россетей, реестр ПО) — по той же причине над матрицей. */}
+              <TenderRegistryBlock tenderId={tender.id} />
+              <TenderComplianceTab
+                matrix={matrix}
+                requirementsCount={requirements === null ? null : requirements.length}
+              />
+            </>
           ))}
 
         {activeTab === "history" && (

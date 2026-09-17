@@ -2,7 +2,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -21,6 +21,7 @@ from app.schemas.tender import (
     AssigneeUpdate,
     DocumentFlagsUpdate,
     ExtraSectionOut,
+    ManualRequestOut,
     NicheStatisticsOut,
     SimilarTenderOut,
     StageUpdate,
@@ -33,6 +34,8 @@ from app.schemas.tender import (
     TenderCommentCreate,
     TenderDocumentOut,
     TenderHistoryOut,
+    TenderBookmarkIn,
+    TenderBookmarkOut,
     TenderOut,
     TenderBoardOut,
     TenderPageOut,
@@ -54,6 +57,7 @@ from app.services.analysis_service import (
     list_requirements,
 )
 from app.services import (
+    bookmark_service,
     ai_profile_service,
     company_profile_service,
     similarity_service,
@@ -61,6 +65,12 @@ from app.services import (
     tender_insights,
 )
 from app.services.company_profile_service import CompanyProfileError
+from app.services.manual_request_service import (
+    ManualRequestError,
+    UploadedFile,
+    attach_uploaded_documents,
+    create_manual_request,
+)
 from app.services.document_service import get_storage_root, sync_tender_documents
 from app.services.yandex_ai_client import YandexAiNotConfiguredError
 from app.services.tender_service import (
@@ -142,10 +152,13 @@ def get_tenders(
     offset: int = Query(default=0, ge=0),
     sort_by: str = Query(default=DEFAULT_SORT, description="Столбец сортировки"),
     sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
+    bookmarked: bool = Query(default=False, description="Только избранное текущего пользователя"),
     filters: TenderFilters = Depends(tender_filters),
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> TenderPageOut:
+    if bookmarked:
+        filters.bookmarked_by_user_id = user.id
     tenders = list_tenders(
         db,
         limit=limit,
@@ -157,7 +170,7 @@ def get_tenders(
     # Процент победителя и число требований живут в отдельных таблицах (этапы 5-6), но
     # нужны на каждой карточке списка — досыпаются одним запросом на всю выдачу.
     return TenderPageOut(
-        items=attach_analysis_fields(db, tenders),
+        items=attach_analysis_fields(db, tenders, user_id=user.id),
         total=count_tenders(db, filters=filters),
         limit=limit,
         offset=offset,
@@ -170,9 +183,10 @@ def get_tenders_board(
     per_column: int = Query(default=20, ge=1, le=200, description="Карточек в одной колонке"),
     sort_by: str = Query(default=DEFAULT_SORT, description="Столбец сортировки"),
     sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
+    bookmarked: bool = Query(default=False, description="Только избранное текущего пользователя"),
     filters: TenderFilters = Depends(tender_filters),
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> TenderBoardOut:
     """Доска Kanban по этапам пайплайна (раздел 5.6 ТЗ, решение 03.09.2026).
 
@@ -185,6 +199,8 @@ def get_tenders_board(
     осталось отдельным фильтром и бейджем карточки.
     """
 
+    if bookmarked:
+        filters.bookmarked_by_user_id = user.id
     columns = list_board_columns(
         db,
         per_column=per_column,
@@ -195,7 +211,9 @@ def get_tenders_board(
     # Проценты победителя досыпаются одним запросом на всю доску, а не по колонке.
     # `attach_analysis_fields` отдаёт словари, а не ORM-объекты, — раскладываем их обратно
     # по колонкам по идентификатору.
-    enriched = attach_analysis_fields(db, [t for column in columns.values() for t in column])
+    enriched = attach_analysis_fields(
+        db, [t for column in columns.values() for t in column], user_id=user.id
+    )
     by_id = {row["id"]: row for row in enriched}
 
     counts = count_tenders_by_stage(db, filters=filters)
@@ -223,18 +241,113 @@ def _get_tender_or_404(db: Session, tender_id: uuid.UUID) -> Tender:
     return tender
 
 
+def _read_uploads(uploads: list[UploadFile]) -> list[UploadedFile]:
+    """Читает multipart-файлы в память. Пустые слоты формы (браузер отправляет `files` без
+    выбранного файла как поле с пустым именем) пропускаются, а не превращаются в ошибку."""
+
+    files: list[UploadedFile] = []
+    for upload in uploads:
+        if not upload.filename:
+            continue
+        files.append(UploadedFile(file_name=upload.filename, content=upload.file.read()))
+    return files
+
+
+@router.post("/manual", response_model=ManualRequestOut, status_code=status.HTTP_201_CREATED)
+def create_manual(  # noqa: PLR0913 - поля формы заявки, каждое отдельным полем multipart
+    title: str = Form(..., max_length=2000),
+    customer_name: str | None = Form(default=None, max_length=500),
+    price: Decimal | None = Form(default=None),
+    application_end: date | None = Form(default=None),
+    comment: str | None = Form(default=None, max_length=5000),
+    run_analysis: bool = Form(default=True),
+    files: list[UploadFile] = File(default=[]),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ManualRequestOut:
+    """Ручная заявка: закупка, которую заказчик прислал напрямую (решение 15.09.2026).
+
+    Multipart, а не JSON: вместе с полями приходят файлы — проект договора, ТЗ. Файлы
+    разбираются сразу, а ИИ-анализ требований ставится фоновой задачей — той же, что и у
+    собранных тендеров (`POST /tenders/{id}/analyze`), — если `run_analysis` не снят.
+    """
+
+    try:
+        tender, documents = create_manual_request(
+            db,
+            title=title,
+            customer_name=customer_name,
+            price=price,
+            application_end=application_end,
+            comment=comment,
+            files=_read_uploads(files),
+            actor=user,
+        )
+    except ManualRequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+
+    job = None
+    if run_analysis and documents:
+        job = enqueue(db, kind=JobKind.TENDER_ANALYSIS, tender=tender, actor=user)
+
+    return ManualRequestOut(
+        tender=attach_analysis_fields(db, [tender])[0],
+        documents=[_document_out(document) for document in documents],
+        job=BackgroundJobOut.model_validate(job, from_attributes=True) if job else None,
+    )
+
+
 @router.get("/{tender_id}", response_model=TenderOut)
 def get_tender(
     tender_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     """Карточка тендера. Проходит через `attach_analysis_fields` так же, как список: без
     этого перечитывание карточки после анализа возвращало бы пустой процент победителя, и
     список, обновляемый из её ответа, терял бы уже посчитанное значение."""
 
     tender = _get_tender_or_404(db, tender_id)
-    return attach_analysis_fields(db, [tender])[0]
+    return attach_analysis_fields(db, [tender], user_id=user.id)[0]
+
+
+@router.put("/{tender_id}/bookmark", response_model=TenderOut)
+def put_tender_bookmark(
+    tender_id: uuid.UUID,
+    payload: TenderBookmarkIn | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Добавить закупку в своё избранное (повторный вызов обновляет заметку)."""
+
+    tender = _get_tender_or_404(db, tender_id)
+    bookmark_service.add(db, tender, user, note=payload.note if payload else None)
+    return attach_analysis_fields(db, [tender], user_id=user.id)[0]
+
+
+@router.delete("/{tender_id}/bookmark", response_model=TenderOut)
+def delete_tender_bookmark(
+    tender_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    tender = _get_tender_or_404(db, tender_id)
+    bookmark_service.remove(db, tender, user)
+    return attach_analysis_fields(db, [tender], user_id=user.id)[0]
+
+
+@router.get("/{tender_id}/bookmark", response_model=TenderBookmarkOut | None)
+def get_tender_bookmark(
+    tender_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Заметка избранного текущего пользователя по закупке; `null`, если её нет в избранном."""
+
+    tender = _get_tender_or_404(db, tender_id)
+    return bookmark_service.get(db, tender, user)
 
 
 def _document_out(document: TenderDocument) -> TenderDocumentOut:
@@ -267,6 +380,40 @@ def get_tender_documents(
 
     tender = _get_tender_or_404(db, tender_id)
     return [_document_out(document) for document in sync_tender_documents(db, tender)]
+
+
+@router.post(
+    "/{tender_id}/documents/upload",
+    response_model=list[TenderDocumentOut],
+    status_code=status.HTTP_201_CREATED,
+)
+def upload_tender_documents(
+    tender_id: uuid.UUID,
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[TenderDocumentOut]:
+    """Приложить файлы к тендеру вручную — к заявке или к собранной закупке, по которой
+    заказчик прислал уточнённое ТЗ письмом.
+
+    Перед загрузкой синхронизируется комплект с площадки: `sync_tender_documents` скачивает
+    его только при пустом списке, и загруженный раньше времени файл иначе навсегда
+    отменил бы скачивание документации самой закупки."""
+
+    tender = _get_tender_or_404(db, tender_id)
+    sync_tender_documents(db, tender)
+    uploads = _read_uploads(files)
+    if not uploads:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Не выбран ни один файл"
+        )
+    try:
+        documents = attach_uploaded_documents(db, tender, uploads, actor=user)
+    except ManualRequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    return [_document_out(document) for document in documents]
 
 
 @router.get("/{tender_id}/documents/{document_id}/download")

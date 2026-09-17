@@ -232,6 +232,7 @@ function MailSettings() {
             ["trigger_high_ai_score", "Высокая AI-оценка по профилю"],
             ["trigger_deadline_soon", "Приём заявок скоро закрывается"],
             ["trigger_critical_error", "Критические ошибки системы"],
+            ["trigger_documents_updated", "Обновление документов по СИ и руководств (еженедельный отчёт)"],
           ] as const
         ).map(([key, label]) => (
           <label key={key} className="flex items-center gap-2 text-xs text-zinc-400">

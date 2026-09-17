@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from app.adapters.base import PollError, TenderSummary
 from app.adapters.registry import get_adapter
 from app.models.log import LogLevel
-from app.models.source import CATALOG_SOURCE_TYPES, Source, SourceStatus
+from app.models.source import POLL_EXCLUDED_SOURCE_TYPES, Source, SourceStatus
 from app.models.tender import Tender, TenderStatus
 from app.services import notification_service
 from app.services import ai_relevance_service, relevance_service
@@ -150,6 +150,11 @@ def _upsert_tender(
             **{field: getattr(summary, field) for field in _UPDATABLE_FIELDS},
         )
         db.add(tender)
+        # Тип конкурса по наименованию — чтобы фильтр по типу работал с момента сбора;
+        # ИИ-анализ, когда его запустят, поставит свой вердикт по ТЗ.
+        from app.services.tender_gaps_service import fill_type_from_title
+
+        fill_type_from_title(tender)
         # Профиль релевантности применяется сразу при сборе — до скачивания документации и
         # до вызова модели (раздел 5.1.1 ТЗ). Не прошедший тендер не удаляется: он помечен
         # и виден в списке при снятии фильтра, потому что профиль настраивают люди и он
@@ -282,8 +287,9 @@ def poll_all_active_sources(
             Source.adapter_key.is_not(None),
             # Источники справочника продукции (ФГИС, сайт производителя) живут в той же
             # таблице ради общего управления, но тендеров не отдают — у них своё расписание
-            # и свой сервис синхронизации (`app/services/catalog_sync_service.py`).
-            Source.type.notin_(CATALOG_SOURCE_TYPES),
+            # и свой сервис синхронизации (`app/services/catalog_sync_service.py`). Ручные
+            # заявки — тоже не площадка: их заводит человек, опрашивать там нечего.
+            Source.type.notin_(POLL_EXCLUDED_SOURCE_TYPES),
         )
     ).all()
     return [poll_source(db, source, actor_id=actor_id) for source in sources]
@@ -301,7 +307,7 @@ def poll_sources(
     results = []
     for key in source_keys:
         source = get_source_by_key(db, key)
-        if source is not None and source.type not in CATALOG_SOURCE_TYPES:
+        if source is not None and source.type not in POLL_EXCLUDED_SOURCE_TYPES:
             results.append(poll_source(db, source, actor_id=actor_id))
     return results
 
@@ -356,6 +362,10 @@ class TenderFilters:
     # с 03.09.2026.
     ai_score_min: Decimal | None = None
     ai_score_max: Decimal | None = None
+    # Только избранное этого пользователя (замечание тестировщика 16.09.2026). Идентификатор
+    # подставляет эндпоинт из текущего пользователя, а не query-параметр: чужое избранное
+    # через API читать нельзя.
+    bookmarked_by_user_id: uuid.UUID | None = None
 
 
 # По каким столбцам разрешена сортировка (раздел 5.6 ТЗ — «по всем столбцам»). Явный
@@ -502,6 +512,16 @@ def _build_conditions(filters: TenderFilters) -> list:
         conditions.append(Tender.stage.in_(filters.stages))
     if filters.assignee_ids:
         conditions.append(Tender.assignee_id.in_(filters.assignee_ids))
+    if filters.bookmarked_by_user_id is not None:
+        from app.models.tender_bookmark import TenderBookmark
+
+        conditions.append(
+            Tender.id.in_(
+                select(TenderBookmark.tender_id).where(
+                    TenderBookmark.user_id == filters.bookmarked_by_user_id
+                )
+            )
+        )
     if filters.okpd2_prefix:
         # Именно префикс, а не точное совпадение: ОКПД2 иерархичен, и «26.51» должно
         # находить в том числе 26.51.63.130 (Приложение F ТЗ).

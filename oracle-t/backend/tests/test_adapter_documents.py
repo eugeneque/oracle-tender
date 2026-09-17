@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.adapters.eis_documents import normalize_eis_number
 from app.adapters.etpgpb import _parse_document_items
 from app.adapters.fabrikant import _find_documentation_url, _parse_documentation_page
@@ -219,3 +221,38 @@ class TestEisFallbackNumbers:
 
     def test_none_is_safe(self):
         assert normalize_eis_number(None) is None
+
+
+class TestEisFallbackFailures:
+    """Сброшенное соединение и «в ЕИС нет такой закупки» — разные исходы, и путать их нельзя.
+
+    С иностранных адресов (из-под VPN) zakupki.gov.ru обрывает TLS-рукопожатие. Пока оба
+    случая возвращали пустой список, анализ документов отчитывался «требований сохранено: 0»
+    без единого намёка, что документов он не видел, — и человек шёл искать в закупке ТЗ,
+    которого система не получала."""
+
+    def test_network_failure_is_raised_not_swallowed(self, monkeypatch):
+        import httpx
+
+        from app.adapters import eis_documents
+        from app.adapters.eis import EisAdapter
+
+        def reset(self, number):
+            raise httpx.ConnectError("[Errno 54] Connection reset by peer")
+
+        monkeypatch.setattr(EisAdapter, "download_documents", reset)
+
+        with pytest.raises(eis_documents.EisUnavailableError) as excinfo:
+            eis_documents.fetch_eis_documents("0711200022926000024")
+        assert "Connection reset by peer" in str(excinfo.value)
+
+    def test_missing_tender_is_just_no_documents(self, monkeypatch):
+        from app.adapters import eis_documents
+        from app.adapters.eis import EisAdapter
+
+        def not_found(self, number):
+            raise ValueError(f"Тендер {number} не найден в выдаче ЕИС")
+
+        monkeypatch.setattr(EisAdapter, "download_documents", not_found)
+
+        assert eis_documents.fetch_eis_documents("0711200022926000024") == []

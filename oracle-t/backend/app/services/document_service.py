@@ -229,13 +229,29 @@ def sync_tender_documents(db: Session, tender: Tender) -> list[TenderDocument]:
     сохранённые записи (не перекачивает заново). Источник без реализованного адаптера — не
     ошибка, просто пустой список (у площадки могло не быть перечня документов вовсе)."""
 
+    documents, _ = sync_tender_documents_with_status(db, tender)
+    return documents
+
+
+def sync_tender_documents_with_status(
+    db: Session, tender: Tender
+) -> tuple[list[TenderDocument], str | None]:
+    """То же, что `sync_tender_documents`, но вторым значением — почему перечня документов
+    нет, если его не удалось получить с площадки (или из ЕИС как запасного источника).
+
+    Пустой список без причины и пустой список из-за сброшенного соединения выглядят
+    одинаково, а означают разное: в первом случае документов у закупки нет, во втором они
+    есть, но zakupki.gov.ru не ответил (так бывает с иностранных адресов, из-под VPN).
+    Анализ документов обязан различать эти случаи в отчёте — иначе человек читает
+    «требований не найдено» и идёт искать в закупке ТЗ, которого система не видела."""
+
     existing = list_tender_documents(db, tender.id)
     if existing:
-        return existing
+        return existing, None
 
     adapter = get_adapter(tender.source.adapter_key)
     if adapter is None:
-        return []
+        return [], None
 
     try:
         doc_refs = adapter.download_documents(tender.external_id, tender.source_url)
@@ -250,7 +266,7 @@ def sync_tender_documents(db: Session, tender: Tender) -> list[TenderDocument]:
             details=str(exc),
         )
         db.commit()
-        return []
+        return [], str(exc)
 
     tender_dir = get_storage_root() / str(tender.id)
     tender_dir.mkdir(parents=True, exist_ok=True)
@@ -308,4 +324,4 @@ def sync_tender_documents(db: Session, tender: Tender) -> list[TenderDocument]:
     db.commit()
     for doc in results:
         db.refresh(doc)
-    return results
+    return results, None

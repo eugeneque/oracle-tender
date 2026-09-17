@@ -384,3 +384,32 @@ def test_nested_archive_heading_does_not_shadow_its_contents():
     result = analysis_module._prioritised_text(text)
 
     assert "класс точности 1,0" in result
+
+
+def test_long_documentation_keeps_chunks_about_the_device():
+    """Когда кусков больше предела, в модель уходят те, где говорится о приборе, а не первые
+    попавшиеся: на проекте договора ИСУ в сотню страниц техническое задание с
+    характеристиками лежало в приложении за пределом первых кусков, и анализ возвращал
+    требования к оплате вместо требований к счётчику."""
+
+    filler = "Порядок оплаты и ответственность сторон. " * 5
+    device = "Счётчик класса точности 1,0, интерфейс RS-485, протокол СПОДЭС. " * 5
+    chunks = [f"Наименование закупки {filler}"]
+    chunks += [f"{index} {filler}" for index in range(analysis_module.MAX_CHUNKS_PER_TENDER + 3)]
+    chunks.append(f"ТЗ {device}")
+    chunks.append(f"Приложение {device}")
+
+    selected = analysis_module._select_chunks(chunks)
+
+    assert len(selected) == analysis_module.MAX_CHUNKS_PER_TENDER
+    assert selected[0] == chunks[0], "первый кусок — наименование и начало документа"
+    assert selected[-2:] == chunks[-2:], "куски о приборе из конца документа отобраны"
+    # Порядок отобранных — документный, а не по убыванию «насыщенности».
+    assert [chunks.index(chunk) for chunk in selected] == sorted(
+        chunks.index(chunk) for chunk in selected
+    )
+
+
+def test_short_documentation_is_read_whole():
+    chunks = [f"кусок {index}" for index in range(analysis_module.MAX_CHUNKS_PER_TENDER)]
+    assert analysis_module._select_chunks(chunks) == chunks

@@ -5,7 +5,7 @@ import type { CompanyProfile } from "../api/types";
 import { AppShell } from "../components/AppShell";
 import { PageHeader } from "../components/PageHeader";
 import { CompanyParticipationsPanel } from "../components/settings/CompanyParticipationsSection";
-import { CompanyProfileForm } from "../components/settings/CompanyProfileSection";
+import { CompanyProfilesPanel } from "../components/settings/CompanyProfileSection";
 import { useAuth } from "../context/useAuth";
 
 /**
@@ -21,12 +21,17 @@ import { useAuth } from "../context/useAuth";
  * «как мы выступали раньше» и питает «Историю». Профиль грузится на уровне страницы, чтобы
  * вкладка истории знала, заполнен ли ИНН, и не показывала кнопку выгрузки, которой не с чем
  * работать.
+ *
+ * Компаний с 07.09.2026 несколько (ограничения на количество нет), и цифры считаются по
+ * основной из них — её же профиль страница держит у себя и передаёт вкладке истории.
+ * Остальные карточки пока только копят данные: раскладывать участие по юрлицам аналитика
+ * научится позже, но заводить их имеет смысл уже сейчас.
  */
 
 type Tab = "profile" | "participations";
 
 const TABS: Array<{ key: Tab; label: string }> = [
-  { key: "profile", label: "Профиль компании" },
+  { key: "profile", label: "Профили компаний" },
   { key: "participations", label: "История участий" },
 ];
 
@@ -50,7 +55,7 @@ export function CompanyPage() {
           actions={
             profile && !profile.is_filled ? (
               <span className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-300">
-                профиль не заполнен
+                основной профиль не заполнен
               </span>
             ) : undefined
           }
@@ -59,7 +64,8 @@ export function CompanyPage() {
         <p className="-mt-4 mb-6 max-w-3xl text-xs leading-relaxed text-zinc-500">
           Юридические данные, допуски и реальная история участия в закупках. На этих данных
           держатся все три измерения AI-оценки (раздел 5.5.1 ТЗ): без профиля не считаются
-          «Задача» и «Компетенции», без истории участий — «История».
+          «Задача» и «Компетенции», без истории участий — «История». Компаний можно завести
+          сколько угодно; оценку питает та, что помечена основной.
         </p>
 
         <div className="mb-6 flex w-full max-w-md gap-1 rounded-lg border border-white/[0.08] bg-black/20 p-1">
@@ -78,11 +84,11 @@ export function CompanyPage() {
           ))}
         </div>
 
-        {/* Обе вкладки монтируются сразу и прячутся стилем: профиль здесь — источник
-            признака «ИНН заполнен» для соседней вкладки, и перемонтирование при каждом
-            переключении гоняло бы запрос профиля впустую. */}
+        {/* Обе вкладки монтируются сразу и прячутся стилем: список компаний здесь — источник
+            признака «ИНН основной заполнен» для соседней вкладки, и перемонтирование при
+            каждом переключении гоняло бы запрос списка впустую. */}
         <div className={tab === "profile" ? "" : "hidden"}>
-          <CompanyProfileForm isAdmin={Boolean(isAdmin)} onProfileLoaded={setProfile} />
+          <CompanyProfilesPanel isAdmin={Boolean(isAdmin)} onPrimaryLoaded={setProfile} />
         </div>
         <div className={tab === "participations" ? "" : "hidden"}>
           <CompanyParticipationsPanel

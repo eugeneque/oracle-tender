@@ -39,6 +39,9 @@ def si_type_to_out(si_type: SiType) -> SiTypeOut:
         description_type_version=si_type.description_type_version,
         has_description_type_text=bool(si_type.description_type_text),
         has_allowed_modifications=bool(si_type.allowed_modifications),
+        tested_modifications=[m for m in (si_type.tested_modifications or []) if isinstance(m, str)],
+        description_type_extracted_version=si_type.description_type_extracted_version,
+        description_type_changed_at=si_type.description_type_changed_at,
         mpi_months=si_type.mpi_months,
         valid_to=si_type.valid_to,
         is_actual=si_type.is_actual,
@@ -157,6 +160,8 @@ def _apply_search_result(si_type: SiType, result) -> None:
         result.description_type_mirror_url or si_type.description_type_mirror_url
     )
     si_type.allowed_modifications = result.allowed_modifications or si_type.allowed_modifications
+    if getattr(result, "tested_modifications", None):
+        si_type.tested_modifications = list(result.tested_modifications)
     si_type.mpi_months = result.mpi_months if result.mpi_months is not None else si_type.mpi_months
     si_type.valid_to = result.valid_to or si_type.valid_to
     si_type.is_actual = result.is_actual if result.is_actual is not None else si_type.is_actual
@@ -166,8 +171,15 @@ def _apply_search_result(si_type: SiType, result) -> None:
     # Новая редакция «Описания типа» — признак того, что ранее извлечённый текст устарел
     # и его надо перезагрузить (иначе сопоставление пойдёт по отменённой редакции).
     if result.description_type_version and result.description_type_version != si_type.description_type_version:
-        si_type.description_type_version = result.description_type_version
-        si_type.description_type_text = None
+        from app.services.fgis_description_ingest import mark_description_changed
+
+        # Дата изменения ставится только у уже известной редакции: у новой записи это не
+        # «изменилось», а «впервые загружено».
+        if si_type.description_type_version is None:
+            si_type.description_type_version = result.description_type_version
+            si_type.description_type_text = None
+        else:
+            mark_description_changed(si_type, new_version=result.description_type_version)
 
 
 def _flag_if_out_of_scope(si_type: SiType) -> None:

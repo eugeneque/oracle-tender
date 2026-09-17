@@ -120,7 +120,9 @@ def get_compliance_matrix(db: Session, tender: Tender) -> ComplianceMatrixOut:
     )
 
 
-def attach_analysis_fields(db: Session, tenders: list[Tender]) -> list[dict]:
+def attach_analysis_fields(
+    db: Session, tenders: list[Tender], *, user_id: uuid.UUID | None = None
+) -> list[dict]:
     """Дополняет тендеры полями, которых нет в самой таблице: AI-оценка по профилю, процент
     победителя МИРТЕК, число извлечённых требований и имя ответственного. По одному запросу
     на каждое поле для всей выдачи, а не по тендеру.
@@ -133,6 +135,19 @@ def attach_analysis_fields(db: Session, tenders: list[Tender]) -> list[dict]:
         return []
 
     ids = [tender.id for tender in tenders]
+
+    # Избранное — личное, поэтому нужен пользователь; без него поле честно `False`.
+    bookmarked: set[uuid.UUID] = set()
+    if user_id is not None:
+        from app.models.tender_bookmark import TenderBookmark
+
+        bookmarked = set(
+            db.scalars(
+                select(TenderBookmark.tender_id).where(
+                    TenderBookmark.user_id == user_id, TenderBookmark.tender_id.in_(ids)
+                )
+            )
+        )
 
     percentages: dict[uuid.UUID, Decimal] = dict(
         db.execute(
@@ -190,5 +205,6 @@ def attach_analysis_fields(db: Session, tenders: list[Tender]) -> list[dict]:
         data["ai_verdict"] = verdict
         data["requirements_count"] = counts.get(tender.id, 0)
         data["assignee_name"] = assignees.get(tender.assignee_id) if tender.assignee_id else None
+        data["is_bookmarked"] = tender.id in bookmarked
         enriched.append(data)
     return enriched

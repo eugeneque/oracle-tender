@@ -1,4 +1,4 @@
-import { Building2, Clock, Sparkles } from "lucide-react";
+import { Building2, Clock, Sparkles, Star } from "lucide-react";
 
 import type { Tender } from "../../api/types";
 import { TenderDetailPanel } from "../TenderDetailPanel";
@@ -42,7 +42,17 @@ function SplitListItem({
       }`}
     >
       <div className="mb-1.5 flex items-start justify-between gap-2">
-        <span className="line-clamp-2 text-sm leading-snug text-zinc-100">{tender.title}</span>
+        <span className="line-clamp-2 text-sm leading-snug text-zinc-100">
+          {tender.is_bookmarked && (
+            <Star
+              size={12}
+              fill="currentColor"
+              className="mr-1 inline -translate-y-px text-amber-400"
+              aria-label="В избранном"
+            />
+          )}
+          {tender.title}
+        </span>
         {/* Цветной бейдж AI-оценки — раздел 5.6 ТЗ: зелёный ≥80%, жёлтый 50-80%, красный
             ниже. «—» означает «не считалась», а не ноль. */}
         <span

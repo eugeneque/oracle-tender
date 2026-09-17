@@ -56,6 +56,12 @@ class ComplianceSource(str, enum.Enum):
     PRODUCT_CATALOG = "product_catalog"
     USER_MANUAL_FALLBACK = "user_manual_fallback"
     AI_SEMANTIC = "ai_semantic"
+    # Список поддерживаемого оборудования ПО верхнего уровня (Пирамида, Энергосфера и др.)
+    # — четвёртый источник фактов, для требований об интеграции (16.09.2026).
+    UPPER_SOFTWARE = "upper_software"
+    # Запись о допуске в реестре (ПП 719/ГИСП, ЗАК Россетей, реестр ПО) — пятый источник,
+    # для требований о допуске; факт детерминированный, из `product_registry_records`.
+    ADMISSION_REGISTRY = "admission_registry"
 
 
 class Requirement(Base):

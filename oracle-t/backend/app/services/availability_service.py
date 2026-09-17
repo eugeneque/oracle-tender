@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.adapters.http_utils import DEFAULT_USER_AGENT, resolve_verify
 from app.models.log import LogLevel
-from app.models.source import AvailabilityStatus, Source
+from app.models.source import AvailabilityStatus, Source, SourceType
 from app.services.audit import log_action
 
 PING_TIMEOUT_SECONDS = 10.0
@@ -82,5 +82,6 @@ def ping_source(db: Session, source: Source) -> None:
 
 
 def ping_all_sources(db: Session) -> None:
-    for source in db.scalars(select(Source)).all():
+    # Источник ручных заявок — не сайт: у него нет адреса, который можно было бы проверить.
+    for source in db.scalars(select(Source).where(Source.type != SourceType.MANUAL.value)).all():
         ping_source(db, source)

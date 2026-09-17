@@ -21,9 +21,22 @@ from __future__ import annotations
 
 import re
 
+import httpx
 from loguru import logger
 
 from app.adapters.base import DocumentRef
+
+
+class EisUnavailableError(RuntimeError):
+    """ЕИС не ответил: сеть, таймаут, сброс соединения, HTTP-ошибка.
+
+    Отличается от «в ЕИС нет такой закупки» намеренно. Пустой список документов означает
+    «документов нет», и после него анализ честно сообщает «требований не найдено» — а когда
+    zakupki.gov.ru просто сбросил соединение (так он отвечает с иностранных адресов, из-под
+    VPN), это ложь: документы есть, их не удалось получить. Человек должен видеть именно
+    вторую формулировку, иначе он идёт искать несуществующее ТЗ вместо того, чтобы отключить
+    VPN и запустить анализ ещё раз.
+    """
 
 # Реестровые номера: 19 цифр у 44-ФЗ, 11 цифр у 223-ФЗ. Номера площадок (`ПИ602053`,
 # `SBR003-260002867000007.1`, `АП123145`) под эти шаблоны не подходят и в ЕИС не найдутся —
@@ -52,9 +65,11 @@ def normalize_eis_number(external_id: str | None) -> str | None:
 
 
 def fetch_eis_documents(external_id: str | None) -> list[DocumentRef]:
-    """Документы закупки из ЕИС. Пустой список — если номер не реестровый или ЕИС не отдал
-    карточку; исключение наружу не поднимается: это запасной путь, и его сбой не должен
-    выглядеть как сбой самой площадки."""
+    """Документы закупки из ЕИС. Пустой список — если номер не реестровый или в ЕИС нет
+    карточки с таким номером: это запасной путь, и «не нашлось» не должно выглядеть как
+    сбой самой площадки. Сетевой отказ ЕИС — другое дело, он поднимается наружу как
+    `EisUnavailableError`: вызывающий код обязан сказать человеку, что документы не
+    получены, а не что их нет."""
 
     number = normalize_eis_number(external_id)
     if number is None:
@@ -66,6 +81,9 @@ def fetch_eis_documents(external_id: str | None) -> list[DocumentRef]:
 
     try:
         return EisAdapter().download_documents(number)
-    except Exception as exc:  # noqa: BLE001 - запасной путь: не нашлось — просто нет документов
+    except httpx.HTTPError as exc:
         logger.warning(f"Документы закупки {number} не получены из ЕИС: {exc}")
+        raise EisUnavailableError(f"ЕИС не ответил: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - запасной путь: не нашлось — просто нет документов
+        logger.warning(f"Документы закупки {number} не найдены в ЕИС: {exc}")
         return []

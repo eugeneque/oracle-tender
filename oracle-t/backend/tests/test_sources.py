@@ -21,10 +21,11 @@ def test_sources_list_includes_seeded_eis(client, admin_token):
     assert eis is not None
     assert eis["adapter_status"] == "implemented"
 
-    astgoz = next((s for s in sources if s["key"] == "astgoz"), None)
-    assert astgoz is not None
-    assert astgoz["adapter_status"] == "blocked"
-    assert astgoz["note"]  # площадки без адаптера объясняют причину на фронте
+    # Неподключаемые площадки удалены из системы (миграция 0038): в списке не должно
+    # быть ни их, ни вообще строк со статусом «заблокировано» — они путали пользователя.
+    keys = {s["key"] for s in sources}
+    assert not keys & {"rts_tender", "astgoz", "etpgpb_strateg"}
+    assert all(s["adapter_status"] != "blocked" for s in sources)
 
 
 def test_poll_source_requires_admin(client, admin_token):
@@ -49,14 +50,30 @@ def test_poll_source_unknown_adapter_is_skipped_not_error(client, admin_token):
     """Источник без реализованного адаптера не должен приводить к ошибке — просто
     пропускается с пометкой в логе (раздел 5.1, 5.9 ТЗ)."""
 
-    sources = client.get("/sources", headers=_auth_headers(admin_token)).json()
-    astgoz_id = next(s["id"] for s in sources if s["key"] == "astgoz")
+    from app.db.session import SessionLocal
 
-    response = client.post(f"/sources/{astgoz_id}/poll", headers=_auth_headers(admin_token))
+    key = f"noadapter_{uuid.uuid4().hex[:8]}"
+    db = SessionLocal()
+    try:
+        source = Source(
+            key=key,
+            name="Площадка без адаптера",
+            url="https://example.test",
+            type="etp_federal_commercial",
+            adapter_key=None,
+            adapter_status="not_implemented",
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+    finally:
+        db.close()
+
+    response = client.post(f"/sources/{source_id}/poll", headers=_auth_headers(admin_token))
     assert response.status_code == 200
     body = response.json()
     assert body == {
-        "source_key": "astgoz",
+        "source_key": key,
         "found": 0,
         "created": 0,
         "updated": 0,

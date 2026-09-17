@@ -22,6 +22,7 @@ class NotificationSettingsOut(BaseModel):
     trigger_high_ai_score: bool
     trigger_deadline_soon: bool
     trigger_critical_error: bool
+    trigger_documents_updated: bool
     ai_score_threshold: int
     deadline_days_threshold: int
     updated_at: datetime | None
@@ -44,6 +45,7 @@ class NotificationSettingsUpdate(BaseModel):
     trigger_high_ai_score: bool | None = None
     trigger_deadline_soon: bool | None = None
     trigger_critical_error: bool | None = None
+    trigger_documents_updated: bool | None = None
     ai_score_threshold: int | None = Field(default=None, ge=0, le=100)
     deadline_days_threshold: int | None = Field(default=None, ge=1, le=60)
 

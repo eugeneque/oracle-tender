@@ -214,3 +214,35 @@ def test_download_tender_document_streams_file(client, admin_token, monkeypatch)
     )
     assert download_response.status_code == 200
     assert download_response.content == b"hello world content"
+
+
+def test_unreachable_platform_is_reported_by_sync_status(client, admin_token, monkeypatch):
+    """Сброшенное площадкой соединение — не «документов нет», а «документы не получены».
+
+    Раньше оба случая заканчивались пустым списком, и анализ документов честно писал
+    «требований сохранено: 0», как будто он что-то читал. Сообщение о причине должно дойти
+    до отчёта задачи — по нему человек понимает, что нужно восстановить доступ к площадке
+    (например, отключить VPN) и запустить анализ ещё раз."""
+
+    import httpx
+
+    import app.services.document_service as document_service_module
+    from app.services.document_service import sync_tender_documents_with_status
+
+    class _UnreachableAdapter(_StubDocsAdapter):
+        def download_documents(self, external_id, source_url=None):
+            raise httpx.ConnectError("[Errno 54] Connection reset by peer")
+
+    monkeypatch.setattr(
+        document_service_module, "get_adapter", lambda key: _UnreachableAdapter()
+    )
+
+    db = SessionLocal()
+    try:
+        tender = _make_tender(db)
+        documents, error = sync_tender_documents_with_status(db, tender)
+    finally:
+        db.close()
+
+    assert documents == []
+    assert error is not None and "Connection reset by peer" in error

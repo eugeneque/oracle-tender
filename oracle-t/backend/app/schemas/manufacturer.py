@@ -27,6 +27,12 @@ class SiTypeOut(BaseModel):
     description_type_version: str | None = None
     has_description_type_text: bool
     has_allowed_modifications: bool = False
+    # Исполнения, представленные на испытания, из карточки Аршина; редакция документа, из
+    # которой характеристики уже разнесены по моделям; дата, когда ревалидация заметила
+    # новую редакцию (замечание заказчика 15.09.2026 — учитывать изменения описания типа).
+    tested_modifications: list[str] = []
+    description_type_extracted_version: str | None = None
+    description_type_changed_at: datetime | None = None
     mpi_months: int | None = None
     valid_to: date | None = None
     is_actual: bool | None = None
@@ -71,6 +77,9 @@ class ProductOut(BaseModel):
     # Заводское исполнение («Таганрог», «Владивосток»): у одной модели исполнения
     # различаются сроком службы и комплектом документов, и в списке их надо различать.
     execution: str | None = None
+    # Полное условное обозначение исполнения из реестра ФГИС — у записей, заведённых из
+    # Аршина, а не с сайта производителя.
+    registry_modification: str | None = None
     status: str
     source_url: str | None = None
     data_source: str | None = None
@@ -243,3 +252,101 @@ class CatalogSiteOut(BaseModel):
     # Профиль сайта может быть описан, а строки производителя в справочнике не быть — её
     # заводит администратор. Интерфейс должен показывать это различие, а не прятать источник.
     manufacturer_id: uuid.UUID | None
+
+
+class CatalogDocumentOut(BaseModel):
+    """Строка справочника документов по СИ и руководств с датой актуальности (правка по
+    итогам показа 15.09.2026)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    manufacturer_id: uuid.UUID
+    product_id: uuid.UUID | None
+    si_type_id: uuid.UUID | None
+    model_name: str | None
+    # Заводское исполнение модели — у МИРТЕК одна модель бывает в двух, с разными документами.
+    execution: str | None
+    si_code: str | None
+    kind: str
+    kind_title: str
+    source: str
+    title: str
+    url: str
+    document_date: date | None
+    document_date_source: str | None
+    version_label: str | None
+    is_active: bool
+    check_status: str
+    check_error: str | None
+    first_seen_at: datetime
+    last_checked_at: datetime | None
+    changed_at: datetime | None
+    change_count: int
+
+
+class CatalogDocumentsSummaryOut(BaseModel):
+    total: int
+    last_checked_at: datetime | None
+    # Изменилось при последней сверке — то, что попало в последний отчёт.
+    changed_recently: int
+    unavailable: int
+
+
+# --- Обучение справочника по Аршину и поиск документации (замечание заказчика 15.09.2026) ---
+
+
+class ModificationsOutcomeOut(BaseModel):
+    """Итог сверки исполнений из карточек Аршина с каталогом."""
+
+    si_types_scanned: int
+    modifications_seen: int
+    products_created: int
+    products_linked: int
+    already_known: int
+    created_names: list[str] = []
+
+
+class DescriptionIngestOutcomeOut(BaseModel):
+    """Итог разбора «Описаний типа»: сколько документов вычитано, сколько моделей получили
+    характеристики, сколько исполнений расшифровано по условному обозначению."""
+
+    si_types_scanned: int
+    documents_fetched: int
+    documents_read: int
+    products_updated: int
+    modifications_decoded: int
+    characteristics_saved: int
+    skipped_up_to_date: int
+    skipped_no_url: int
+    failed: int
+    messages: list[str] = []
+
+
+class DiscoveryOutcomeOut(BaseModel):
+    """Итог поиска документации на официальном сайте через Яндекс."""
+
+    products_checked: int
+    found: int
+    not_found: int
+    skipped_have_link: int
+    queries: int
+    messages: list[str] = []
+
+
+class ProductDocumentationOut(BaseModel):
+    """Итог поиска и разбора документации одной модели."""
+
+    manual_url: str | None = None
+    reasons: list[str] = []
+    ingest: ManualIngestOutcomeOut | None = None
+    message: str
+
+
+class UnknownFieldOut(BaseModel):
+    """Характеристика, которой не нашлось поля в Приложении C, — кандидат на расширение
+    справочника: сколько моделей её несут и пример значения."""
+
+    field_name: str
+    products: int
+    sample: str

@@ -42,9 +42,10 @@ from app.models.manufacturer import (
     SiType,
     SiTypeSource,
 )
-from app.services import catalog_queue_service, si_type_linking
+from app.services import catalog_queue_service, registry_modifications, si_type_linking
 from app.services.audit import log_action
 from app.services.catalog_queue_service import TaskOutcome
+from app.services.fgis_description_ingest import mark_description_changed
 
 ADAPTER_KEY = "fgis"
 COMPONENT = "catalog_sync"
@@ -206,21 +207,32 @@ def _revalidate(db: Session, si_type: SiType, *, adapter: FgisAdapter) -> TaskOu
     result = adapter.enrich_from_card(_as_search_result(si_type))
 
     changes: list[str] = []
+    new_modifications: list[str] = []
     if result.description_type_version and result.description_type_version != si_type.description_type_version:
         changes.append(
             f"новая редакция «Описания типа» {si_type.description_type_version or '—'} → "
             f"{result.description_type_version}"
         )
-        si_type.description_type_version = result.description_type_version
         # Текст прежней редакции больше не описывает актуальный тип — его надо перезагрузить,
-        # иначе сопоставление пойдёт по отменённой редакции.
-        si_type.description_type_text = None
+        # иначе сопоставление пойдёт по отменённой редакции. Дата изменения нужна интерфейсу
+        # и еженедельному обучению справочника (`fgis_description_ingest`), которое
+        # перечитает документ и обновит характеристики привязанных моделей.
+        mark_description_changed(si_type, new_version=result.description_type_version)
     if result.description_type_url:
         si_type.description_type_url = result.description_type_url
     if result.description_type_mirror_url:
         si_type.description_type_mirror_url = result.description_type_mirror_url
     if result.allowed_modifications:
         si_type.allowed_modifications = result.allowed_modifications
+    if result.tested_modifications:
+        # Новые исполнения в реестре — то самое «изменение в описании типа», о котором
+        # заказчик просил узнавать: у НАРТИС-И100 корпус W115 появился именно так, раньше,
+        # чем на сайте производителя.
+        known = {_modification_key(m) for m in (si_type.tested_modifications or []) if isinstance(m, str)}
+        new_modifications = [m for m in result.tested_modifications if _modification_key(m) not in known]
+        if new_modifications:
+            changes.append(f"новые исполнения в реестре: {', '.join(new_modifications)}")
+        si_type.tested_modifications = list(result.tested_modifications)
     if result.mpi_months is not None and result.mpi_months != si_type.mpi_months:
         changes.append(f"МПИ {si_type.mpi_months or '—'} → {result.mpi_months} мес.")
         si_type.mpi_months = result.mpi_months
@@ -237,6 +249,19 @@ def _revalidate(db: Session, si_type: SiType, *, adapter: FgisAdapter) -> TaskOu
         si_type.review_reason = warning
 
     db.commit()
+
+    if new_modifications:
+        # Исполнение из реестра сразу заводится в каталог (с пометкой «требует проверки»),
+        # а его характеристики и документация подтянутся ближайшим проходом обучения.
+        manufacturer = db.get(Manufacturer, si_type.manufacturer_id)
+        if manufacturer is not None:
+            outcome = registry_modifications.discover_modifications(
+                db, manufacturer, si_types=[si_type]
+            )
+            if outcome.products_created:
+                changes.append(
+                    f"в каталог заведено исполнений: {', '.join(outcome.created_names)}"
+                )
 
     if not changes and not warning:
         return TaskOutcome(message=f"Тип СИ {si_type.si_code}: изменений нет")
@@ -341,15 +366,27 @@ def _upsert_si_type(db: Session, manufacturer: Manufacturer, result) -> SiType |
     si_type.review_status = ReviewStatus.OK.value
     si_type.review_reason = None
 
+    if result.tested_modifications:
+        si_type.tested_modifications = list(result.tested_modifications)
+
     if (
         result.description_type_version
         and result.description_type_version != si_type.description_type_version
     ):
-        si_type.description_type_version = result.description_type_version
-        si_type.description_type_text = None
+        if si_type.description_type_version is None:
+            si_type.description_type_version = result.description_type_version
+            si_type.description_type_text = None
+        else:
+            mark_description_changed(si_type, new_version=result.description_type_version)
 
     db.flush()
     return si_type
+
+
+def _modification_key(value: str) -> str:
+    """Ключ сравнения исполнений: без регистра, пробелов и вида дефиса."""
+
+    return "".join(ch for ch in value.lower() if not ch.isspace() and ch not in "-–—")
 
 
 def _review_outcome(

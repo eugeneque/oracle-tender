@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 
 import { api } from "../api/client";
-import { CATALOG_SOURCE_TYPES, TENDER_SOURCES_TOTAL } from "../api/types";
+import { CATALOG_SOURCE_TYPES, MANUAL_SOURCE_TYPE, TENDER_SOURCES_TOTAL } from "../api/types";
 import type { Source, TenderStats, User } from "../api/types";
 import { AppShell } from "../components/AppShell";
 import { PageHeader } from "../components/PageHeader";
@@ -88,7 +88,9 @@ export function DashboardPage() {
         // Считаем только площадки закупок: `/sources` отдаёт одним списком и источники
         // справочника продукции (ФГИС, сайты производителей), а плитка говорит про 12
         // площадок раздела 4.1 ТЗ. Без этого фильтра выходило «24 из 12».
-        const tenderSources = sources.filter((s) => !CATALOG_SOURCE_TYPES.includes(s.type));
+        const tenderSources = sources.filter(
+          (s) => !CATALOG_SOURCE_TYPES.includes(s.type) && s.type !== MANUAL_SOURCE_TYPE,
+        );
         setAvailableSources(
           tenderSources.filter((s) => s.availability_status === "available").length,
         );

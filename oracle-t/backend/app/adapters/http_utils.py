@@ -22,7 +22,7 @@ DEFAULT_USER_AGENT = (
 
 _CERTS_DIR = Path(__file__).resolve().parent.parent / "certs"
 
-# Бандл Russian Trusted CA (Минцифры России): сертификаты *.zakupki.gov.ru и *.astgoz.ru
+# Бандл Russian Trusted CA (Минцифры России): сертификаты *.zakupki.gov.ru и *.etp.gpb.ru
 # подписаны государственным Sub CA, самоподписанный корень которого нет смысла добавлять в
 # системный список — доверяем ему только явно для этих доменов, заменяя весь список CA целиком
 # (`verify=<путь к бандлу>`), не отключая проверку.
@@ -31,7 +31,7 @@ RUSSIAN_CA_BUNDLE = _CERTS_DIR / "russian_trusted_ca.pem"
 # `etpgpb.ru` живёт на обычном международном сертификате, а вот файловый хост — на
 # государственном). Без этого исключения скачивание документов ЭТП ГПБ, крупнейшего нашего
 # источника, падало с "self-signed certificate in certificate chain".
-_RUSSIAN_CA_HOSTS = ("zakupki.gov.ru", "astgoz.ru", "etp.gpb.ru")
+_RUSSIAN_CA_HOSTS = ("zakupki.gov.ru", "etp.gpb.ru")
 
 # etprf.ru — другой случай: сервер не досылает промежуточный сертификат
 # "GlobalSign GCC R6 AlphaSSL CA 2025" (частая ошибка конфигурации веб-сервера), из-за чего

@@ -4,6 +4,8 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.job import BackgroundJobOut
+
 
 class TenderSourceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -56,6 +58,8 @@ class TenderOut(BaseModel):
     # это дало бы N+1.
     win_percentage: Decimal | None = None
     requirements_count: int = 0
+    # В избранном ли у текущего пользователя (замечание тестировщика 16.09.2026).
+    is_bookmarked: bool = False
     # Решение модели «это правда наша закупка» (раздел 5.4 ТЗ). `None` — не проверяли;
     # это не то же самое, что `false`, и интерфейс показывает их по-разному.
     ai_relevant: bool | None = None
@@ -295,6 +299,19 @@ class DocumentFlagsUpdate(BaseModel):
     document_class: str | None = None
 
 
+class ManualRequestOut(BaseModel):
+    """Ответ на создание ручной заявки (`POST /tenders/manual`).
+
+    Тендер, его документы и поставленная задача анализа — одним ответом: интерфейс сразу
+    открывает карточку и показывает ход анализа, не собирая это тремя запросами. `job` пуст,
+    если анализ не запрашивали (например, файлы ещё не все на руках).
+    """
+
+    tender: TenderOut
+    documents: list[TenderDocumentOut]
+    job: BackgroundJobOut | None = None
+
+
 class EvidenceItemOut(BaseModel):
     """Ссылка, из которой сложилось число измерения (раздел 5.5.1 ТЗ, «Прослеживаемость»)."""
 
@@ -377,7 +394,12 @@ class CompanyProfileOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    manufacturer_id: uuid.UUID
+    # Привязка к справочнику производителей есть только у основной компании («наш»
+    # производитель); дополнительные юрлица производителями не являются.
+    manufacturer_id: uuid.UUID | None
+    # Основная компания — та, с которой AI-оценка сравнивает требования тендера и по ИНН
+    # которой тянется история участий. Ровно одна на систему.
+    is_primary: bool
     legal_name: str | None
     inn: str | None
     kpp: str | None
@@ -455,3 +477,17 @@ class SimilarTenderOut(BaseModel):
     price: Decimal | None
     publish_date: date | None
     similarity_score: Decimal
+
+
+class TenderBookmarkIn(BaseModel):
+    """Заметка к избранному — зачем отложил закупку (замечание тестировщика 16.09.2026)."""
+
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class TenderBookmarkOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    tender_id: uuid.UUID
+    note: str | None
+    created_at: datetime

@@ -106,6 +106,8 @@ const COMPLIANCE_SOURCE_LABELS: Record<string, string> = {
   product_catalog: "Каталог продукции",
   user_manual_fallback: "Руководство пользователя",
   ai_semantic: "Вывод ИИ по смыслу",
+  upper_software: "Список ПО верхнего уровня",
+  admission_registry: "Запись в реестре допуска",
 };
 
 /** Источник вердикта — три шага сопоставления раздела 5.5 ТЗ. */
@@ -205,4 +207,32 @@ export function plural(count: number, one: string, few: string, many: string): s
   if (mod10 === 1) return one;
   if (mod10 >= 2 && mod10 <= 4) return few;
   return many;
+}
+
+const SUPPORT_STATUS_STYLES: Record<string, { label: string; className: string }> = {
+  supported: { label: "есть в списке", className: "bg-emerald-500/10 text-emerald-400" },
+  not_listed: { label: "в списке нет", className: "bg-red-500/10 text-red-400" },
+  protocol_only: { label: "только по протоколу СПОДЭС", className: "bg-amber-500/10 text-amber-400" },
+  not_synced: { label: "список не прочитан", className: "bg-zinc-500/10 text-zinc-400" },
+};
+
+/** Статус производителя в списке поддерживаемого оборудования ПО верхнего уровня
+ * (`PlatformSupportStatus`): подпись и цвет — одни и те же в каталоге и в карточке закупки. */
+export function supportStatusStyle(status: string): { label: string; className: string } {
+  return SUPPORT_STATUS_STYLES[status] ?? SUPPORT_STATUS_STYLES.not_synced;
+}
+
+const REGISTRY_STATE_STYLES: Record<string, { label: string; className: string }> = {
+  active: { label: "действует", className: "bg-emerald-500/10 text-emerald-400" },
+  expiring: { label: "истекает", className: "bg-amber-500/10 text-amber-400" },
+  expired: { label: "истекла", className: "bg-red-500/10 text-red-400" },
+  absent: { label: "записи нет", className: "bg-red-500/10 text-red-400" },
+  unknown: { label: "не проверялось", className: "bg-zinc-500/10 text-zinc-400" },
+};
+
+/** Состояние записи о допуске в реестре (`RegistryRecordState`): подпись и цвет — одни и
+ * те же в каталоге и в карточке закупки. «Не проверялось» нарочно серое, а не красное:
+ * незаведённая запись — это отсутствие сведений, а не отсутствие допуска. */
+export function registryStateStyle(state: string): { label: string; className: string } {
+  return REGISTRY_STATE_STYLES[state] ?? REGISTRY_STATE_STYLES.unknown;
 }

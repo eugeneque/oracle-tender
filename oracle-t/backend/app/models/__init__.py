@@ -22,6 +22,13 @@ from app.models.company_participation import (
     ParticipationOutcome,
     ParticipationSource,
 )
+from app.models.catalog_document import (
+    CatalogDocument,
+    CatalogDocumentKind,
+    CatalogDocumentSource,
+    DocumentCheckStatus,
+    DocumentDateSource,
+)
 from app.models.catalog_queue import (
     CatalogLookupTask,
     CatalogQueueReason,
@@ -50,6 +57,7 @@ from app.models.notification import (
     NotificationTrigger,
 )
 from app.models.region import FederalDistrict, Region, RegionResponsible
+from app.models.registry_record import AdmissionRegistry, ProductRegistryRecord, RegistryPresence
 from app.models.search_profile import (
     KeywordMatchMode,
     SearchKeywordGroup,
@@ -58,14 +66,19 @@ from app.models.search_profile import (
 from app.models.source import Source
 from app.models.source_credential import SourceCredential
 from app.models.tender import RelevanceStatus, Tender, TenderStage
+from app.models.tender_bookmark import TenderBookmark
 from app.models.tender_card import TenderCard
 from app.models.tender_document import DocumentClass, TenderDocument
 from app.models.tender_history import HistoryKind, TenderHistoryEntry
+from app.models.upper_software import UpperSoftwareDevice, UpperSoftwareProductLink
 from app.models.user import User
 
 __all__ = [
     "User",
     "Region",
+    "AdmissionRegistry",
+    "ProductRegistryRecord",
+    "RegistryPresence",
     "FederalDistrict",
     "RegionResponsible",
     "Log",
@@ -89,6 +102,11 @@ __all__ = [
     "ProductDataSource",
     "ProductStatus",
     "ReviewStatus",
+    "CatalogDocument",
+    "CatalogDocumentKind",
+    "CatalogDocumentSource",
+    "DocumentCheckStatus",
+    "DocumentDateSource",
     "CatalogLookupTask",
     "CatalogQueueReason",
     "CatalogQueueStatus",
@@ -125,4 +143,7 @@ __all__ = [
     "NotificationSettings",
     "NotificationStatus",
     "NotificationTrigger",
+    "TenderBookmark",
+    "UpperSoftwareDevice",
+    "UpperSoftwareProductLink",
 ]

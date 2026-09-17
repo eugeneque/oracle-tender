@@ -212,6 +212,9 @@ class SiSearchResult:
     description_type_mirror_url: str | None = None
     description_type_version: str | None = None
     allowed_modifications: str | None = None
+    # Исполнения, представленные на испытания, — полные условные обозначения из карточки
+    # (см. `tested_modifications`).
+    tested_modifications: list[str] = field(default_factory=list)
     mpi_months: int | None = None
     valid_to: date | None = None
     is_actual: bool | None = None
@@ -408,6 +411,9 @@ class FgisAdapter:
 
         result.raw = {**result.raw, "card": card}
         result.allowed_modifications = _as_text(card.get("j_modification")) or None
+        result.tested_modifications = tested_modifications(
+            card, result.notation or _as_text(card.get("j_notation")).strip(_QUOTES + " ")
+        )
         result.is_actual = card.get("is_actual") if isinstance(card.get("is_actual"), bool) else None
         result.valid_to = _parse_date(card.get("valid_to"))
         result.mpi_months = _parse_mpi_months(card.get("j_mpis"))
@@ -552,6 +558,172 @@ def latest_description_type(raw_specifications: Any) -> DescriptionTypeDoc | Non
     if not candidates:
         return None
     return max(candidates, key=lambda doc: (doc.version_num or 0, doc.order_date or ""))
+
+
+# Строка легенды, после которой в `j_modification` перечислены исполнения, представленные на
+# испытания: «На испытания представлены:», «На испытание представлен:», «на испытания
+# представлена модификация:».
+_TESTED_MARKER_RE = re.compile(
+    r"на\s+испытани\w*\s+представлен\w*(?:\s+модификаци\w*)?\s*:?", re.IGNORECASE
+)
+# Разделители внутри условного обозначения. Тире разных видов встречаются в одной и той же
+# карточке («НАРТИС-И100 – (ХХХХ)2 – …»), и различать их незачем.
+_DESIGNATION_SEPARATORS = "-–—"
+
+# Кириллица, визуально совпадающая с латиницей: в карточках Аршина одно и то же исполнение
+# бывает набрано «HAPTИC-P3-C-…» и «НАРТИС-Р3-М-…» — первое частично латиницей. Своя
+# таблица, а не импорт из `si_type_linking`: адаптер не должен зависеть от сервисов.
+_HOMOGLYPHS = str.maketrans(
+    {"а": "a", "в": "b", "е": "e", "ё": "e", "к": "k", "м": "m", "н": "h", "о": "o",
+     "р": "p", "с": "c", "т": "t", "у": "y", "х": "x"}
+)
+
+
+def _norm_char(char: str) -> str:
+    return char.lower().translate(_HOMOGLYPHS)
+
+
+def _as_list(value: Any) -> list[Any]:
+    """Поле-список карточки: приходит и списком, и JSON-строкой со списком внутри."""
+
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return [value]
+    return value if isinstance(value, list) else []
+
+
+def tested_modifications(card: dict[str, Any], notation: str | None) -> list[str]:
+    """Исполнения, представленные на испытания, — полные условные обозначения.
+
+    Два источника внутри одной карточки, и нужны оба. `j_factorynums` — список образцов с
+    заводскими номерами, у каждого поле `modification` чистое и точное, но заполнено не у
+    всех типов. Легенда `j_modification` есть почти всегда, но там исполнения перечислены
+    текстом после строки «На испытания представлены:», иногда по нескольку на строку
+    («HAPTИC-P3-C-1010-400-100-RS-BT НАРТИС-Р3-М-1010-400-100-ZB»). Строка режется на
+    обозначения по началу типа: новое обозначение начинается там, где очередное слово
+    начинается с первого слова обозначения типа (с поправкой на омоглифы). Если ни одно
+    слово с него не начинается — вся строка считается одним обозначением (так записаны
+    поверочные установки МИР: «УП-04-100-0.2-8-С2» при обозначении «МИР УП-04»).
+
+    Порядок сохраняется, дубликаты (в том числе набранные латиницей вместо кириллицы)
+    отбрасываются."""
+
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str) -> None:
+        cleaned = candidate.strip().strip(_QUOTES + " ;,.")
+        # Обозначение без единой цифры — это не исполнение, а обрывок легенды.
+        if not cleaned or not any(ch.isdigit() for ch in cleaned):
+            return
+        key = "".join(_norm_char(ch) for ch in cleaned if not ch.isspace() and ch not in _DESIGNATION_SEPARATORS)
+        if key in seen:
+            return
+        seen.add(key)
+        found.append(cleaned)
+
+    for item in _as_list(card.get("j_factorynums")):
+        if isinstance(item, dict) and item.get("modification"):
+            add(str(item["modification"]))
+
+    lines = [_as_text(item) for item in _as_list(card.get("j_modification"))]
+    tail: list[str] = []
+    for line in lines:
+        if tail:
+            tail.append(line)
+            continue
+        match = _TESTED_MARKER_RE.search(line)
+        if match:
+            rest = line[match.end():].lstrip(" :\u2013-")
+            tail.append(rest)
+
+    head_word = _first_word(notation)
+    for line in tail:
+        for designation in _split_designations(line, head_word):
+            add(designation)
+    return found
+
+
+def _first_word(notation: str | None) -> str:
+    """Первое слово обозначения типа в нормализованном виде — признак начала исполнения."""
+
+    if not notation:
+        return ""
+    cleaned = notation.strip().strip(_QUOTES + " ")
+    word = re.split(r"[\s" + re.escape(_DESIGNATION_SEPARATORS) + r"]", cleaned, maxsplit=1)[0]
+    return "".join(_norm_char(ch) for ch in word)
+
+
+def _split_designations(line: str, head_word: str) -> list[str]:
+    tokens = line.split()
+    if not tokens:
+        return []
+    starts = [
+        index
+        for index, token in enumerate(tokens)
+        if len(head_word) >= 3 and "".join(_norm_char(ch) for ch in token).startswith(head_word)
+    ]
+    if not starts:
+        return [line.strip()]
+    parts: list[str] = []
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else len(tokens)
+        parts.append(" ".join(tokens[start:end]))
+    return parts
+
+
+def match_notation_prefix(full: str, notation: str) -> int | None:
+    """Где в `full` заканчивается обозначение типа `notation`. `None` — обозначение не
+    является началом строки. Сравнение без учёта регистра, омоглифов, пробелов и вида
+    дефиса: «HAPTИC-P3-C-…» начинается с «НАРТИС-Р3», хотя набрано латиницей."""
+
+    i = 0
+    for char in notation:
+        if char.isspace() or char in _DESIGNATION_SEPARATORS:
+            continue
+        while i < len(full) and (full[i].isspace() or full[i] in _DESIGNATION_SEPARATORS):
+            i += 1
+        if i >= len(full) or _norm_char(full[i]) != _norm_char(char):
+            return None
+        i += 1
+    return i
+
+
+_SEGMENT_RE = re.compile(r"^([\s" + re.escape(_DESIGNATION_SEPARATORS) + r"/]*)([^\s" + re.escape(_DESIGNATION_SEPARATORS) + r"/]+)")
+
+
+def execution_designation(full_modification: str, notation: str | None) -> str | None:
+    """Короткое обозначение исполнения: тип плюс первый сегмент условного обозначения.
+
+    «НАРТИС-И100-W115-2-A1R1-230-5-80A-…» при типе «НАРТИС-И100» → «НАРТИС-И100-W115»;
+    «Милур 109.1-32-RZ-1-DT» при «Милур 109» → «Милур 109.1». Именно в таком виде
+    исполнение называется на сайте производителя и в закупках, а всё, что дальше, — набор
+    опций (ток, интерфейсы, функции), которые в каталоге живут характеристиками, а не
+    отдельными записями. Обозначение типа берётся из справочника как есть, чтобы латиница
+    вместо кириллицы в карточке не попала в код модели.
+
+    `None` — обозначение не начинается с типа либо после него ничего нет."""
+
+    if not notation:
+        return None
+    cleaned_notation = notation.strip().strip(_QUOTES + " ")
+    end = match_notation_prefix(full_modification, cleaned_notation)
+    if end is None:
+        return None
+    remainder = full_modification[end:]
+    match = _SEGMENT_RE.match(remainder)
+    if match is None:
+        return None
+    separator_raw, segment = match.group(1), match.group(2)
+    if any(ch in _DESIGNATION_SEPARATORS for ch in separator_raw):
+        separator = "-"
+    elif separator_raw.strip() == "" and separator_raw:
+        separator = " "
+    else:
+        separator = separator_raw.strip() or ("" if segment.startswith(".") else "-")
+    return f"{cleaned_notation}{separator}{segment}"
 
 
 def _total_found(payload: Any) -> int | None:
