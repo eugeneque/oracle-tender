@@ -103,7 +103,7 @@ export function DashboardPage() {
     <AppShell>
       <div className="mx-auto max-w-5xl px-8 py-8">
         <PageHeader
-          breadcrumb={["ORACLE-T", "Дашборд"]}
+          breadcrumb={["Sova Scanner", "Дашборд"]}
           title={`Добро пожаловать, ${user?.full_name ?? ""}`}
         />
 

@@ -2,6 +2,8 @@ import { ArrowDown, ArrowUp, ArrowUpDown, Star } from "lucide-react";
 
 import type { Tender } from "../../api/types";
 import { TruncatedText } from "./TruncatedText";
+import { TagRow } from "../tags/TagChip";
+import { DecisionMark } from "../DecisionMark";
 import {
   daysLeft,
   formatDate,
@@ -140,13 +142,19 @@ export function TenderTableView({
                 className="cursor-pointer border-b border-white/[0.04] transition-colors last:border-0 hover:bg-white/[0.04]"
               >
                 <td className="max-w-0 px-2.5 py-2">
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-1.5">
+                    <DecisionMark decision={tender.ai_decision} size="sm" />
                     {tender.is_bookmarked && (
                       <Star size={12} fill="currentColor" className="shrink-0 text-amber-400" aria-label="В избранном" />
                     )}
                     <TruncatedText text={tender.title} className="min-w-0 text-zinc-100" />
                   </div>
                   <TruncatedText text={metaLine(tender)} className="mt-0.5 text-[11px] text-zinc-600" />
+                  {tender.tags.length > 0 && (
+                    <div className="mt-1">
+                      <TagRow tags={tender.tags} max={3} />
+                    </div>
+                  )}
                 </td>
                 <td className="max-w-0 px-2.5 py-2">
                   <TruncatedText text={tender.customer_name} className="text-zinc-400" />

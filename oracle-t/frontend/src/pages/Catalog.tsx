@@ -10,6 +10,7 @@ import {
   Link2,
   FileText,
   Loader2,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -37,6 +38,7 @@ import { CatalogDocumentsSection } from "../components/catalog/CatalogDocumentsS
 import { RegistryLearningSection } from "../components/catalog/RegistryLearningSection";
 import { UpperSoftwareSection } from "../components/catalog/UpperSoftwareSection";
 import { ProductRegistrySection } from "../components/catalog/ProductRegistrySection";
+import { ProductMatrix } from "../components/catalog/ProductMatrix";
 import { formatDate } from "../utils/format";
 import { PageHeader } from "../components/PageHeader";
 import { useAuth } from "../context/useAuth";
@@ -105,6 +107,18 @@ export function CatalogPage() {
   // не на что, и кнопка вводила бы в заблуждение.
   const [catalogSites, setCatalogSites] = useState<CatalogSite[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Форма производителя (администратор): добавить нового или поправить долю рынка и сайт
+  // у существующего. Одна форма на оба случая — поля те же; `editingId === "new"` —
+  // создание. Доля рынка вводится руками вместе с источником оценки: без подписи «чья и
+  // за какой год» цифра через год станет неотличима от выдумки.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [manufacturerDraft, setManufacturerDraft] = useState({
+    legal_name: "",
+    brand_name: "",
+    website: "",
+    market_share_pct: "",
+    market_share_source: "",
+  });
 
   const selected = useMemo(
     () => manufacturers.find((m) => m.id === selectedId) ?? null,
@@ -135,7 +149,9 @@ export function CatalogPage() {
       ]);
       setManufacturers(data);
       setCatalogSites(sites);
-      setSelectedId((current) => current ?? data[0]?.id ?? null);
+      // Список отсортирован по доле рынка, и МИРТЕК в нём не первый; открывать справочник
+      // всё равно нужно со своей продукции.
+      setSelectedId((current) => current ?? data.find((m) => m.is_mirtek)?.id ?? data[0]?.id ?? null);
     });
   }, []);
 
@@ -284,6 +300,40 @@ export function CatalogPage() {
       );
     });
 
+  const openManufacturerForm = (m: Manufacturer | null) => {
+    setEditingId(m ? m.id : "new");
+    setManufacturerDraft({
+      legal_name: m?.legal_name ?? "",
+      brand_name: m?.brand_name ?? "",
+      website: m?.website ?? "",
+      market_share_pct: m?.market_share_pct != null ? String(m.market_share_pct) : "",
+      market_share_source: m?.market_share_source ?? "",
+    });
+  };
+
+  const handleSaveManufacturer = () =>
+    run("save-manufacturer", async () => {
+      const pct = manufacturerDraft.market_share_pct.trim().replace(",", ".");
+      const payload = {
+        legal_name: manufacturerDraft.legal_name.trim(),
+        brand_name: manufacturerDraft.brand_name.trim() || null,
+        website: manufacturerDraft.website.trim() || null,
+        market_share_pct: pct === "" ? null : Number(pct),
+        market_share_source: manufacturerDraft.market_share_source.trim() || null,
+      };
+      if (payload.market_share_pct !== null && Number.isNaN(payload.market_share_pct)) {
+        throw new ApiError(400, "Доля рынка — число в процентах, например 7 или 12.5");
+      }
+      const saved =
+        editingId === "new"
+          ? await api.post<Manufacturer>("/manufacturers", payload)
+          : await api.patch<Manufacturer>(`/manufacturers/${editingId}`, payload);
+      // Порядок списка зависит от доли — перечитываем целиком, а не подменяем строку.
+      setManufacturers(await api.get<Manufacturer[]>("/manufacturers"));
+      setEditingId(null);
+      if (editingId === "new") setSelectedId(saved.id);
+    });
+
   const handleCreateProduct = () =>
     run("create-product", async () => {
       const created = await api.post<Product>(`/manufacturers/${selectedId}/products`, {
@@ -363,7 +413,7 @@ export function CatalogPage() {
     <AppShell>
       <div className="mx-auto max-w-7xl px-8 py-8">
         <PageHeader
-          breadcrumb={["ORACLE-T", "Каталог продукции"]}
+          breadcrumb={["Sova Scanner", "Каталог продукции"]}
           title="Каталог продукции"
           icon={
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
@@ -386,7 +436,7 @@ export function CatalogPage() {
           </div>
         )}
 
-        <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
+        <div className="grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
           {/* Производители */}
           <div className="rounded-xl border border-white/[0.08] bg-white/[0.03]">
             <div className="flex items-center justify-between border-b border-white/[0.08] px-4 py-3">
@@ -405,6 +455,13 @@ export function CatalogPage() {
                     }}
                   />
                   <button
+                    onClick={() => openManufacturerForm(null)}
+                    title="Добавить производителя"
+                    className="mr-1.5 flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1 text-[11px] text-zinc-300 hover:bg-white/5"
+                  >
+                    <Plus size={12} />
+                  </button>
+                  <button
                     onClick={() => fileInputRef.current?.click()}
                     disabled={busy === "import"}
                     title="CSV-импорт: производитель, код СИ, модель"
@@ -416,21 +473,87 @@ export function CatalogPage() {
                 </>
               )}
             </div>
+            {editingId && (
+              <div className="space-y-1.5 border-b border-white/[0.08] px-4 py-3">
+                <div className="text-[11px] font-medium text-zinc-300">
+                  {editingId === "new" ? "Новый производитель" : "Правка производителя"}
+                </div>
+                {(
+                  [
+                    ["legal_name", "Юридическое название"],
+                    ["brand_name", "Бренд"],
+                    ["website", "Сайт (каталог)"],
+                    ["market_share_pct", "Доля рынка, %"],
+                    ["market_share_source", "Источник оценки доли"],
+                  ] as const
+                ).map(([field, label]) => (
+                  <input
+                    key={field}
+                    value={manufacturerDraft[field]}
+                    onChange={(e) => setManufacturerDraft((d) => ({ ...d, [field]: e.target.value }))}
+                    placeholder={label}
+                    title={label}
+                    className="w-full rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none"
+                  />
+                ))}
+                <div className="flex gap-2 pt-1">
+                  <button
+                    onClick={handleSaveManufacturer}
+                    disabled={!manufacturerDraft.legal_name.trim() || busy === "save-manufacturer"}
+                    className="rounded-lg bg-indigo-500/20 px-2.5 py-1.5 text-xs text-indigo-200 hover:bg-indigo-500/30 disabled:opacity-50"
+                  >
+                    Сохранить
+                  </button>
+                  <button
+                    onClick={() => setEditingId(null)}
+                    className="rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-400 hover:bg-white/5"
+                  >
+                    Отмена
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="max-h-[70vh] overflow-y-auto py-1">
+              {/* Порядок — по доле рынка (сервер сортирует), у кого доля не опубликована —
+                  в конце по алфавиту. Доля показана справа, источник — в подсказке. */}
               {manufacturers.map((m) => (
-                <button
+                <div
                   key={m.id}
-                  onClick={() => setSelectedId(m.id)}
-                  className={`flex w-full items-center justify-between px-4 py-2 text-left text-sm ${
+                  className={`group flex w-full items-center gap-1 pr-2 text-sm ${
                     m.id === selectedId ? "bg-indigo-500/10 text-indigo-300" : "text-zinc-300 hover:bg-white/5"
                   }`}
                 >
-                  <span className="truncate">
-                    {m.brand_name ?? m.legal_name}
-                    {m.is_mirtek && <span className="ml-1.5 text-[10px] text-emerald-400">МИРТЕК</span>}
-                  </span>
-                  <ChevronRight size={14} className="shrink-0 opacity-40" />
-                </button>
+                  <button
+                    onClick={() => setSelectedId(m.id)}
+                    className="flex min-w-0 flex-1 items-center justify-between py-2 pl-4 text-left"
+                  >
+                    <span className="truncate">
+                      {m.brand_name ?? m.legal_name}
+                      {m.is_mirtek && <span className="ml-1.5 text-[10px] text-emerald-400">МИРТЕК</span>}
+                    </span>
+                    <span
+                      className="ml-2 shrink-0 font-mono text-[11px] text-zinc-500"
+                      title={
+                        m.market_share_pct != null
+                          ? `Доля рынка ${m.market_share_pct} % — ${m.market_share_source ?? "источник не указан"}`
+                          : "Доля рынка не опубликована"
+                      }
+                    >
+                      {m.market_share_pct != null ? `${m.market_share_pct} %` : "—"}
+                    </span>
+                  </button>
+                  {isAdmin ? (
+                    <button
+                      onClick={() => openManufacturerForm(m)}
+                      title="Изменить производителя: сайт, доля рынка"
+                      className="shrink-0 rounded p-1 text-zinc-500 opacity-0 hover:bg-white/5 hover:text-zinc-200 group-hover:opacity-100"
+                    >
+                      <Pencil size={12} />
+                    </button>
+                  ) : (
+                    <ChevronRight size={14} className="shrink-0 opacity-40" />
+                  )}
+                </div>
               ))}
             </div>
           </div>
@@ -623,44 +746,16 @@ export function CatalogPage() {
                   </div>
                 )}
               </div>
-              <div className="flex flex-wrap gap-2 px-5 py-3">
+              <div className="px-5 py-3">
                 {products.length === 0 ? (
                   <p className="text-xs text-zinc-500">Моделей пока нет.</p>
                 ) : (
-                  products.map((p) => (
-                    <button
-                      key={p.id}
-                      onClick={() => setSelectedProductId(p.id)}
-                      className={`max-w-full truncate rounded-lg border px-3 py-1.5 text-left text-xs ${
-                        p.id === selectedProductId
-                          ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-300"
-                          : "border-white/10 text-zinc-300 hover:bg-white/5"
-                      }`}
-                    >
-                      <span title={p.model_name}>{p.model_name}</span>
-                      {p.execution && <span className="ml-1.5 text-[10px] text-zinc-500">{p.execution}</span>}
-                      {p.status === "discontinued" && (
-                        <span className="ml-1.5 text-[10px] text-amber-400">снят с производства</span>
-                      )}
-                      {p.data_source === "fgis" && (
-                        <span className="ml-1.5 text-[10px] text-sky-400" title={p.registry_modification ?? undefined}>
-                          из реестра ФГИС
-                        </span>
-                      )}
-                      {p.review_status === "needs_review" && (
-                        <span className="ml-1.5 text-[10px] text-amber-400" title={p.review_reason ?? undefined}>
-                          ⚠ проверить
-                        </span>
-                      )}
-                      {p.si_type_id ? (
-                        <span className="ml-1.5 font-mono text-[10px] text-emerald-400/80">
-                          {siTypes.find((s) => s.id === p.si_type_id)?.si_code ?? "код СИ"}
-                        </span>
-                      ) : (
-                        <span className="ml-1.5 text-[10px] text-zinc-500">без кода СИ</span>
-                      )}
-                    </button>
-                  ))
+                  <ProductMatrix
+                    products={products}
+                    siTypes={siTypes}
+                    selectedProductId={selectedProductId}
+                    onSelect={setSelectedProductId}
+                  />
                 )}
               </div>
             </div>

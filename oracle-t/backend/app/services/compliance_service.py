@@ -55,6 +55,7 @@ from app.models.analysis import (
     ComplianceStatus,
     Criticality,
     Requirement,
+    RequirementKind,
     WinPercentage,
 )
 from app.models.log import LogLevel
@@ -63,7 +64,7 @@ from app.models.tender import Tender
 from app.models.user import User
 from app.services.audit import log_action
 from app.services.product_relevance import select_products_for_context
-from app.services.yandex_ai_client import run_structured
+from app.services.ai_client import run_structured
 
 # Вес требования по критичности (раздел 5.5 ТЗ, п.1 методики).
 CRITICALITY_WEIGHTS: dict[str, int] = {
@@ -325,19 +326,34 @@ def evaluate_tender(
     """Строит матрицу соответствия и считает проценты победителя по всем производителям."""
 
     outcome = ComplianceOutcome()
-    requirements = list(
+    all_requirements = list(
         db.scalars(
             select(Requirement)
             .where(Requirement.tender_id == tender.id)
             .order_by(Requirement.created_at)
         )
     )
+    # Матрица сравнивает модели приборов с требованиями, поэтому в неё идут только
+    # требования к товару (18.09.2026). Требования к работам и к участнику («персонал с
+    # IV группой допуска») сравнивать с каталогом бессмысленно — они дали бы «нет данных»
+    # по каждому производителю и обнулили бы процент.
+    requirements = [
+        item for item in all_requirements if item.kind == RequirementKind.PRODUCT.value
+    ]
     outcome.requirements_total = len(requirements)
-    if not requirements:
+    if not all_requirements:
         outcome.messages.append(
             "У тендера нет извлечённых требований — сначала выполните анализ документации"
         )
         _log(db, tender, outcome, actor, level=LogLevel.WARNING)
+        return outcome
+    if not requirements:
+        outcome.messages.append(
+            f"Матрица не строится: все {len(all_requirements)} требований — к работам, "
+            "услугам или участнику, товара в закупке нет; соответствие по ним оценивает "
+            "AI-оценка по профилю"
+        )
+        _log(db, tender, outcome, actor)
         return outcome
 
     manufacturers = list(

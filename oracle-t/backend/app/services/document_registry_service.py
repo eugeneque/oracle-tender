@@ -520,7 +520,7 @@ def build_report(outcome: CheckOutcome, db: Session, *, manufacturer: Manufactur
 
     scope = f" — {manufacturer.brand_name or manufacturer.legal_name}" if manufacturer else ""
     subject = (
-        f"ORACLE-T: документы по СИ и руководства{scope} — изменилось {len(outcome.changed)}, "
+        f"Sova Scanner: документы по СИ и руководства{scope} — изменилось {len(outcome.changed)}, "
         f"появилось {len(outcome.new)}, пропало {len(outcome.removed)}, "
         f"недоступно {len(outcome.unavailable)}"
     )
@@ -557,7 +557,7 @@ def build_report(outcome: CheckOutcome, db: Session, *, manufacturer: Manufactur
             lines.append(f"  … и ещё {len(events) - REPORT_SECTION_LIMIT}")
     lines += [
         "",
-        "Полный справочник документов с датами — в разделе «Каталог продукции» ORACLE-T.",
+        "Полный справочник документов с датами — в разделе «Каталог продукции» Sova Scanner.",
     ]
     return subject, "\n".join(lines)
 

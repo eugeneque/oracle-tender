@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Запуск ORACLE-T для разработки без Docker: Postgres (Homebrew) + backend (Uvicorn) + frontend (Vite).
+# Запуск Sova Scanner для разработки без Docker: Postgres (Homebrew) + backend (Uvicorn) + frontend (Vite).
 # Использование: ./run.sh   (остановить — Ctrl+C или просто закрыть окно терминала)
 #
 # Адреса всегда одни и те же: http://localhost:5173 и http://localhost:8000. Порт можно

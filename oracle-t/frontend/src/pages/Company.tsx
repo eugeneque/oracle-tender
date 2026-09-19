@@ -40,12 +40,15 @@ export function CompanyPage() {
   const isAdmin = user?.role === "admin";
   const [tab, setTab] = useState<Tab>("profile");
   const [profile, setProfile] = useState<CompanyProfile | null>(null);
+  // Синхронизация основной компании с rusprofile пополняет историю участий; вкладка
+  // перечитывает список через смену ключа, а не через общий стор ради одного события.
+  const [participationsKey, setParticipationsKey] = useState(0);
 
   return (
     <AppShell>
       <div className="mx-auto max-w-7xl px-8 py-8">
         <PageHeader
-          breadcrumb={["ORACLE-T", "Моя компания"]}
+          breadcrumb={["Sova Scanner", "Моя компания"]}
           title="Моя компания"
           icon={
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
@@ -68,15 +71,15 @@ export function CompanyPage() {
           сколько угодно; оценку питает та, что помечена основной.
         </p>
 
-        <div className="mb-6 flex w-full max-w-md gap-1 rounded-lg border border-white/[0.08] bg-black/20 p-1">
+        <div className="mb-6 inline-flex gap-1 rounded-full border border-white/[0.08] bg-black/30 p-1">
           {TABS.map((item) => (
             <button
               key={item.key}
               onClick={() => setTab(item.key)}
-              className={`flex-1 rounded-md px-3 py-1.5 text-xs transition-colors ${
+              className={`rounded-full px-4 py-1.5 text-xs transition-colors ${
                 tab === item.key
-                  ? "bg-white/[0.07] text-zinc-100"
-                  : "text-zinc-500 hover:text-zinc-300"
+                  ? "bg-zinc-100 text-zinc-900 shadow"
+                  : "text-zinc-400 hover:text-zinc-100"
               }`}
             >
               {item.label}
@@ -88,10 +91,15 @@ export function CompanyPage() {
             признака «ИНН основной заполнен» для соседней вкладки, и перемонтирование при
             каждом переключении гоняло бы запрос списка впустую. */}
         <div className={tab === "profile" ? "" : "hidden"}>
-          <CompanyProfilesPanel isAdmin={Boolean(isAdmin)} onPrimaryLoaded={setProfile} />
+          <CompanyProfilesPanel
+            isAdmin={Boolean(isAdmin)}
+            onPrimaryLoaded={setProfile}
+            onRusprofileSynced={() => setParticipationsKey((k) => k + 1)}
+          />
         </div>
         <div className={tab === "participations" ? "" : "hidden"}>
           <CompanyParticipationsPanel
+            key={participationsKey}
             isAdmin={Boolean(isAdmin)}
             hasInn={Boolean(profile?.has_inn)}
           />

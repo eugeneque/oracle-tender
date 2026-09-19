@@ -23,10 +23,11 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
 from app.models.user import User
+from app.schemas.integration_setting import RusprofileSyncResult
 from app.schemas.tender import CompanyProfileOut, CompanyProfileUpdate
 from app.adapters import rusprofile
 from app.adapters.rusprofile import RusprofileError
-from app.services import company_profile_service, egrul_service
+from app.services import company_profile_service, egrul_service, rusprofile_service
 from app.services.company_profile_service import CompanyProfileError
 from app.services.egrul_service import EgrulError
 
@@ -64,6 +65,9 @@ def _out(profile) -> CompanyProfileOut:
         past_projects=profile.past_projects or [],
         bank_requisites=profile.bank_requisites,
         letterhead_file_path=profile.letterhead_file_path,
+        rusprofile_card_id=profile.rusprofile_card_id,
+        rusprofile_data=profile.rusprofile_data,
+        rusprofile_synced_at=profile.rusprofile_synced_at,
         updated_at=profile.updated_at,
         is_filled=profile.is_filled(),
         has_inn=profile.has_inn(),
@@ -201,6 +205,46 @@ def delete_company_profile(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+def _sync_with_rusprofile(db: Session, profile, actor: User) -> RusprofileSyncResult:
+    try:
+        return rusprofile_service.sync_profile(db, profile, actor=actor)
+    except RusprofileError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/rusprofile-sync", response_model=RusprofileSyncResult)
+def sync_primary_with_rusprofile(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> RusprofileSyncResult:
+    """«Обновить из rusprofile» для основной компании (18.09.2026).
+
+    Под учётной записью из «Интеграции → Rusprofile» читаются карточка, лицензии и все
+    госзакупки компании; заполняются реквизиты (только пустые и ранее взятые с сайта),
+    допуски, реализованные проекты (из выигранных закупок) и история участий — с
+    проигрышами, которых реестр контрактов ЕИС не знает. Ручные записи не затираются.
+    """
+
+    try:
+        profile = company_profile_service.get_or_create(db)
+    except company_profile_service.CompanyProfileError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return _sync_with_rusprofile(db, profile, admin)
+
+
+@profiles_router.post("/{profile_id}/rusprofile-sync", response_model=RusprofileSyncResult)
+def sync_company_profile_with_rusprofile(
+    profile_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> RusprofileSyncResult:
+    """То же для любой компании из списка. У неосновных обновляются профиль, допуски и
+    проекты; история участий привязана к основной и здесь не трогается."""
+
+    profile = _require_profile(db, profile_id)
+    return _sync_with_rusprofile(db, profile, admin)
+
+
 class EgrulCandidateOut(BaseModel):
     """Кандидат автопоиска. Отдаётся на подтверждение человеку и никуда не сохраняется —
     решение «это мы» принимает пользователь, а не автопоиск (раздел 7 ТЗ)."""
@@ -230,9 +274,10 @@ def egrul_lookup(
       выдаче ЕГРЮЛ, и работает, когда у ЕГРЮЛ включается защита от автозапросов;
     * ИНН, ОГРН или наименование → **ЕГРЮЛ**, авторитетный первоисточник.
 
-    Поиск по ИНН на самом rusprofile недоступен программно (отвечает 404 при любых
-    заголовках), поэтому от него принимается именно ссылка на карточку — притворяться, что
-    мы умеем там искать, значило бы падать на каждом втором вызове.
+    От rusprofile здесь принимается ссылка на карточку, а не ИНН: поиск по ИНН на сайте есть
+    (ajax-эндпоинт, см. `rusprofile.search_by_inn`), но полноценное заполнение компании
+    с сайта — отдельная кнопка «Обновить из rusprofile» под учётной записью
+    (`/company-profiles/{id}/rusprofile-sync`), а не автопоиск реквизитов.
 
     Ничего не сохраняет: возвращает кандидатов, а в профиль они попадают обычным PUT после
     того, как человек выбрал нужного. Разделение сознательное — автоматически записанный в

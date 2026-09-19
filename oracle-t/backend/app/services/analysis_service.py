@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
 from decimal import Decimal
 
 from sqlalchemy import case, func, select
@@ -19,6 +20,7 @@ from app.models.analysis import (
     ComplianceMatrixEntry,
     Criticality,
     Requirement,
+    RequirementKind,
     WinPercentage,
 )
 from app.models.manufacturer import Manufacturer
@@ -65,7 +67,13 @@ def _criticality_rank():
 def get_compliance_matrix(db: Session, tender: Tender) -> ComplianceMatrixOut:
     """Матрица в том виде, в каком её рисует карточка тендера (раздел 5.6 ТЗ)."""
 
-    requirements = list_requirements(db, tender.id)
+    # В матрице — только требования к товару: только по ним есть ячейки (см.
+    # `compliance_service.evaluate_tender`). Полный список — на вкладке «Требования».
+    requirements = [
+        item
+        for item in list_requirements(db, tender.id)
+        if item.kind == RequirementKind.PRODUCT.value
+    ]
 
     manufacturer_names = {
         manufacturer.id: manufacturer.brand_name or manufacturer.legal_name
@@ -149,6 +157,18 @@ def attach_analysis_fields(
             )
         )
 
+    # Теги — общие, поэтому пользователь не нужен; по одному запросу на всю выдачу.
+    from app.models.tender_tag import TenderTag, TenderTagLink
+
+    tags_by_tender: dict[uuid.UUID, list[TenderTag]] = defaultdict(list)
+    for tender_id, tag in db.execute(
+        select(TenderTagLink.tender_id, TenderTag)
+        .join(TenderTag, TenderTag.id == TenderTagLink.tag_id)
+        .where(TenderTagLink.tender_id.in_(ids))
+        .order_by(func.lower(TenderTag.name))
+    ).all():
+        tags_by_tender[tender_id].append(tag)
+
     percentages: dict[uuid.UUID, Decimal] = dict(
         db.execute(
             select(WinPercentage.tender_id, WinPercentage.percentage)
@@ -167,13 +187,14 @@ def attach_analysis_fields(
             .group_by(Requirement.tender_id)
         ).all()
     )
-    scores: dict[uuid.UUID, tuple[Decimal | None, str | None]] = {
-        tender_id: (overall, verdict)
-        for tender_id, overall, verdict in db.execute(
+    scores: dict[uuid.UUID, tuple[Decimal | None, str | None, bool | None]] = {
+        tender_id: (overall, verdict, decision)
+        for tender_id, overall, verdict, decision in db.execute(
             select(
                 AiProfileScore.tender_id,
                 AiProfileScore.overall_score,
                 AiProfileScore.verdict,
+                AiProfileScore.decision,
             ).where(
                 AiProfileScore.tender_id.in_(ids), AiProfileScore.is_current.is_(True)
             )
@@ -200,11 +221,13 @@ def attach_analysis_fields(
         # отдаёт (раздел 7 ТЗ), и `__table__.columns` его уже не даст.
         data["relevance_status"] = tender.relevance_status
         data["win_percentage"] = percentages.get(tender.id)
-        overall, verdict = scores.get(tender.id, (None, None))
+        overall, verdict, decision = scores.get(tender.id, (None, None, None))
         data["ai_score"] = overall
         data["ai_verdict"] = verdict
+        data["ai_decision"] = decision
         data["requirements_count"] = counts.get(tender.id, 0)
         data["assignee_name"] = assignees.get(tender.assignee_id) if tender.assignee_id else None
         data["is_bookmarked"] = tender.id in bookmarked
+        data["tags"] = tags_by_tender.get(tender.id, [])
         enriched.append(data)
     return enriched

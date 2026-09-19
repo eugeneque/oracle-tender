@@ -484,7 +484,7 @@ export function NotificationsSection({ isAdmin }: { isAdmin: boolean }) {
   }, [isExpanded, loadEntries]);
 
   return (
-    <div className="mt-6 overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.03]">
+    <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.03]">
       <button
         onClick={() => setIsExpanded((v) => !v)}
         className="flex w-full items-center justify-between px-5 py-4 text-left"

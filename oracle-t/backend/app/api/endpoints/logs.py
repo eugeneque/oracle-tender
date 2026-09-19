@@ -72,7 +72,10 @@ def get_jobs(
     if tender_id is not None:
         query = query.where(BackgroundJob.tender_id == tender_id)
     if kind is not None:
-        query = query.where(BackgroundJob.kind == kind)
+        # Несколько видов через запятую: анализ документов выполняется и отдельной задачей,
+        # и шагом полного разбора, а карточке нужен последний из них.
+        kinds = [item.strip() for item in kind.split(",") if item.strip()]
+        query = query.where(BackgroundJob.kind.in_(kinds))
     if active_only:
         query = query.where(BackgroundJob.status.in_(["queued", "running"]))
     rows = (

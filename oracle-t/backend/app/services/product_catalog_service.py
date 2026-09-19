@@ -22,9 +22,9 @@ from app.models.manufacturer import (
     SiTypeSource,
 )
 from app.models.user import User
-from app.schemas.manufacturer import SiTypeOut
+from app.schemas.manufacturer import ProductOut, SiTypeOut
 from app.seed.characteristics_data import is_known_field
-from app.services import si_type_linking
+from app.services import product_form_factor, si_type_linking
 from app.services.audit import log_action
 
 
@@ -57,7 +57,75 @@ def si_type_to_out(si_type: SiType) -> SiTypeOut:
 
 
 def list_manufacturers(db: Session) -> list[Manufacturer]:
-    return list(db.scalars(select(Manufacturer).order_by(Manufacturer.is_mirtek.desc(), Manufacturer.legal_name)))
+    """По убыванию доли рынка (замечание тестировщика 18.09.2026); у кого доля не
+    опубликована — в конце по алфавиту. МИРТЕК не закрепляется первым: заказчик просил
+    видеть себя среди конкурентов на своём месте, а не над ними."""
+    return list(
+        db.scalars(
+            select(Manufacturer).order_by(
+                Manufacturer.market_share_pct.desc().nulls_last(), Manufacturer.legal_name
+            )
+        )
+    )
+
+
+def create_manufacturer(
+    db: Session,
+    *,
+    legal_name: str,
+    brand_name: str | None,
+    website: str | None,
+    market_share_pct: float | None,
+    market_share_source: str | None,
+    actor: User,
+) -> Manufacturer:
+    manufacturer = Manufacturer(
+        legal_name=legal_name.strip(),
+        brand_name=(brand_name or "").strip() or None,
+        website=(website or "").strip() or None,
+        market_share_pct=market_share_pct,
+        market_share_source=(market_share_source or "").strip() or None,
+        is_mirtek=False,
+    )
+    db.add(manufacturer)
+    db.flush()
+    log_action(
+        db,
+        component="product_catalog",
+        action="create_manufacturer",
+        result="success",
+        level=LogLevel.INFO,
+        details=f"Добавлен производитель {manufacturer.legal_name}",
+        user_id=actor.id,
+    )
+    db.commit()
+    db.refresh(manufacturer)
+    return manufacturer
+
+
+def update_manufacturer(
+    db: Session, manufacturer: Manufacturer, *, fields: dict, actor: User
+) -> Manufacturer:
+    """`fields` — только присланные в PATCH поля (`model_dump(exclude_unset=True)`)."""
+    if "legal_name" in fields:
+        manufacturer.legal_name = fields["legal_name"].strip()
+    for name in ("brand_name", "website", "market_share_source"):
+        if name in fields:
+            setattr(manufacturer, name, (fields[name] or "").strip() or None)
+    if "market_share_pct" in fields:
+        manufacturer.market_share_pct = fields["market_share_pct"]
+    log_action(
+        db,
+        component="product_catalog",
+        action=f"update_manufacturer:{manufacturer.id}",
+        result="success",
+        level=LogLevel.INFO,
+        details=f"{manufacturer.legal_name}: изменены поля {', '.join(sorted(fields))}",
+        user_id=actor.id,
+    )
+    db.commit()
+    db.refresh(manufacturer)
+    return manufacturer
 
 
 def get_manufacturer_or_none(db: Session, manufacturer_id: uuid.UUID) -> Manufacturer | None:
@@ -247,6 +315,45 @@ def list_products(db: Session, manufacturer_id: uuid.UUID) -> list[Product]:
             select(Product).where(Product.manufacturer_id == manufacturer_id).order_by(Product.model_name)
         )
     )
+
+
+def list_products_out(db: Session, manufacturer_id: uuid.UUID) -> list[ProductOut]:
+    """Список моделей с выведенным форм-фактором (фазность, способы установки) — по нему
+    интерфейс раскладывает модели по столбцам. Характеристики трёх нужных полей берутся
+    одним запросом на производителя, а не по одному на модель: у Энергомеры 220 моделей."""
+    products = list_products(db, manufacturer_id)
+    fields = (
+        product_form_factor.FIELD_PHASES,
+        product_form_factor.FIELD_MOUNTING,
+        product_form_factor.FIELD_BODY,
+    )
+    rows = db.execute(
+        select(
+            ProductCharacteristic.product_id,
+            ProductCharacteristic.field_name,
+            ProductCharacteristic.value,
+        )
+        .join(Product, Product.id == ProductCharacteristic.product_id)
+        .where(Product.manufacturer_id == manufacturer_id)
+        .where(ProductCharacteristic.field_name.in_(fields))
+    ).all()
+    by_product: dict[uuid.UUID, dict[str, str | None]] = {}
+    for product_id, field_name, value in rows:
+        by_product.setdefault(product_id, {})[field_name] = value
+
+    result: list[ProductOut] = []
+    for product in products:
+        form = product_form_factor.classify(
+            model_name=product.model_name,
+            model_code=product.model_code,
+            registry_modification=product.registry_modification,
+            characteristics=by_product.get(product.id, {}),
+        )
+        out = ProductOut.model_validate(product)
+        out.phases = form.phases
+        out.mountings = form.mountings
+        result.append(out)
+    return result
 
 
 def create_product(

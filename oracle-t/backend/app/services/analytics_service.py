@@ -36,7 +36,7 @@ from app.models.tender_document import ParseStatus, TenderDocument
 from app.models.user import User
 from app.services.audit import log_action
 from app.services.tender_service import TenderFilters, apply_tender_filters
-from app.services.yandex_ai_client import YandexAiNotConfiguredError, run_structured
+from app.services.ai_client import AiNotConfiguredError, run_structured
 
 # Сколько строк отдавать в «длинных» разрезах. Топ-10 умещается в виджет и покрывает
 # практический вопрос «кто основные заказчики»; полный список — это отдельный отчёт.
@@ -631,7 +631,7 @@ def generate_ai_summary(db: Session, filters: TenderFilters, actor: User) -> dic
             response_model=AiSummary,
             temperature=0.3,
         )
-    except YandexAiNotConfiguredError as exc:
+    except AiNotConfiguredError as exc:
         log_action(
             db,
             component="analytics",

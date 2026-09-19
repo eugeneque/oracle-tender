@@ -15,13 +15,15 @@ import {
   ListTree,
   ScrollText,
   Loader2,
-  Play,
+  Maximize2,
   Scale,
   Sparkles,
   Star,
+  Tag as TagIcon,
   Upload,
   X,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 
 import { ApiError, api, downloadFile, postForm } from "../api/client";
 import type {
@@ -33,7 +35,6 @@ import type {
   Requirement,
   TenderCard,
   TenderExtraSections,
-  TenderInsights,
   Tender,
   TenderDocument,
   TenderHistoryEntry,
@@ -41,7 +42,7 @@ import type {
   TenderUpdate,
 } from "../api/types";
 import { STAGE_LABELS, STAGE_ORDER } from "../api/types";
-import { TenderAiPanel } from "./tender-detail/TenderAiPanel";
+import { DecisionMark } from "./DecisionMark";
 import { TenderAiScorePanel } from "./tender-detail/TenderAiScorePanel";
 import { TenderApplicationTab } from "./tender-detail/TenderApplicationTab";
 import { TenderCalculationTab } from "./tender-detail/TenderCalculationTab";
@@ -53,6 +54,8 @@ import { TenderExtraTab } from "./tender-detail/TenderExtraTab";
 import { TenderHistoryTab } from "./tender-detail/TenderHistoryTab";
 import { TenderOverviewTab } from "./tender-detail/TenderOverviewTab";
 import { TenderRequirementsTab } from "./tender-detail/TenderRequirementsTab";
+import { TagChip } from "./tags/TagChip";
+import { TagPicker } from "./tags/TagPicker";
 import {
   percentValue,
   relevanceLabel,
@@ -79,7 +82,14 @@ type TabKey =
 // Как часто карточка спрашивает сервер о состоянии запущенной фоновой задачи.
 const JOB_POLL_MS = 2_000;
 
-type JobKindKey = "analyze" | "evaluate" | "ai-score";
+// «review» — полный разбор одной задачей: анализ документов → матрица соответствия →
+// AI-оценка (18.09.2026). Отдельные «analyze»/«evaluate» с кнопок сняты: второй зависел от
+// первого, а третий без первого считал вслепую, и человек должен был знать порядок.
+type JobKindKey = "review" | "analyze" | "evaluate" | "ai-score";
+
+/** Что делает «Разобрать закупку» — подсказка на кнопке и в пустых состояниях вкладок. */
+const REVIEW_HINT =
+  "Анализ документов, матрица соответствия и AI-оценка по профилю одной задачей";
 
 const RELEVANCE_CLASSES: Record<string, string> = {
   new: "border-white/10 bg-white/5 text-zinc-400",
@@ -158,13 +168,18 @@ export function TenderDetailPanel({
   tender: initialTender,
   onClose,
   onChanged,
+  expandable = true,
 }: {
   tender: Tender;
   onClose?: () => void;
   onChanged?: (tender: Tender) => void;
+  /** Кнопка «Развернуть» — переход на отдельную страницу закупки (`/tenders/:id`,
+   * замечание 17.09.2026). На самой этой странице кнопка не нужна. */
+  expandable?: boolean;
 }) {
   const [tender, setTender] = useState<Tender>(initialTender);
   const [activeTab, setActiveTab] = useState<TabKey>("overview");
+  const [isTagPickerOpen, setIsTagPickerOpen] = useState(false);
 
   const [documents, setDocuments] = useState<TenderDocument[] | null>(null);
   const [docsError, setDocsError] = useState<string | null>(null);
@@ -182,18 +197,24 @@ export function TenderDetailPanel({
 
   const [runningAction, setRunningAction] = useState<JobKindKey | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
+  // Ход полного разбора («Шаг 2 из 3: расчёт соответствия…») — сервер пишет его в
+  // `message` идущей задачи, карточка показывает вместо безымянного индикатора.
+  const [jobProgress, setJobProgress] = useState<string | null>(null);
 
   const [card, setCard] = useState<TenderCard | null>(null);
   const [isCardLoading, setIsCardLoading] = useState(true);
   const [isCardRefreshing, setIsCardRefreshing] = useState(false);
-  const [insights, setInsights] = useState<TenderInsights | null>(null);
-  const [isInsightsRunning, setIsInsightsRunning] = useState(false);
-  const [insightsError, setInsightsError] = useState<string | null>(null);
 
   // AI-оценка по профилю (раздел 5.5.1 ТЗ) — грузится сразу вместе с карточкой: это шапка,
-  // а не вкладка, и человек смотрит на неё первым делом.
+  // а не вкладка, и человек смотрит на неё первым делом. Если оценки ещё нет, расчёт
+  // запускается сам (решение 17.09.2026): кнопку «Рассчитать» на каждой новой закупке
+  // нажимали не всегда, и список показывал «не считалась» там, где ответ был нужен.
   const [score, setScore] = useState<AiProfileScore | null>(null);
   const [scoreError, setScoreError] = useState<string | null>(null);
+  // Для какого тендера автозапуск уже сделан: эффект загрузки оценки в StrictMode и при
+  // обновлении карточки срабатывает повторно, а второй POST только плодил бы запросы —
+  // сервер и так возвращает уже идущую задачу, но ходить за ней дважды незачем.
+  const autoScoreRef = useRef<string | null>(null);
 
   const [extra, setExtra] = useState<TenderExtraSections | null>(null);
   const [isExtraLoading, setIsExtraLoading] = useState(false);
@@ -226,7 +247,6 @@ export function TenderDetailPanel({
     setMatrix(null);
     setHistory(null);
     setCard(null);
-    setInsights(null);
     setScore(null);
     setExtra(null);
     setNiche(null);
@@ -252,27 +272,6 @@ export function TenderDetailPanel({
     };
   }, [tender.id]);
 
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .get<AiProfileScore | null>(`/tenders/${tender.id}/ai-score`)
-      .then((data) => {
-        if (!cancelled) setScore(data);
-      })
-      .catch(() => {
-        // Отсутствие оценки — обычное состояние; ошибку показываем только при расчёте.
-      });
-    void api
-      .get<CompanyProfile | null>("/company-profile")
-      .then((data) => {
-        if (!cancelled) setProfile(data);
-      })
-      .catch(() => setProfile(null));
-    return () => {
-      cancelled = true;
-    };
-  }, [tender.id]);
-
   const loadCard = useCallback(
     async (refresh = false) => {
       if (refresh) setIsCardRefreshing(true);
@@ -282,7 +281,6 @@ export function TenderDetailPanel({
           `/tenders/${tender.id}/card${refresh ? "?refresh=true" : ""}`,
         );
         setCard(data);
-        if (data.insights) setInsights(data.insights);
         if (refresh || data.sections.length > 0) {
           const updated = await api.get<Tender>(`/tenders/${tender.id}`);
           applyTender(updated);
@@ -301,31 +299,15 @@ export function TenderDetailPanel({
     void loadCard();
   }, [loadCard]);
 
-  const runInsights = async () => {
-    setIsInsightsRunning(true);
-    setInsightsError(null);
-    try {
-      const result = await api.post<TenderInsights>(`/tenders/${tender.id}/insights`);
-      setInsights(result);
-      if (result.applied_fields && result.applied_fields.length > 0) {
-        applyTender(await api.get<Tender>(`/tenders/${tender.id}`));
-      }
-    } catch (err) {
-      setInsightsError(
-        err instanceof ApiError ? err.message : "Не удалось выполнить разбор карточки",
-      );
-    } finally {
-      setIsInsightsRunning(false);
-    }
-  };
-
   const loadRequirements = useCallback(async () => {
     setRequirements(await api.get<Requirement[]>(`/tenders/${tender.id}/requirements`));
   }, [tender.id]);
 
   const loadAnalysisJob = useCallback(async () => {
+    // Анализ выполняется и отдельной задачей, и первым шагом полного разбора — нужен
+    // последний из них, каким бы он ни был.
     const jobs = await api.get<BackgroundJob[]>(
-      `/jobs?tender_id=${tender.id}&kind=tender_analysis&limit=1`,
+      `/jobs?tender_id=${tender.id}&kind=tender_analysis,tender_full_review&limit=1`,
     );
     setAnalysisJob(jobs[0] ?? null);
   }, [tender.id]);
@@ -426,7 +408,7 @@ export function TenderDetailPanel({
       );
       setDocuments((prev) => [...(prev ?? []), ...added]);
       setActionMessage(
-        `Добавлено файлов: ${added.length} — запустите «Анализ документов», чтобы учесть их`,
+        `Добавлено файлов: ${added.length} — запустите «Разобрать закупку», чтобы учесть их`,
       );
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Не удалось загрузить файлы");
@@ -455,23 +437,58 @@ export function TenderDetailPanel({
    * синхронно эти операции держали бы HTTP-запрос открытым десятки секунд, и закрытая
    * вкладка выглядела бы как «ничего не произошло».
    */
-  const startJob = async (kind: JobKindKey) => {
-    setRunningAction(kind);
-    setError(null);
-    setScoreError(null);
-    setActionMessage(null);
-    try {
-      const job = await api.post<BackgroundJob>(`/tenders/${tender.id}/${kind}`);
-      setJobId(job.id);
-    } catch (err) {
-      const message = err instanceof ApiError ? err.message : "Не удалось запустить операцию";
-      // Незаполненный профиль компании — причина отказа именно расчёта оценки, и текст
-      // должен стоять рядом с ней, а не в общей строке ошибок карточки.
-      if (kind === "ai-score") setScoreError(message);
-      else setError(message);
-      setRunningAction(null);
-    }
-  };
+  const startJob = useCallback(
+    async (kind: JobKindKey) => {
+      setRunningAction(kind);
+      setError(null);
+      setScoreError(null);
+      setActionMessage(null);
+      try {
+        const job = await api.post<BackgroundJob>(`/tenders/${tender.id}/${kind}`);
+        setJobId(job.id);
+      } catch (err) {
+        const message = err instanceof ApiError ? err.message : "Не удалось запустить операцию";
+        // Незаполненный профиль компании — причина отказа именно расчёта оценки, и текст
+        // должен стоять рядом с ней, а не в общей строке ошибок карточки.
+        if (kind === "ai-score") setScoreError(message);
+        else setError(message);
+        setRunningAction(null);
+      }
+    },
+    [tender.id],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<AiProfileScore | null>(`/tenders/${tender.id}/ai-score`)
+      .then((data) => {
+        if (cancelled) return;
+        setScore(data);
+        if (data === null && autoScoreRef.current !== tender.id) {
+          autoScoreRef.current = tender.id;
+          // Без требований оценка считалась бы «только по карточке, точность ниже» — так
+          // и получались 34% по закупке, ТЗ которой никто не читал. Поэтому первый заход
+          // в карточку запускает полный разбор; если требования уже есть — только оценку.
+          void startJob(tender.requirements_count > 0 ? "ai-score" : "review");
+        }
+      })
+      .catch(() => {
+        // Отсутствие оценки — обычное состояние; ошибку показываем только при расчёте.
+      });
+    void api
+      .get<CompanyProfile | null>("/company-profile")
+      .then((data) => {
+        if (!cancelled) setProfile(data);
+      })
+      .catch(() => setProfile(null));
+    return () => {
+      cancelled = true;
+    };
+    // requirements_count намеренно не в зависимостях: он меняется после разбора, а
+    // повторно решать про автозапуск уже не нужно — оценка к тому моменту есть.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tender.id, startJob]);
 
   useEffect(() => {
     if (!jobId || runningAction === null) return;
@@ -480,13 +497,27 @@ export function TenderDetailPanel({
     const finish = async (job: BackgroundJob) => {
       setRunningAction(null);
       setJobId(null);
+      setJobProgress(null);
       if (job.status === "error") {
-        setError(job.message ?? "Операция завершилась ошибкой");
+        // Сбой расчёта оценки показывается в её блоке: он запускается сам при открытии, и
+        // общая строка ошибок карточки над вкладками для него — сообщение «ни о чём».
+        if (job.kind === "ai_profile_score") setScoreError(job.message ?? "Расчёт не удался");
+        else setError(job.message ?? "Операция завершилась ошибкой");
         return;
       }
       setActionMessage(job.message);
       applyTender(await api.get<Tender>(`/tenders/${tender.id}`));
-      if (job.kind === "tender_analysis") {
+      if (job.kind === "tender_full_review") {
+        // Обновляется всё, что разбор мог изменить; вкладка не переключается — итог
+        // (оценка и знак решения) виден на «Основном», где человек и находится.
+        setAnalysisJob(job);
+        setRequirements(null);
+        setMatrix(null);
+        setScore(await api.get<AiProfileScore | null>(`/tenders/${tender.id}/ai-score`));
+        await loadExtra();
+        if (activeTab === "requirements" || activeTab === "compliance") await loadRequirements();
+        if (activeTab === "compliance") await loadMatrix();
+      } else if (job.kind === "tender_analysis") {
         await loadRequirements();
         setAnalysisJob(job);
         setActiveTab("requirements");
@@ -503,7 +534,11 @@ export function TenderDetailPanel({
       try {
         const jobs = await api.get<BackgroundJob[]>(`/jobs?tender_id=${tender.id}&limit=5`);
         const job = jobs.find((item) => item.id === jobId);
-        if (cancelled || !job || job.status === "queued" || job.status === "running") return;
+        if (cancelled || !job) return;
+        if (job.status === "queued" || job.status === "running") {
+          setJobProgress(job.message);
+          return;
+        }
         clearInterval(interval);
         await finish(job);
       } catch {
@@ -515,7 +550,16 @@ export function TenderDetailPanel({
       cancelled = true;
       clearInterval(interval);
     };
-  }, [jobId, runningAction, tender.id, applyTender, loadRequirements, loadMatrix, loadExtra]);
+  }, [
+    jobId,
+    runningAction,
+    tender.id,
+    activeTab,
+    applyTender,
+    loadRequirements,
+    loadMatrix,
+    loadExtra,
+  ]);
 
   const saveChanges = async (changes: TenderUpdate) => {
     setError(null);
@@ -545,6 +589,18 @@ export function TenderDetailPanel({
       if (history !== null) await loadHistory();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Не удалось изменить избранное");
+    }
+  };
+
+  // Теги (замечание 17.09.2026): общие для команды метки. Отправляется полный набор —
+  // сервер сам считает разницу и пишет её в историю.
+  const setTags = async (tagIds: string[]) => {
+    setError(null);
+    try {
+      applyTender(await api.put<Tender>(`/tenders/${tender.id}/tags`, { tag_ids: tagIds }));
+      if (history !== null) await loadHistory();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось изменить теги");
     }
   };
 
@@ -664,9 +720,56 @@ export function TenderDetailPanel({
               {relevanceLabel(tender.relevance_status)}
             </span>
           </div>
-          <h2 className="text-base font-semibold leading-snug text-white">{tender.title}</h2>
+          <div className="flex items-start gap-2.5">
+            <DecisionMark decision={tender.ai_decision} size="md" className="mt-0.5" />
+            <h2 className="text-base font-semibold leading-snug text-white">{tender.title}</h2>
+          </div>
+          {/* Теги под заголовком: метки читаются вместе с названием, а кнопка добавления
+              стоит в том же ряду, чтобы пометить закупку одним движением. */}
+          <div className="relative mt-2 flex flex-wrap items-center gap-1.5">
+            {tender.tags.map((tag) => (
+              <TagChip
+                key={tag.id}
+                tag={tag}
+                onClick={() =>
+                  void setTags(tender.tags.filter((t) => t.id !== tag.id).map((t) => t.id))
+                }
+                title={`${tag.name} — нажмите, чтобы снять`}
+              />
+            ))}
+            <button
+              onClick={() => setIsTagPickerOpen((v) => !v)}
+              className={`inline-flex items-center gap-1 rounded-full border border-dashed px-2 py-1 text-[11px] leading-none transition-colors ${
+                isTagPickerOpen
+                  ? "border-indigo-400/50 text-indigo-300"
+                  : "border-white/15 text-zinc-500 hover:border-white/30 hover:text-zinc-300"
+              }`}
+              title="Поставить тег"
+            >
+              <TagIcon size={11} />
+              {tender.tags.length === 0 ? "Добавить тег" : "Тег"}
+            </button>
+            {isTagPickerOpen && (
+              <TagPicker
+                selectedIds={tender.tags.map((tag) => tag.id)}
+                onChange={(ids) => void setTags(ids)}
+                onClose={() => setIsTagPickerOpen(false)}
+                anchorClassName="left-0 top-full"
+              />
+            )}
+          </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          {expandable && (
+            <Link
+              to={`/tenders/${tender.id}`}
+              title="Развернуть на отдельную страницу (откроется в большом формате; средней кнопкой — в новой вкладке)"
+              className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-200"
+            >
+              <Maximize2 size={14} />
+              Развернуть
+            </Link>
+          )}
           <button
             onClick={toggleBookmark}
             title={
@@ -744,28 +847,17 @@ export function TenderDetailPanel({
         </button>
         <div className="mx-1 h-5 w-px bg-white/10" />
         <button
-          onClick={() => void startJob("analyze")}
+          onClick={() => void startJob("review")}
           disabled={runningAction !== null}
+          title={REVIEW_HINT}
           className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-3 py-1.5 text-xs text-indigo-300 hover:bg-indigo-500/20 disabled:opacity-50"
         >
-          {runningAction === "analyze" ? (
+          {runningAction === "review" ? (
             <Loader2 size={14} className="animate-spin" />
           ) : (
             <Sparkles size={14} />
           )}
-          Анализ документов
-        </button>
-        <button
-          onClick={() => void startJob("evaluate")}
-          disabled={runningAction !== null}
-          className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-3 py-1.5 text-xs text-indigo-300 hover:bg-indigo-500/20 disabled:opacity-50"
-        >
-          {runningAction === "evaluate" ? (
-            <Loader2 size={14} className="animate-spin" />
-          ) : (
-            <Play size={14} />
-          )}
-          Расчёт соответствия
+          Разобрать закупку
         </button>
       </div>
 
@@ -806,11 +898,13 @@ export function TenderDetailPanel({
         {runningAction !== null && (
           <div className="mb-4 flex items-center gap-2 rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-3 py-2 text-xs text-indigo-300">
             <Loader2 size={13} className="animate-spin" />
-            {runningAction === "analyze"
-              ? "Идёт анализ документов на сервере."
-              : runningAction === "evaluate"
-                ? "Идёт расчёт соответствия на сервере."
-                : "Идёт расчёт AI-оценки по профилю."}{" "}
+            {runningAction === "review"
+              ? `Идёт полный разбор закупки${jobProgress ? ` — ${jobProgress.replace(/…$/, "")}` : ""}.`
+              : runningAction === "analyze"
+                ? "Идёт анализ документов на сервере."
+                : runningAction === "evaluate"
+                  ? "Идёт расчёт соответствия на сервере."
+                  : "Идёт разбор ИИ по профилю компании."}{" "}
             Карточку можно закрыть — работа продолжится, а ход виден в «Настройках →
             Логирование».
           </div>
@@ -832,12 +926,6 @@ export function TenderDetailPanel({
               error={scoreError}
             />
             <TenderOverviewTab tender={tender} onSave={saveChanges} />
-            <TenderAiPanel
-              insights={insights}
-              isRunning={isInsightsRunning}
-              onRun={() => void runInsights()}
-              error={insightsError}
-            />
           </div>
         )}
 
@@ -959,7 +1047,10 @@ export function TenderDetailPanel({
                   ? null
                   : {
                       ran: analysisJob !== null && analysisJob.status === "success",
-                      message: analysisJob?.message ?? null,
+                      message:
+                        analysisJob?.kind === "tender_full_review"
+                          ? ((analysisJob.payload?.analysis as string | undefined) ?? null)
+                          : (analysisJob?.message ?? null),
                       documentsWithText:
                         documents === null
                           ? null
@@ -984,7 +1075,11 @@ export function TenderDetailPanel({
               <TenderRegistryBlock tenderId={tender.id} />
               <TenderComplianceTab
                 matrix={matrix}
-                requirementsCount={requirements === null ? null : requirements.length}
+                requirementsCount={
+                  requirements === null
+                    ? null
+                    : requirements.filter((item) => item.kind === "product").length
+                }
               />
             </>
           ))}

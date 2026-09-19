@@ -25,7 +25,12 @@ from app.models.manufacturer import Manufacturer
 from app.models.source import Source
 from app.models.tender import RELEVANCE_TO_STAGE, Tender, TenderStage
 from app.services import ai_profile_service, company_profile_service
-from app.services.ai_profile_service import DimensionAnswer, ResumeAnswer, WeakPointAnswer
+from app.services.ai_profile_service import (
+    DecisionAnswer,
+    DimensionAnswer,
+    ResumeAnswer,
+    WeakPointAnswer,
+)
 from app.services.company_profile_service import CompanyProfileError
 
 
@@ -38,13 +43,16 @@ def _tender(db, **overrides) -> Tender:
     )
     db.add(source)
     db.flush()
+    fields = {
+        "title": "Поставка приборов учёта электроэнергии",
+        "currency": "RUB",
+        "okpd2_code": "26.51.63.130",
+        **overrides,
+    }
     tender = Tender(
         source_id=source.id,
         external_id=f"AIP-{uuid.uuid4().hex[:6]}",
-        title="Поставка приборов учёта электроэнергии",
-        currency="RUB",
-        okpd2_code="26.51.63.130",
-        **overrides,
+        **fields,
     )
     db.add(tender)
     db.flush()
@@ -131,6 +139,8 @@ def test_compute_profile_score_saves_traceable_current_version(
     tender = _tender(db_session)
     requirement = _requirement(db_session, tender, "Наличие СРО на проектирование")
 
+    decision_inputs: list[str] = []
+
     def fake_run_structured(db, *, system_prompt, user_text, response_model, temperature=0.0):
         if response_model is DimensionAnswer:
             return DimensionAnswer(
@@ -139,9 +149,11 @@ def test_compute_profile_score_saves_traceable_current_version(
                 requirement_numbers=[1],
                 profile_numbers=[1],
             )
+        if response_model is DecisionAnswer:
+            decision_inputs.append(user_text)
+            return DecisionAnswer(summary="Задача и компетенции подтверждены.", participate=True)
         return ResumeAnswer(
             summary="Поставка приборов учёта для сетевой организации.",
-            verdict=Verdict.GO.value,
             weak_points=[WeakPointAnswer(severity="moderate", text="Короткий срок подачи")],
             strategy_verdict="Идти",
             strategy_price="Ориентир — НМЦК минус 7%",
@@ -165,6 +177,33 @@ def test_compute_profile_score_saves_traceable_current_version(
         item["ref_id"] == str(requirement.id) for item in score.task_evidence
     ), "число должно быть прослеживаемо до конкретного требования"
     assert score.company_profile_snapshot["years_of_experience"] == 18
+    # Решение «смотреть / не смотреть» (17.09.2026) вынесено по трём измерениям: в контекст
+    # ушли комментарии и обоснования, сводка сохранена, но наружу не отдаётся.
+    assert score.decision is True
+    assert score.decision_summary == "Задача и компетенции подтверждены."
+    assert "Наличие СРО на проектирование" in decision_inputs[0]
+    assert "Компетенции: 90%" in decision_inputs[0]
+    serialized = ai_profile_service.serialize(db_session, score)
+    assert serialized["decision"] is True
+    assert "decision_summary" not in serialized
+
+
+def test_verdict_follows_decision_and_threshold():
+    """Вердикт выводится из решения и порога, а не выбирается моделью (18.09.2026): красный
+    крест и «идти с оговорками» на одной карточке больше невозможны."""
+
+    verdict = ai_profile_service._verdict
+    # Решение «не смотреть» перевешивает любой процент.
+    assert verdict(False, Decimal("90")) == Verdict.NO_GO.value
+    # Решение «смотреть»: между «идти» и «с оговорками» выбирает порог; ниже 50 — оговорки,
+    # а не отказ, потому что решение уже вынесено в пользу просмотра.
+    assert verdict(True, Decimal("90")) == Verdict.GO.value
+    assert verdict(True, Decimal("60")) == Verdict.GO_WITH_RESERVATIONS.value
+    assert verdict(True, Decimal("34")) == Verdict.GO_WITH_RESERVATIONS.value
+    # Решение не выносилось — чистый порог, как у цветного бейджа списка.
+    assert verdict(None, Decimal("34")) == Verdict.NO_GO.value
+    assert verdict(None, Decimal("80")) == Verdict.GO.value
+    assert verdict(None, None) == Verdict.GO_WITH_RESERVATIONS.value
 
 
 def test_recalculation_keeps_previous_version(db_session, filled_profile, monkeypatch):
@@ -198,6 +237,8 @@ def test_recalculation_keeps_previous_version(db_session, filled_profile, monkey
     # Сбой блока «Резюме» не отменяет измерения — оценка сохранена, вердикт выведен по порогу.
     assert current[0].summary is None
     assert current[0].verdict is not None
+    # Решение без ответа модели не выдумывается порогом — остаётся «не выносилось».
+    assert current[0].decision is None
 
 
 def test_score_requires_filled_company_profile(db_session):
@@ -471,3 +512,104 @@ def test_history_computes_once_a_loss_is_added_by_hand(db_session):
     assert score == Decimal("50.00")
     assert len(evidence) == 2
     assert "побед — 1" in comment
+
+
+# --- отбор истории после появления rusprofile (18.09.2026) ------------------------------------
+
+
+def test_history_matches_customer_by_core_name_without_legal_form(db_session):
+    """«ПАО "Россети Северный Кавказ"» с rusprofile и «ПУБЛИЧНОЕ АКЦИОНЕРНОЕ ОБЩЕСТВО
+    "РОССЕТИ СЕВЕРНЫЙ КАВКАЗ"» из ЕИС — один заказчик; подстрока их не сводила."""
+
+    tender = _tender(
+        db_session,
+        title="Выполнение работ по замене кабеля",
+        customer_name='ПУБЛИЧНОЕ АКЦИОНЕРНОЕ ОБЩЕСТВО "РОССЕТИ СЕВЕРНЫЙ КАВКАЗ"',
+    )
+    _participation(
+        db_session,
+        outcome=ParticipationOutcome.LOST.value,
+        customer_name='ПАО "Россети Северный Кавказ"',
+        source=ParticipationSource.RUSPROFILE.value,
+    )
+    _participation(
+        db_session,
+        outcome=ParticipationOutcome.WON.value,
+        customer_name='ПАО "Россети Северный Кавказ"',
+        source=ParticipationSource.RUSPROFILE.value,
+    )
+    db_session.flush()
+
+    score, comment, evidence = ai_profile_service._history_dimension(db_session, tender)
+
+    assert score == Decimal("50.00")
+    assert "тому же заказчику — 2" in comment
+    assert len(evidence) == 2
+
+
+def test_history_matches_by_similar_subject(db_session):
+    """История по ИНН приходит без привязки к нашим тендерам — сходство предмета закупки
+    находит её по словам."""
+
+    tender = _tender(
+        db_session,
+        title="Поставка счетчиков электрической энергии трехфазных для нужд филиала",
+        customer_name='АО "Совсем Другой Заказчик"',
+    )
+    record = _participation(
+        db_session,
+        outcome=ParticipationOutcome.WON.value,
+        customer_name='ООО "Эн+ Торговый Дом"',
+        source=ParticipationSource.RUSPROFILE.value,
+    )
+    record.tender_title = "Поставка счетчиков электрической энергии и комплектующих в 2026 г."
+    unrelated = _participation(
+        db_session,
+        outcome=ParticipationOutcome.LOST.value,
+        customer_name='ООО "Эн+ Торговый Дом"',
+        source=ParticipationSource.RUSPROFILE.value,
+    )
+    unrelated.tender_title = "Выполнение работ по капитальному ремонту кровли здания"
+    db_session.flush()
+
+    score, comment, evidence = ai_profile_service._history_dimension(db_session, tender)
+
+    assert score == Decimal("100.00")
+    assert "схожему предмету закупки — 1" in comment
+    assert [item["ref_id"] for item in evidence] == [str(record.id)]
+
+
+def test_history_falls_back_to_company_wide_rate(db_session):
+    """Прямых совпадений нет, но история с проигрышами есть — считается общая доля побед,
+    и комментарий говорит, что она общая."""
+
+    tender = _tender(
+        db_session, title="Аренда автовышки", customer_name='ООО "Никому Не Известный"'
+    )
+    _participation(db_session, outcome=ParticipationOutcome.WON.value,
+                   customer_name="A", source=ParticipationSource.RUSPROFILE.value)
+    _participation(db_session, outcome=ParticipationOutcome.LOST.value,
+                   customer_name="B", source=ParticipationSource.RUSPROFILE.value)
+    _participation(db_session, outcome=ParticipationOutcome.LOST.value,
+                   customer_name="C", source=ParticipationSource.RUSPROFILE.value)
+    _participation(db_session, outcome=ParticipationOutcome.UNKNOWN.value,
+                   customer_name="D", source=ParticipationSource.RUSPROFILE.value)
+    db_session.flush()
+
+    score, comment, evidence = ai_profile_service._history_dimension(db_session, tender)
+
+    assert score == Decimal("33.33")
+    assert "всей истории участий" in comment and "общая доля побед" in comment
+    assert len(evidence) == 3
+
+
+def test_history_fallback_still_refuses_wins_only_sample(db_session):
+    tender = _tender(db_session, title="Аренда автовышки", customer_name='ООО "Иной"')
+    _participation(db_session, outcome=ParticipationOutcome.WON.value,
+                   customer_name="A", source=ParticipationSource.EIS_CONTRACTS.value)
+    db_session.flush()
+
+    score, comment, _ = ai_profile_service._history_dimension(db_session, tender)
+
+    assert score is None
+    assert "исключено" in comment

@@ -302,7 +302,7 @@ def _send_email(
 
     message = EmailMessage()
     message["Subject"] = subject
-    message["From"] = formataddr(("ORACLE-T", settings.from_address or ""))
+    message["From"] = formataddr(("Sova Scanner", settings.from_address or ""))
     # Адресат может быть записан как «Иванов Иван <ivanov@example.ru>» — заголовок соберёт
     # RFC-форму сам, а smtplib возьмёт из него адресную часть для RCPT TO.
     message["To"] = ", ".join(recipients)
@@ -569,7 +569,7 @@ def notify_critical_error(db: Session, *, subject: str, details: str) -> Notific
 
     # Тема сравнивается ровно в том виде, в каком она попадает в журнал (с префиксом):
     # иначе защита от повторов ищет несуществующую строку и не срабатывает.
-    full_subject = f"ORACLE-T: {subject}"
+    full_subject = f"Sova Scanner: {subject}"
     recent = db.execute(
         select(Notification.id).where(
             Notification.trigger == NotificationTrigger.CRITICAL_ERROR.value,
@@ -608,9 +608,9 @@ def send_test_notification(db: Session, *, actor: User) -> Notification:
     entry = _dispatch(
         db,
         trigger=NotificationTrigger.CRITICAL_ERROR,
-        subject="ORACLE-T: проверка почтового канала",
+        subject="Sova Scanner: проверка почтового канала",
         body=(
-            "Это проверочное сообщение из раздела «Уведомления» настроек ORACLE-T.\n"
+            "Это проверочное сообщение из раздела «Уведомления» настроек Sova Scanner.\n"
             f"Отправлено пользователем: {actor.full_name}.\n\n"
             "Если письмо дошло — канал настроен верно."
         ),

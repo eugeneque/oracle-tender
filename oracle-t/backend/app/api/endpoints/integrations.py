@@ -3,16 +3,28 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_admin
+from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.integration import ApiClientCreate, ApiClientCreated, ApiClientOut
 from app.schemas.integration_setting import (
+    AiProviderStatus,
+    AiProviderSwitch,
+    RouterAiSettingsOut,
+    RouterAiSettingsUpdate,
+    RusprofileSettingsOut,
+    RusprofileSettingsUpdate,
     YandexAiStudioSettingsOut,
     YandexAiStudioSettingsUpdate,
     YandexConnectionTestResult,
 )
-from app.services import api_client_service, yandex_ai_service
+from app.services import (
+    ai_provider_service,
+    api_client_service,
+    rusprofile_service,
+    yandex_ai_service,
+)
+from app.services.ai_provider_service import AiNotConfiguredError
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -38,6 +50,84 @@ def test_yandex_connection(
     db: Session = Depends(get_db), admin: User = Depends(require_admin)
 ) -> YandexConnectionTestResult:
     return yandex_ai_service.test_connection(db, actor=admin)
+
+
+@router.get("/ai-provider", response_model=AiProviderStatus)
+def get_ai_provider(
+    db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> AiProviderStatus:
+    """Модель, обслуживающая запросы текущего пользователя (личный выбор или системная по
+    умолчанию). Для любого пользователя: карточка тендера подписывает и красит блок
+    «Разбор ИИ» под неё. Ключей в ответе нет."""
+
+    return ai_provider_service.get_status(db, user)
+
+
+@router.put("/ai-provider", response_model=AiProviderStatus)
+def switch_default_ai_provider(
+    payload: AiProviderSwitch,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> AiProviderStatus:
+    """Меняет системную модель по умолчанию — для задач по расписанию и пользователей без
+    собственного выбора (свой выбор — `PUT /auth/me/ai-provider`). На ненастроенную
+    переключиться нельзя — 400 с подсказкой, что заполнить."""
+
+    try:
+        return ai_provider_service.switch_default_provider(
+            db, payload.active_provider, actor=admin
+        )
+    except AiNotConfiguredError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/routerai", response_model=RouterAiSettingsOut)
+def get_routerai_settings(
+    db: Session = Depends(get_db), _admin: User = Depends(require_admin)
+) -> RouterAiSettingsOut:
+    return ai_provider_service.get_routerai_settings_out(db)
+
+
+@router.patch("/routerai", response_model=RouterAiSettingsOut)
+def update_routerai_settings(
+    payload: RouterAiSettingsUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> RouterAiSettingsOut:
+    return ai_provider_service.update_routerai_settings(db, payload, actor=admin)
+
+
+@router.post("/routerai/test", response_model=YandexConnectionTestResult)
+def test_routerai_connection(
+    db: Session = Depends(get_db), admin: User = Depends(require_admin)
+) -> YandexConnectionTestResult:
+    return ai_provider_service.test_routerai_connection(db, actor=admin)
+
+
+@router.get("/rusprofile", response_model=RusprofileSettingsOut)
+def get_rusprofile_settings(
+    db: Session = Depends(get_db), _admin: User = Depends(require_admin)
+) -> RusprofileSettingsOut:
+    """Учётная запись rusprofile.ru (18.09.2026): под ней раздел «Моя компания» заполняется с
+    сайта — реквизиты, лицензии, реализованные проекты и история участий с проигрышами."""
+
+    return rusprofile_service.get_settings_out(db)
+
+
+@router.patch("/rusprofile", response_model=RusprofileSettingsOut)
+def update_rusprofile_settings(
+    payload: RusprofileSettingsUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> RusprofileSettingsOut:
+    return rusprofile_service.update_settings(db, payload, actor=admin)
+
+
+@router.post("/rusprofile/test", response_model=YandexConnectionTestResult)
+def test_rusprofile_connection(
+    db: Session = Depends(get_db), admin: User = Depends(require_admin)
+) -> YandexConnectionTestResult:
+    return rusprofile_service.test_connection(db, actor=admin)
 
 
 @router.get("/api-clients", response_model=list[ApiClientOut])

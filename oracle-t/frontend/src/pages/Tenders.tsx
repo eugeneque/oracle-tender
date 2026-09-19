@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Building2,
   ChevronDown,
@@ -15,11 +16,13 @@ import {
   Search,
   Star,
   Table as TableIcon,
+  Tag as TagIcon,
   X,
 } from "lucide-react";
 
 import { ApiError, api, downloadFile } from "../api/client";
 import type {
+  BackgroundJob,
   ManualRequestOut,
   Region,
   Source,
@@ -27,6 +30,7 @@ import type {
   TenderBoard,
   TenderPage,
   TenderStats,
+  TenderTag,
 } from "../api/types";
 import {
   CATALOG_SOURCE_TYPES,
@@ -36,9 +40,11 @@ import {
 } from "../api/types";
 import { AppShell } from "../components/AppShell";
 import { ConfidenceBar } from "../components/ConfidenceBar";
+import { DecisionMark } from "../components/DecisionMark";
 import { NewRequestModal } from "../components/NewRequestModal";
 import { PageHeader } from "../components/PageHeader";
 import { TenderDetailModal } from "../components/TenderDetailModal";
+import { TagChip, TagRow } from "../components/tags/TagChip";
 import { TenderSplitView } from "../components/tender-views/TenderSplitView";
 import { TenderTableView } from "../components/tender-views/TenderTableView";
 import type {
@@ -118,6 +124,7 @@ function TenderCard({
       title="Открыть карточку тендера"
     >
       <div className="mb-2.5 flex items-center gap-1.5">
+        <DecisionMark decision={tender.ai_decision} size="sm" />
         <span className="rounded-md bg-white/5 px-2 py-0.5 text-xs text-zinc-400">
           {tender.source.name}
         </span>
@@ -142,6 +149,12 @@ function TenderCard({
         )}
         {tender.title}
       </h3>
+
+      {tender.tags.length > 0 && (
+        <div className="mb-2.5">
+          <TagRow tags={tender.tags} max={3} />
+        </div>
+      )}
 
       <div className="mb-3 flex flex-wrap items-center gap-3 text-xs text-zinc-500">
         {tender.customer_name && (
@@ -288,6 +301,8 @@ interface TendersFilters {
    * пользователем закупки — и вне фильтров по умолчанию (срок подачи, профиль), иначе
    * отложенная закупка исчезала бы из раздела, как только у неё истекал срок. */
   favouritesOnly: boolean;
+  /** Теги (замечание 17.09.2026): закупка проходит, если у неё есть хотя бы один из них. */
+  tagIds: string[];
 }
 
 // По умолчанию скрываем тендеры с истёкшим сроком подачи: собранные тендеры — это broad-поиск
@@ -306,6 +321,7 @@ const DEFAULT_FILTERS: TendersFilters = {
   onlyRelevant: true,
   onlyAiSelected: false,
   favouritesOnly: false,
+  tagIds: [],
   regionCodes: [],
   tenderTypes: [],
   statuses: [],
@@ -369,6 +385,7 @@ function buildFilterParams(filters: TendersFilters): URLSearchParams {
   if (filters.priceMin) params.set("price_min", filters.priceMin);
   if (filters.priceMax) params.set("price_max", filters.priceMax);
   if (filters.favouritesOnly) params.set("bookmarked", "true");
+  for (const id of filters.tagIds) params.append("tag", id);
   if (filters.hideExpired && !filters.favouritesOnly) params.set("hide_expired", "true");
   if (filters.onlyRelevant && !filters.favouritesOnly) params.set("only_profile_relevant", "true");
   if (filters.onlyAiSelected) params.set("only_ai_selected", "true");
@@ -480,12 +497,14 @@ function FiltersPanel({
   filters,
   sources,
   regions,
+  tags,
   onChange,
   onReset,
 }: {
   filters: TendersFilters;
   sources: Source[];
   regions: Region[];
+  tags: TenderTag[];
   onChange: (patch: Partial<TendersFilters>) => void;
   onReset: () => void;
 }) {
@@ -504,7 +523,64 @@ function FiltersPanel({
       : [...list, value];
 
   return (
-    <div className="mb-6 rounded-xl border border-white/[0.08] bg-white/[0.03] p-4">
+    <div className="mb-3 rounded-xl border border-white/[0.08] bg-white/[0.03] p-4">
+      {/* Раздел и теги — первым рядом: это не сужение выборки, а выбор, на что смотреть.
+          «Избранное» живёт здесь, а не отдельной кнопкой в шапке (замечание 17.09.2026):
+          у шапки и так не хватало места, а раздел — такой же фильтр, как и остальные. */}
+      <div className="mb-4 flex flex-wrap items-center gap-x-6 gap-y-3 border-b border-white/[0.06] pb-4">
+        <div className="flex items-center gap-1.5">
+          <span className="mr-1 text-xs text-zinc-500">Раздел:</span>
+          <button
+            onClick={() => onChange({ favouritesOnly: false })}
+            className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
+              !filters.favouritesOnly
+                ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-300"
+                : "border-white/10 text-zinc-500 hover:text-zinc-300"
+            }`}
+          >
+            Все закупки
+          </button>
+          <button
+            onClick={() => onChange({ favouritesOnly: true })}
+            aria-pressed={filters.favouritesOnly}
+            title="Отложенные закупки: то, что отмечено звёздочкой в карточке. Показываются независимо от срока подачи и профиля."
+            className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
+              filters.favouritesOnly
+                ? "border-amber-400/40 bg-amber-500/10 text-amber-300"
+                : "border-white/10 text-zinc-500 hover:text-zinc-300"
+            }`}
+          >
+            <Star size={11} fill={filters.favouritesOnly ? "currentColor" : "none"} />
+            Избранное
+          </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="mr-1 flex items-center gap-1 text-xs text-zinc-500">
+            <TagIcon size={12} />
+            Теги:
+          </span>
+          {tags.length === 0 ? (
+            <span className="text-xs text-zinc-600">
+              пока нет — заведите в карточке закупки кнопкой «Добавить тег»
+            </span>
+          ) : (
+            tags.map((tag) => (
+              <TagChip
+                key={tag.id}
+                tag={tag}
+                active={filters.tagIds.includes(tag.id)}
+                onClick={() => onChange({ tagIds: toggleIn(filters.tagIds, tag.id) })}
+                title={
+                  filters.tagIds.includes(tag.id)
+                    ? `${tag.name} — снять фильтр`
+                    : `Показать закупки с тегом «${tag.name}»`
+                }
+              />
+            ))
+          )}
+        </div>
+      </div>
+
       {/* Поиск живёт в строке над панелью и здесь не дублируется: два поля с одним и тем же
           значением на одном экране читаются как два разных фильтра. */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -743,7 +819,7 @@ function FiltersPanel({
           </label>
           <label
             className="flex items-center gap-2 text-sm text-zinc-300"
-            title="Профиль релевантности из настроек: девять групп потребностей с исключениями. Снимите галочку, чтобы увидеть отсеянное — профиль мог оказаться слишком узким."
+            title="Профиль релевантности из настроек: девять групп потребностей с исключениями, поверх него — ответ модели «наша ли это тематика». Скрыто то, что отсеял профиль или отклонила модель; непроверенное моделью остаётся. Снимите галочку, чтобы увидеть отсеянное — профиль мог оказаться слишком узким."
           >
             <input
               type="checkbox"
@@ -856,6 +932,8 @@ function countActiveFilters(filters: TendersFilters): number {
   if (!filters.hideExpired) count += 1;
   if (!filters.onlyRelevant) count += 1;
   if (filters.onlyAiSelected) count += 1;
+  if (filters.favouritesOnly) count += 1;
+  if (filters.tagIds.length > 0) count += 1;
   return count;
 }
 
@@ -887,11 +965,21 @@ function loadActiveView(): ViewKey {
 }
 
 export function TendersPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [activeView, setActiveView] = useState<ViewKey>(loadActiveView);
+  // Справочник тегов — для чипов в фильтрах. Перечитывается при открытии панели фильтров:
+  // тег, заведённый в карточке минуту назад, должен быть виден без перезагрузки.
+  const [tags, setTags] = useState<TenderTag[]>([]);
   const [tenders, setTenders] = useState<Tender[]>([]);
   const [sources, setSources] = useState<Source[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [isSyncing, setIsSyncing] = useState(false);
+  // Синхронизация — фоновая задача сервера (баг 17.09.2026: «бесконечная синхронизация»).
+  // Раньше запрос держался открытым на весь опрос — 20–25 минут на девять площадок — и
+  // любой перезапуск сервера или таймаут прокси оставлял оверлей крутиться вечно. Теперь
+  // здесь лежит состояние задачи, страница опрашивает его раз в две секунды, а при входе
+  // подхватывает опрос, запущенный до перезагрузки вкладки.
+  const [syncJob, setSyncJob] = useState<BackgroundJob | null>(null);
+  const isSyncing = syncJob?.status === "queued" || syncJob?.status === "running";
   const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -904,6 +992,16 @@ export function TendersPage() {
     null,
   );
   const [filters, setFilters] = useState<TendersFilters>(DEFAULT_FILTERS);
+  // Ссылка «Все →» из меню учётной записи ведёт сразу в раздел «Избранное». Эффектом, а не
+  // начальным состоянием: со страницы тендеров та же ссылка не перемонтирует компонент, и
+  // параметр должен сработать и тогда. Он тут же снимается с адреса, чтобы не залипал в
+  // закладках и при обновлении страницы не возвращал раздел насильно.
+  useEffect(() => {
+    if (!searchParams.has("favourites")) return;
+    setOffset(0);
+    setFilters((prev) => ({ ...prev, favouritesOnly: true }));
+    setSearchParams({}, { replace: true });
+  }, [searchParams, setSearchParams]);
   /** Сколько фильтров сейчас сужают выдачу — цифра на кнопке «Фильтры».
    *
    * Нужна именно потому, что панель свёрнута: спрятанный фильтр иначе становится невидимой
@@ -989,6 +1087,7 @@ export function TendersPage() {
       .get<Source[]>("/sources")
       .then((all) => setSources(all.filter((s) => !CATALOG_SOURCE_TYPES.includes(s.type))));
     void api.get<Region[]>("/dictionaries/regions").then(setRegions);
+    void api.get<TenderTag[]>("/tags").then(setTags).catch(() => setTags([]));
     void api
       .get<TenderStats>("/tenders/stats")
       .then((stats) => setCollectedTotal(stats.total))
@@ -1029,6 +1128,12 @@ export function TendersPage() {
     setTenders((prev) =>
       prev.map((item) => (item.id === updated.id ? updated : item)),
     );
+    // В карточке могли завести новый тег — справочник для фильтров должен его знать.
+    setTags((prev) => {
+      const known = new Set(prev.map((tag) => tag.id));
+      const fresh = updated.tags.filter((tag) => !known.has(tag.id));
+      return fresh.length === 0 ? prev : [...prev, ...fresh].sort((a, b) => a.name.localeCompare(b.name, "ru"));
+    });
     setOpenTender((current) =>
       current && current.id === updated.id ? updated : current,
     );
@@ -1077,28 +1182,80 @@ export function TendersPage() {
   // Колонки приходят с сервера уже разложенными по этапам — группировать нечего.
   const boardColumns = board?.columns ?? {};
   const boardCounts = board?.counts ?? {};
+  // Число закупок в строке состояния: у доски нет страницы списка и `total` не приходит —
+  // считаем по счётчикам колонок, иначе на Kanban стояло бы «0 закупок».
+  const shownTotal =
+    activeView === "kanban"
+      ? Object.values(boardCounts).reduce((sum, count) => sum + count, 0)
+      : total;
 
   const syncSources = async (keys: string[]) => {
     if (keys.length === 0) return;
-    setIsSyncing(true);
     setError(null);
+    setNotice(null);
     try {
-      await api.post("/sources/poll", { source_keys: keys });
-      // Обновляем то, что сейчас на экране: после синхронизации доска должна показать
-      // свежие тендеры так же, как их показывает список.
-      await (activeView === "kanban"
-        ? loadBoard(filters, sort)
-        : loadTenders(filters, sort, offset));
+      setSyncJob(await api.post<BackgroundJob>("/sources/poll", { source_keys: keys }));
     } catch (err) {
       setError(
         err instanceof ApiError
           ? err.message
-          : "Не удалось синхронизировать источники",
+          : "Не удалось запустить синхронизацию",
       );
-    } finally {
-      setIsSyncing(false);
     }
   };
+
+  // При входе на страницу — подхватить идущий опрос (запущен до перезагрузки вкладки или
+  // другим пользователем). Завершённый в прошлом не показываем: его итог уже видели.
+  useEffect(() => {
+    void api
+      .get<BackgroundJob | null>("/sources/poll/current")
+      .then((job) => {
+        if (job && (job.status === "queued" || job.status === "running")) setSyncJob(job);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  // Опрос состояния задачи, пока она идёт. Площадки сохраняются порциями по 100 записей
+  // (правка 17.09.2026), и после каждой порции список перечитывается тихо — без «Загрузка…»
+  // и без сброса выбранной закупки, — но не чаще раза в десять секунд: на большой выдаче
+  // порции идут каждые пару секунд. По завершении — итог и последнее перечитывание.
+  useEffect(() => {
+    if (!isSyncing) return;
+    let lastMessage = syncJob?.message ?? null;
+    let lastRefreshAt = 0;
+    const timer = setInterval(() => {
+      void api
+        .get<BackgroundJob | null>("/sources/poll/current")
+        .then((job) => {
+          if (!job) return;
+          setSyncJob(job);
+          const progressed = job.message !== lastMessage;
+          lastMessage = job.message;
+          if (
+            progressed &&
+            job.status === "running" &&
+            Date.now() - lastRefreshAt > 10_000
+          ) {
+            lastRefreshAt = Date.now();
+            void (activeView === "kanban"
+              ? loadBoard(filters, sort)
+              : loadTenders(filters, sort, offset));
+          }
+          if (job.status === "success") {
+            setNotice(job.message ?? "Синхронизация завершена");
+            void (activeView === "kanban"
+              ? loadBoard(filters, sort)
+              : loadTenders(filters, sort, offset));
+            void api.get<TenderStats>("/tenders/stats").then((stats) => setCollectedTotal(stats.total)).catch(() => undefined);
+          } else if (job.status === "error") {
+            setError(`Синхронизация прервана: ${job.message ?? "неизвестная ошибка"}`);
+          }
+        })
+        .catch(() => undefined);
+    }, 2_000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `syncJob.message` нужен только как стартовое значение
+  }, [isSyncing, activeView, filters, sort, offset, loadBoard, loadTenders]);
 
   /** Выгрузка в Excel (раздел 5.7 ТЗ) — по текущим фильтрам списка, а не по всей базе:
    * пользователь только что отобрал нужное, и отчёт должен повторять именно этот срез. */
@@ -1161,7 +1318,7 @@ export function TendersPage() {
       <div className="flex h-full flex-col px-8 pb-3 pt-4">
         <PageHeader
           compact
-          breadcrumb={["ORACLE-T", "Тендеры"]}
+          breadcrumb={["Sova Scanner", "Тендеры"]}
           title="Тендеры"
           icon={
             <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
@@ -1231,11 +1388,13 @@ export function TendersPage() {
           </div>
         )}
 
-        {/* Одна плотная строка вместо трёх ярусов: поиск, переключатель видов и вход в
-            фильтры. Всё, что раньше стояло отдельными рядами, забирало высоту у карточки —
-            на ноутбуке ей оставалось меньше двухсот пикселей. */}
+        {/* Панель инструментов (переработана 17.09.2026). Два яруса вместо одной
+            набитой строки: сверху — поиск, переключатель видов и вход в фильтры; ниже —
+            строка состояния, которой отдана вся ширина. Раньше «Избранное» и «Найдено N»
+            стояли в той же строке, а пояснение о фильтрах по умолчанию ужималось между
+            ними в одну сжатую фразу. */}
         <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
-          <div className="relative min-w-[220px] flex-1">
+          <div className="relative min-w-[260px] flex-1">
             <Search
               size={14}
               className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600"
@@ -1249,28 +1408,31 @@ export function TendersPage() {
           </div>
 
           <div className="inline-flex items-center gap-1 rounded-lg border border-white/[0.08] bg-white/[0.03] p-1">
-          {VIEW_TABS.map((tab) => {
-            const Icon = tab.icon;
-            const isActive = tab.key === activeView;
-            return (
-              <button
-                key={tab.key}
-                onClick={() => changeView(tab.key)}
-                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
-                  isActive
-                    ? "bg-white/10 text-white"
-                    : "text-zinc-400 hover:text-zinc-200"
-                }`}
-              >
-                <Icon size={15} />
-                {tab.label}
-              </button>
-            );
-          })}
+            {VIEW_TABS.map((tab) => {
+              const Icon = tab.icon;
+              const isActive = tab.key === activeView;
+              return (
+                <button
+                  key={tab.key}
+                  onClick={() => changeView(tab.key)}
+                  className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                    isActive
+                      ? "bg-white/10 text-white"
+                      : "text-zinc-400 hover:text-zinc-200"
+                  }`}
+                >
+                  <Icon size={15} />
+                  {tab.label}
+                </button>
+              );
+            })}
           </div>
 
           <button
-            onClick={() => setIsFiltersOpen((v) => !v)}
+            onClick={() => {
+              setIsFiltersOpen((v) => !v);
+              if (!isFiltersOpen) void api.get<TenderTag[]>("/tags").then(setTags).catch(() => undefined);
+            }}
             className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm ${
               isFiltersOpen || activeFilterCount > 0
                 ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-300"
@@ -1289,94 +1451,120 @@ export function TendersPage() {
               className={`transition-transform ${isFiltersOpen ? "rotate-180" : ""}`}
             />
           </button>
-
-          <button
-            onClick={() => {
-              setOffset(0);
-              updateFilters({ favouritesOnly: !filters.favouritesOnly });
-            }}
-            aria-pressed={filters.favouritesOnly}
-            title="Отложенные закупки: то, что отмечено звёздочкой в карточке. Показываются независимо от срока подачи и профиля."
-            className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm ${
-              filters.favouritesOnly
-                ? "border-amber-400/40 bg-amber-500/10 text-amber-300"
-                : "border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:bg-white/5"
-            }`}
-          >
-            <Star size={15} fill={filters.favouritesOnly ? "currentColor" : "none"} />
-            Избранное
-          </button>
-
-          <span
-            className="rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-sm text-zinc-400"
-            title="Число закупок, подходящих под текущие фильтры"
-          >
-            {isLoading ? (
-              "Считаем…"
-            ) : (
-              <>
-                Найдено{" "}
-                <span className="font-medium text-zinc-100">
-                  {total.toLocaleString("ru-RU")}
-                </span>{" "}
-                {plural(total, "тендер", "тендера", "тендеров")}
-              </>
-            )}
-          </span>
         </div>
 
-        {/* Что именно показано. Список по умолчанию — не «все собранные закупки», а
-            открытые и прошедшие профиль релевантности; без этой строки два включённых
-            переключателя в свёрнутой панели фильтров выглядели как «система собрала
-            только 52 тендера» (вопрос тестировщика 16.09.2026). */}
-        {!isLoading && (
-          <p className="-mt-2 flex flex-wrap items-center gap-x-2 text-xs text-zinc-500">
-            {filters.favouritesOnly ? (
-              <span>
-                Раздел «Избранное»: закупки, которые вы отметили звёздочкой, — независимо от
-                срока подачи и профиля релевантности.
+        {/* Строка состояния: что показано и почему. Список по умолчанию — не «все собранные
+            закупки», а открытые и прошедшие профиль релевантности; без этой строки два
+            включённых переключателя в свёрнутой панели выглядели как «система собрала
+            только 52 тендера» (вопрос тестировщика 16.09.2026). Ей отдана вся ширина, а
+            активные разделы — избранное, теги — стоят справа снимаемыми чипами, чтобы
+            режим списка был виден и при свёрнутых фильтрах. */}
+        <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-4 py-2">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-zinc-500">
+            {isLoading ? (
+              <span className="flex items-center gap-2">
+                <Loader2 size={14} className="animate-spin text-zinc-600" />
+                Считаем…
               </span>
+            ) : filters.favouritesOnly ? (
+              <>
+                <span className="flex items-center gap-1.5">
+                  <Star size={14} className="text-amber-400" fill="currentColor" />
+                  <span className="font-semibold text-zinc-100">
+                    {shownTotal.toLocaleString("ru-RU")}
+                  </span>
+                  <span>{plural(shownTotal, "закупка", "закупки", "закупок")} в избранном</span>
+                </span>
+                <span className="hidden text-zinc-700 sm:inline">·</span>
+                <span className="text-xs">срок подачи и профиль не учитываются</span>
+                <button
+                  onClick={() => updateFilters({ favouritesOnly: false })}
+                  className="text-xs text-indigo-400 hover:text-indigo-300"
+                >
+                  Ко всем закупкам
+                </button>
+              </>
             ) : (
               <>
                 <span>
-                  Показано{" "}
-                  <span className="text-zinc-300">{total.toLocaleString("ru-RU")}</span>
+                  <span className="font-semibold text-zinc-100">
+                    {shownTotal.toLocaleString("ru-RU")}
+                  </span>{" "}
+                  {plural(shownTotal, "закупка", "закупки", "закупок")}
                   {collectedTotal !== null && (
-                    <>
-                      {" "}
-                      из <span className="text-zinc-300">{collectedTotal.toLocaleString("ru-RU")}</span>{" "}
-                      собранных
-                    </>
+                    <span className="text-zinc-500">
+                      {" "}из {collectedTotal.toLocaleString("ru-RU")} собранных
+                    </span>
                   )}
-                  {filters.hideExpired && filters.onlyRelevant
-                    ? " — только открытые закупки, прошедшие профиль релевантности."
-                    : filters.hideExpired
-                      ? " — только открытые закупки (закрытые скрыты)."
-                      : filters.onlyRelevant
-                        ? " — только прошедшие профиль релевантности."
-                        : "."}
                 </span>
                 {(filters.hideExpired || filters.onlyRelevant) && (
-                  <button
-                    onClick={() => {
-                      setOffset(0);
-                      updateFilters({ hideExpired: false, onlyRelevant: false });
-                    }}
-                    className="text-indigo-400 hover:text-indigo-300"
-                  >
-                    Показать все собранные
-                  </button>
+                  <>
+                    <span className="hidden text-zinc-700 sm:inline">·</span>
+                    <span className="flex flex-wrap items-center gap-1.5 text-xs">
+                      {filters.hideExpired && (
+                        <span
+                          className="rounded-md bg-white/[0.05] px-1.5 py-0.5"
+                          title="Скрыты закупки с истёкшим сроком подачи, завершённые и отменённые"
+                        >
+                          только открытые
+                        </span>
+                      )}
+                      {filters.onlyRelevant && (
+                        <span
+                          className="rounded-md bg-white/[0.05] px-1.5 py-0.5"
+                          title="Только прошедшие профиль релевантности из настроек и не отклонённые моделью"
+                        >
+                          по профилю
+                        </span>
+                      )}
+                      <button
+                        onClick={() => updateFilters({ hideExpired: false, onlyRelevant: false })}
+                        className="ml-1 text-indigo-400 hover:text-indigo-300"
+                      >
+                        Показать все
+                      </button>
+                    </span>
+                  </>
                 )}
               </>
             )}
-          </p>
-        )}
+          </div>
+
+          {(filters.favouritesOnly || filters.tagIds.length > 0) && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {filters.favouritesOnly && (
+                <button
+                  onClick={() => updateFilters({ favouritesOnly: false })}
+                  className="inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-500/10 px-2 py-1 text-[11px] leading-none text-amber-300 hover:bg-amber-500/20"
+                  title="Выйти из раздела «Избранное»"
+                >
+                  <Star size={11} fill="currentColor" />
+                  Избранное
+                  <X size={11} />
+                </button>
+              )}
+              {filters.tagIds.map((id) => {
+                const tag = tags.find((item) => item.id === id);
+                if (!tag) return null;
+                return (
+                  <TagChip
+                    key={id}
+                    tag={tag}
+                    onClick={() => updateFilters({ tagIds: filters.tagIds.filter((item) => item !== id) })}
+                    title={`${tag.name} — снять фильтр`}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </div>
 
         {isFiltersOpen && (
         <FiltersPanel
           filters={filters}
           sources={sources}
           regions={regions}
+          tags={tags}
           onChange={updateFilters}
           onReset={() => {
             setOffset(0);
@@ -1385,23 +1573,25 @@ export function TendersPage() {
         />
         )}
 
-        <div className="relative flex min-h-0 flex-1 flex-col">
-          {isSyncing && (
-            <div className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-zinc-950/40 backdrop-blur-sm">
-              <div className="flex items-center gap-2.5 rounded-xl border border-white/10 bg-zinc-900 px-5 py-3 shadow-xl">
-                <Loader2 size={18} className="animate-spin text-indigo-400" />
-                <span className="text-sm text-zinc-200">
-                  Синхронизация с источниками…
-                </span>
-              </div>
-            </div>
-          )}
+        {/* Ход синхронизации — полосой над списком, а не оверлеем поверх него: опрос идёт
+            десятки минут, и всё это время со списком можно работать. Текст — прогресс
+            задачи с сервера («Опрос 3 из 9: Сбербанк-АСТ…»). */}
+        {isSyncing && (
+          <div className="mb-3 flex shrink-0 items-center gap-2.5 rounded-lg border border-indigo-500/25 bg-indigo-500/10 px-4 py-2 text-sm text-indigo-200">
+            <Loader2 size={15} className="shrink-0 animate-spin" />
+            <span className="min-w-0 truncate">
+              {syncJob?.status === "queued"
+                ? "Синхронизация поставлена в очередь…"
+                : syncJob?.message || "Синхронизация с источниками…"}
+            </span>
+            <span className="ml-auto shrink-0 text-xs text-indigo-300/70">
+              список обновится по завершении
+            </span>
+          </div>
+        )}
 
-          <div
-            className={`flex min-h-0 flex-1 flex-col transition-[filter] ${
-              isSyncing ? "pointer-events-none blur-sm" : ""
-            }`}
-          >
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1 flex-col">
             {isLoading ? (
               <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-zinc-600">
                 Загрузка…

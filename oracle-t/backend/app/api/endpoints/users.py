@@ -1,10 +1,11 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_admin
+from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.user import UserCreate, UserOut, UserUpdate
@@ -83,3 +84,22 @@ def unblock_user(
 ) -> User:
     user = _get_user_or_404(db, user_id)
     return set_user_active(db, user, is_active=True, actor=admin)
+
+
+@router.get("/{user_id}/avatar")
+def get_user_avatar(
+    user_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+) -> Response:
+    """Аватар любого пользователя — для списка пользователей и подписей «кто поставил».
+    Доступен всем вошедшим: аватар — публичное лицо в системе, а не личные данные."""
+
+    user = _get_user_or_404(db, user_id)
+    if not user.avatar:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Аватар не загружен")
+    return Response(
+        content=user.avatar,
+        media_type=user.avatar_content_type or "application/octet-stream",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )

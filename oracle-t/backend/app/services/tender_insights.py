@@ -1,26 +1,18 @@
-"""ИИ-разбор карточки тендера: пробелы в данных, риски и ошибки (раздел 5.4 ТЗ).
+"""Извлечённые условия закупки — девять разделов вкладки «Дополнительно» (раздел 5.6 ТЗ).
 
 Это не повторение анализа требований (`tender_analysis.py`) — там модель читает документацию
-и извлекает технические требования. Здесь она смотрит на карточку целиком, глазами человека,
-который решает, стоит ли участвовать: что в закупке настораживает, каких сведений не хватает,
-где условия выглядят так, будто их писали под конкретного поставщика.
+и извлекает технические требования. Здесь она собирает условия участия и исполнения:
+лицензии и допуски, требования к участнику и заявке, условия контракта, место работ.
+Это закрывает недочёт «система не погружается вовнутрь тендера» с созвона 02.09.2026.
 
-**Что модель делает, а что нет.** Регион, ОКПД2, заказчик и способ закупки к этому моменту
-уже определены формально — по справочникам и реквизитам (`tender_card_service`). Модели
-достаются только те поля, где формального признака не нашлось, и вопросы, на которые
-справочником не ответишь: риски, странности в сроках, противоречия между разделами. Так
-дешевле, быстрее и, главное, надёжнее: справочное соответствие модель может «додумать», а
-суждение о рисках — ровно та работа, где она полезна.
-
-Результат сохраняется: разбор платный, а карточку открывают многократно. Обновляется по
-кнопке.
-
-**Вкладка «Дополнительно» (раздел 5.6 ТЗ, решение 03.09.2026).** Здесь же собираются девять
-разделов извлечённых условий закупки — то, что закрывает недочёт «система не погружается
-вовнутрь тендера» с созвона 02.09.2026. Это расширение этого модуля, а не новый сервис:
-источник данных тот же (карточка плюс документация), и обновляться они должны вместе.
+Источник данных — карточка закупки с сайта источника плюс разобранная документация.
 Девять разделов запрашиваются двумя вызовами, а не одним: длинный JSON рвётся по лимиту
-токенов на выходе (раздел 5.5.1 ТЗ).
+токенов на выходе (раздел 5.5.1 ТЗ). Результат сохраняется в карточке тендера: извлечение
+платное, а карточку открывают многократно; обновляется вместе с расчётом AI-оценки.
+
+Отдельный «Разбор ИИ» карточки (риски, пробелы в данных, чек-лист) убран 17.09.2026: он
+дублировал AI-оценку по профилю, которая с этого дня считается автоматически при открытии
+карточки, — два блока с суждениями модели об одной закупке только путали.
 """
 
 from __future__ import annotations
@@ -38,74 +30,11 @@ from app.models.tender_card import TenderCard
 from app.models.tender_document import DocumentClass, TenderDocument
 from app.models.user import User
 from app.services.audit import log_action
-from app.services.yandex_ai_client import chunk_text, run_structured
+from app.services.ai_client import run_structured
 
-MAX_CONTEXT_CHARS = 12000
 # Сколько текста документации уходит в разбор разделов «Дополнительно». Больше — рвётся
 # ответ; меньше — не доходит до технических приложений, где и лежат условия исполнения.
 MAX_DOCUMENT_CHARS = 14000
-
-
-# Все поля схем ниже — обязательные, без значений по умолчанию. Это требование Yandex AI
-# Studio: на схему с необязательным полем сервис отвечает
-# «Invalid JSON Schema: all fields must be required». Пустой список модель возвращает явно —
-# и это к лучшему: «рисков нет» и «модель забыла про риски» перестают выглядеть одинаково.
-
-
-class InsightItem(pydantic.BaseModel):
-    """Одно наблюдение. `severity` управляет цветом в интерфейсе, `evidence` — цитата или
-    поле карточки, на котором наблюдение основано: вывод без опоры проверить нельзя, а
-    решение об участии принимается по нему."""
-
-    title: str
-    detail: str
-    severity: str
-    evidence: str
-
-
-class FilledField(pydantic.BaseModel):
-    """Поле, которое модель восстановила из текста карточки, с указанием источника."""
-
-    field: str
-    value: str
-    source: str
-    confidence: float
-
-
-class InsightsResult(pydantic.BaseModel):
-    summary: str
-    risks: list[InsightItem]
-    data_gaps: list[InsightItem]
-    filled_fields: list[FilledField]
-    checklist: list[str]
-
-
-_SYSTEM_PROMPT = """Ты — аналитик тендерного отдела производителя приборов учёта электроэнергии.
-Тебе дана карточка закупки с сайта источника. Твоя задача — помочь специалисту быстро понять,
-что это за закупка и на что смотреть.
-
-Верни JSON:
-- summary: 2-3 предложения о сути закупки простым языком.
-- risks: риски и странности. Каждый — {title, detail, severity, evidence}. severity:
-  "high" — то, что может лишить участия или денег (короткий срок подачи, обеспечение,
-  требования под конкретного производителя, закупка у единственного поставщика);
-  "medium" — то, что требует внимания; "low" — мелочи. evidence — конкретное поле или
-  формулировка из карточки, на которой основан вывод.
-- data_gaps: чего в карточке не хватает для принятия решения (те же поля объекта).
-- filled_fields: значения, которые ты смог восстановить из текста карточки:
-  {field, value, source, confidence}. field — одно из: region, okpd2, delivery_region,
-  contact_person, contact_email, contact_phone, deadline, price. source — откуда взял.
-  Если значение в карточке не написано — не выдумывай, не включай поле вовсе.
-- checklist: 3-6 коротких пунктов «что проверить перед подачей».
-
-Пиши по-русски, кратко и по делу. Не повторяй одно и то же в разных разделах.
-Не выдумывай фактов: если чего-то в карточке нет, это относится к data_gaps, а не к
-filled_fields.
-
-Возвращай ВСЕ перечисленные поля, даже когда сказать нечего: пустой список вместо
-пропущенного поля. У каждого наблюдения обязательно заполняй evidence — поле карточки или
-формулировку, на которой основан вывод; если опоры нет, так и напиши: "прямого указания в
-карточке нет"."""
 
 
 def _card_text(tender: Tender, card: TenderCard | None) -> str:
@@ -138,107 +67,6 @@ def _card_text(tender: Tender, card: TenderCard | None) -> str:
     return "\n".join(parts)
 
 
-def build_insights(
-    db: Session, tender: Tender, card: TenderCard | None, *, actor: User | None = None
-) -> InsightsResult:
-    """Спрашивает модель о карточке. Исключение поднимается наружу — вызывающий эндпоинт
-    показывает причину пользователю (чаще всего это ненастроенное подключение)."""
-
-    context = _card_text(tender, card)
-    # Карточка крупной закупки с журналом событий не помещается в контекст целиком; берём
-    # начало — реквизиты, условия и сроки идут в самом верху, а хвост журнала для суждения
-    # о рисках не нужен.
-    chunks = chunk_text(context, max_chars=MAX_CONTEXT_CHARS)
-    user_text = chunks[0] if chunks else context
-
-    result = run_structured(
-        db,
-        system_prompt=_SYSTEM_PROMPT,
-        user_text=user_text,
-        response_model=InsightsResult,
-        temperature=0.2,
-    )
-
-    log_action(
-        db,
-        component="tender_insights",
-        action=f"build_insights:{tender.external_id}",
-        result="success",
-        level=LogLevel.INFO,
-        details=(
-            f"Рисков: {len(result.risks)}, пробелов: {len(result.data_gaps)}, "
-            f"восстановлено полей: {len(result.filled_fields)}"
-        ),
-        user_id=actor.id if actor else None,
-    )
-    db.commit()
-    return result
-
-
-def store_insights(db: Session, tender: Tender, result: InsightsResult) -> None:
-    """Сохраняет разбор в карточке тендера.
-
-    В `tender_cards.payload`, а не отдельной таблицей: разбор относится к конкретному снимку
-    карточки и вместе с ним же устаревает — при обновлении карточки он должен пересчитываться,
-    а не оставаться от прошлой редакции извещения.
-    """
-
-    card = db.get(TenderCard, tender.id)
-    if card is None:
-        card = TenderCard(tender_id=tender.id, payload={})
-        db.add(card)
-
-    payload = dict(card.payload or {})
-    payload["insights"] = {
-        **result.model_dump(),
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    card.payload = payload
-    db.commit()
-
-
-def get_stored_insights(db: Session, tender: Tender) -> dict | None:
-    card = db.get(TenderCard, tender.id)
-    if card is None:
-        return None
-    return (card.payload or {}).get("insights")
-
-
-def apply_filled_fields(db: Session, tender: Tender, result: InsightsResult) -> list[str]:
-    """Применяет к тендеру только те поля, которые пусты и которые можно проверить.
-
-    Регион и ОКПД2 берутся не «как сказала модель», а сверяются со справочником и форматом:
-    именно здесь модель ошибается чаще всего — уверенно называет соседний регион или
-    выдумывает несуществующий код.
-    """
-
-    import re
-
-    from app.services.region_resolver import region_from_address
-
-    applied: list[str] = []
-    for item in result.filled_fields:
-        if item.confidence < 0.5:
-            continue
-
-        if item.field == "region" and not tender.region_organizer_code:
-            region = region_from_address(db, item.value)
-            if region is not None:
-                tender.region_organizer_code = region.code
-                tender.federal_district_code = region.federal_district_code
-                applied.append(f"регион заказчика — {region.name}")
-        elif item.field == "okpd2" and not tender.okpd2_code:
-            match = re.fullmatch(r"\d{2}(?:\.\d{1,2}){1,4}", item.value.strip())
-            if match:
-                tender.okpd2_code = item.value.strip()
-                applied.append(f"ОКПД2 — {item.value.strip()}")
-
-    if applied:
-        db.commit()
-        logger.info(f"Из ИИ-разбора заполнено полей тендера {tender.external_id}: {applied}")
-    return applied
-
-
 # --- вкладка «Дополнительно»: девять разделов извлечённых условий -----------------------
 # Разделы и их порядок заданы разделом 5.6 ТЗ. Ключ — стабильный (по нему интерфейс хранит
 # состояние «развёрнуто/свёрнуто»), заголовок — то, что видит пользователь.
@@ -254,6 +82,12 @@ EXTRA_SECTIONS: dict[str, str] = {
     "application_requirements": "Требования к заявке",
     "additional_facts": "Доп. факты",
 }
+
+
+# Все поля схем ниже — обязательные, без значений по умолчанию. Это требование Yandex AI
+# Studio: на схему с необязательным полем сервис отвечает
+# «Invalid JSON Schema: all fields must be required». Пустой список модель возвращает явно —
+# и это к лучшему: «сказать нечего» и «модель забыла раздел» перестают выглядеть одинаково.
 
 
 class SectionsBatchOne(pydantic.BaseModel):
@@ -396,8 +230,8 @@ def build_extra_sections(
 
 
 def store_extra_sections(db: Session, tender: Tender, sections: dict[str, list[str]]) -> None:
-    """Кладёт разделы в карточку рядом с разбором: они относятся к тому же снимку и вместе
-    с ним устаревают.
+    """Кладёт разделы в карточку тендера: они относятся к тому же снимку и вместе с ним
+    устаревают.
 
     В `extra_sections` — списки пунктов по ключам `EXTRA_SECTIONS`; заголовки хранить рядом
     незачем, они заданы кодом и переводятся на лету."""

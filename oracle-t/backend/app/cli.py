@@ -1,4 +1,4 @@
-"""CLI-команды ORACLE-T.
+"""CLI-команды Sova Scanner.
 
 Использование:
     python -m app.cli bootstrap-admin
@@ -89,7 +89,7 @@ def cmd_reset_admin(args: argparse.Namespace) -> None:
 
     logger.info(f"Администратор '{admin.username}' создан/обновлён (id={admin.id})")
 
-    print("\n=== Учётная запись администратора ORACLE-T ===")
+    print("\n=== Учётная запись администратора Sova Scanner ===")
     print(f"  Логин:  {username}")
     print(f"  Пароль: {password}")
     print("================================================\n")

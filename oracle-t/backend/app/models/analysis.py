@@ -32,6 +32,21 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 
 
+class RequirementKind(str, enum.Enum):
+    """К чему относится требование (18.09.2026).
+
+    До этого извлекались только требования к товару, и закупки на обслуживание, монтаж и
+    поверку — профильные для компании — оставались без единого требования. Вид решает,
+    кто требование читает: матрица соответствия (раздел 5.5 ТЗ) — только `PRODUCT`,
+    AI-оценка по профилю (раздел 5.5.1) — все три, измерение «Компетенции» опирается
+    прежде всего на `PARTICIPANT`.
+    """
+
+    PRODUCT = "product"  # характеристики прибора, комплектация, документы на товар
+    SERVICE = "service"  # состав и объём работ/услуг, сроки, гарантия на работы, приёмка
+    PARTICIPANT = "participant"  # допуски, лицензии, стаж, персонал участника
+
+
 class Criticality(str, enum.Enum):
     """Критичность требования (раздел 5.4 ТЗ). Веса для формулы процента победителя —
     в `app/services/compliance_service.py`."""
@@ -88,6 +103,10 @@ class Requirement(Base):
     normalized_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     criticality: Mapped[str] = mapped_column(
         String(20), nullable=False, default=Criticality.IMPORTANT.value
+    )
+    kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=RequirementKind.PRODUCT.value,
+        server_default=RequirementKind.PRODUCT.value,
     )
     # Группа характеристик Приложения C, если требование удалось к ней отнести, — по ней
     # сопоставление знает, где искать ответ в каталоге.

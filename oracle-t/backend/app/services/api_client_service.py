@@ -23,7 +23,7 @@ from app.models.user import User
 from app.services.audit import log_action
 
 # Префикс в самом ключе — чтобы случайно попавший в лог или в переписку токен опознавался
-# как ключ ORACLE-T, а не как случайная строка.
+# как ключ Sova Scanner, а не как случайная строка.
 KEY_PREFIX = "orct_"
 PREFIX_LENGTH = 12
 

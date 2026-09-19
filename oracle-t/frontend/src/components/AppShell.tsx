@@ -6,6 +6,7 @@ import {
   ChevronsRight,
   KanbanSquare,
   LayoutDashboard,
+  Plug,
   Search,
   Settings,
   Users as UsersIcon,
@@ -33,6 +34,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: "Каталог продукции", to: "/catalog", icon: Boxes },
   { label: "Моя компания", to: "/company", icon: Building2 },
   { label: "Пользователи", to: "/users", icon: UsersIcon, adminOnly: true },
+  { label: "Интеграции", to: "/integrations", icon: Plug },
   { label: "Настройки", to: "/settings", icon: Settings },
 ];
 
@@ -53,7 +55,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         }`}
       >
         <div className="flex h-16 items-center justify-between px-4">
-          {isCollapsed ? <LogoMark size={28} /> : <Logo size={26} />}
+          {isCollapsed ? <LogoMark size={22} /> : <Logo size={26} />}
           <button
             onClick={() => setIsCollapsed((v) => !v)}
             className="rounded-md p-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
@@ -76,7 +78,12 @@ export function AppShell({ children }: { children: ReactNode }) {
           {NAV_ITEMS.filter((item) => !item.adminOnly || user?.role === "admin").map(
             (item) => {
               const Icon = item.icon;
-              const isActive = location.pathname === item.to;
+              // Вложенные адреса (`/tenders/:id`) подсвечивают свой раздел; корень «/» —
+              // только при точном совпадении, иначе «Дашборд» горел бы везде.
+              const isActive =
+                item.to === "/"
+                  ? location.pathname === "/"
+                  : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`);
 
               if (item.disabled) {
                 return (
@@ -112,7 +119,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
         {!isCollapsed && (
           <div className="mt-auto whitespace-nowrap p-4 text-xs text-zinc-700">
-            ORACLE-T · Этапы 0–13
+            Sova Scanner · Этапы 0–13
           </div>
         )}
       </aside>

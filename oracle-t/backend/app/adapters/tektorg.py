@@ -253,7 +253,7 @@ class TektorgAdapter(SourceAdapter):
                     for card in cards:
                         summary = self._parse_card(card, outcome.errors)
                         if summary is not None:
-                            seen[summary.external_id] = summary
+                            self._collect(seen, summary)
             except Exception as exc:  # noqa: BLE001 - ошибка одного ключевого слова не должна прервать остальные
                 outcome.errors.append(
                     PollError(None, f"Не удалось получить выдачу по '{keyword}': {exc}")

@@ -5,6 +5,11 @@
 Этот модуль — тонкая обёртка: он не знает, *что* извлекается (характеристики продукции,
 требования тендера и т.д.), только *как* вызвать модель и получить структурированный ответ.
 Конкретные промпты живут в вызывающих сервисах.
+
+С 18.09.2026 это один из двух провайдеров: сервисы-потребители зовут `run_structured` из
+`app/services/ai_client.py`, который выбирает между этим клиентом и Claude (RouterAI) по
+настройке администратора. Напрямую отсюда берут только то, что есть лишь у Yandex:
+эмбеддинги и учётные данные для OCR/поиска.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from loguru import logger
 from sqlalchemy.orm import Session
 
 from app.models.integration_setting import YandexAiStudioSettings
+from app.services.ai_provider_service import AiNotConfiguredError
 from app.services.yandex_ai_service import _SINGLETON_ID
 
 # Модель по умолчанию. `yandexgpt` (Pro) — а не `yandexgpt-lite`: задачи раздела 5.4-5.5 ТЗ
@@ -36,9 +42,11 @@ RETRY_BACKOFF_SECONDS = 3.0
 ResponseT = TypeVar("ResponseT", bound=pydantic.BaseModel)
 
 
-class YandexAiNotConfiguredError(RuntimeError):
+class YandexAiNotConfiguredError(AiNotConfiguredError):
     """Ключ/Folder ID не заданы в админ-панели — вызывающий код должен сообщить об этом
-    пользователю понятным текстом, а не падать 500-й ошибкой."""
+    пользователю понятным текстом, а не падать 500-й ошибкой. Наследует общий
+    `AiNotConfiguredError`, чтобы потребители ловили одно исключение независимо от того,
+    какой провайдер активен."""
 
 
 def get_credentials(db: Session) -> tuple[str, str]:
@@ -46,7 +54,7 @@ def get_credentials(db: Session) -> tuple[str, str]:
     if settings is None or not settings.api_key or not settings.folder_id:
         raise YandexAiNotConfiguredError(
             "Подключение к Yandex AI Studio не настроено: заполните API-ключ и Folder ID "
-            "в разделе «Настройки → Интеграции»."
+            "на странице «Интеграции» (блок «Искусственный интеллект»)."
         )
     return settings.api_key, settings.folder_id
 
@@ -117,24 +125,12 @@ def run_structured(
 
 
 def chunk_text(text: str, *, max_chars: int, overlap: int = 200) -> list[str]:
-    """Режет длинный документ на куски под контекстное окно модели.
+    """Перенесена в `app/services/ai_client.py` (не зависит от провайдера); здесь — для
+    прежних импортов."""
 
-    `overlap` — перекрытие между кусками: характеристика может оказаться на стыке
-    («Номинальное напряжение:» в конце одного куска, значение — в начале следующего),
-    без перекрытия такое значение потерялось бы.
-    """
+    from app.services.ai_client import chunk_text as _chunk_text
 
-    if max_chars <= 0:
-        raise ValueError("max_chars должен быть положительным")
-    if len(text) <= max_chars:
-        return [text] if text else []
-
-    step = max(1, max_chars - overlap)
-    return [
-        chunk
-        for start in range(0, len(text), step)
-        if (chunk := text[start : start + max_chars]).strip()
-    ]
+    return _chunk_text(text, max_chars=max_chars, overlap=overlap)
 
 
 # Модель эмбеддингов Yandex AI Studio. `doc` — вариант для индексируемых документов

@@ -213,7 +213,7 @@ class LotOnlineAdapter(SourceAdapter):
                         for item in items:
                             summary = self._parse_item(item, outcome.errors)
                             if summary is not None:
-                                seen[summary.external_id] = summary
+                                self._collect(seen, summary)
 
                         total_count = payload.get("count", offset + len(items))
                         offset += len(items)

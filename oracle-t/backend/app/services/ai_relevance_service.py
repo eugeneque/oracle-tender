@@ -36,7 +36,7 @@ from app.models.log import LogLevel
 from app.models.tender import Tender
 from app.models.user import User
 from app.services.audit import log_action
-from app.services.yandex_ai_client import run_structured
+from app.services.ai_client import run_structured
 
 # Что именно ищет компания. Вынесено в константу, а не зашито в промпт по кускам: это
 # предметное описание бизнеса, и менять его придётся вместе с профилем релевантности.

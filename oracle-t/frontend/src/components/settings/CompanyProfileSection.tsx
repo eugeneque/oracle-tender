@@ -1,12 +1,16 @@
 import { useEffect, useState } from "react";
 import {
-  Building2,
+  Briefcase,
   ChevronDown,
   ChevronRight,
+  FileText,
+  Globe,
   Loader2,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
+  ShieldCheck,
   Star,
   Trash2,
   X,
@@ -19,7 +23,10 @@ import type {
   CompanyProfile,
   CompanyProfileUpdate,
   EgrulCandidate,
+  RusprofileDossier,
+  RusprofileSyncResult,
 } from "../../api/types";
+import { formatDateTime, plural } from "../../utils/format";
 
 /**
  * Профили компаний (раздел 5.6 «Моя компания», раздел 7 ТЗ).
@@ -47,6 +54,11 @@ import type {
  * Источников автопоиска два, и выбираются они по виду запроса: ссылка на карточку
  * rusprofile.ru разбирается напрямую (единственный путь, дающий КПП, — в выдаче ЕГРЮЛ его
  * нет), всё остальное — ИНН, ОГРН, название — уходит в ЕГРЮЛ как в первоисточник.
+ *
+ * С 18.09.2026 есть и третий путь — «Обновить из rusprofile»: под учётной записью из
+ * «Интеграций» сайт отдаёт карточку целиком, и допуски, реализованные проекты (из
+ * выигранных закупок) и историю участий заполняет синхронизация, а не человек. Она
+ * заполняет только пустые и свои же поля: подтверждённое человеком и ручные записи остаются.
  */
 
 const inputClass =
@@ -55,11 +67,15 @@ const inputClass =
 export function CompanyProfilesPanel({
   isAdmin,
   onPrimaryLoaded,
+  onRusprofileSynced,
 }: {
   isAdmin: boolean;
   /** Соседняя вкладка «История участий» синхронизируется по ИНН основной компании — и
    * показывает кнопку только когда он заполнен. */
   onPrimaryLoaded?: (profile: CompanyProfile | null) => void;
+  /** Синхронизация основной компании с rusprofile пополняет и историю участий — соседняя
+   * вкладка должна перечитать список. */
+  onRusprofileSynced?: () => void;
 }) {
   const [profiles, setProfiles] = useState<CompanyProfile[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -107,6 +123,32 @@ export function CompanyProfilesPanel({
       );
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Не удалось сменить основную компанию");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const syncRusprofile = async (profile: CompanyProfile) => {
+    setBusyId(profile.id);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.post<RusprofileSyncResult>(
+        `/company-profiles/${profile.id}/rusprofile-sync`,
+      );
+      await load();
+      setExpandedId(profile.id);
+      setNotice(
+        `Обновлено из rusprofile. ${result.message}` +
+          (result.data_hidden
+            ? " Проверьте подписку учётной записи: часть данных на сайте скрыта."
+            : ""),
+      );
+      if (profile.is_primary) onRusprofileSynced?.();
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : "Не удалось обновить данные из rusprofile",
+      );
     } finally {
       setBusyId(null);
     }
@@ -167,7 +209,7 @@ export function CompanyProfilesPanel({
           {isAdmin ? " добавьте первую компанию." : " попросите администратора завести профиль."}
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-4">
           {profiles.map((profile) => (
             <CompanyRow
               key={profile.id}
@@ -180,6 +222,7 @@ export function CompanyProfilesPanel({
                 setExpandedId((prev) => (prev === profile.id ? null : profile.id))
               }
               onEdit={() => setEditing({ profile })}
+              onSyncRusprofile={() => void syncRusprofile(profile)}
               onMakePrimary={() => void makePrimary(profile)}
               onAskDelete={() => setConfirmingId(profile.id)}
               onCancelDelete={() => setConfirmingId(null)}
@@ -221,9 +264,27 @@ function companyTitle(profile: CompanyProfile): string {
   return profile.legal_name?.trim() || (profile.inn ? `ИНН ${profile.inn}` : "Без наименования");
 }
 
+/** Короткое имя для аватара и подписей: «ООО ТД "Миртек"» вместо полной формы, если сайт его дал. */
+function companyShortTitle(profile: CompanyProfile): string {
+  return profile.rusprofile_data?.short_name?.trim() || companyTitle(profile);
+}
+
+const LEGAL_FORM_WORDS =
+  /^(ООО|АО|ПАО|ЗАО|ОАО|ТД|ГУП|МУП|ИП|ОБЩЕСТВО|С|ОГРАНИЧЕННОЙ|ОТВЕТСТВЕННОСТЬЮ|АКЦИОНЕРНОЕ|ПУБЛИЧНОЕ|НЕПУБЛИЧНОЕ|ТОРГОВЫЙ|ДОМ|КОМПАНИЯ)$/i;
+
+/** Буква для аватара — первая буква собственно названия, а не организационно-правовой формы. */
+function companyInitial(profile: CompanyProfile): string {
+  const short = companyShortTitle(profile).replace(/[«»"']/g, "");
+  const word = short.split(/\s+/).find((part) => part.length > 1 && !LEGAL_FORM_WORDS.test(part));
+  return (word ?? short).charAt(0).toUpperCase() || "К";
+}
+
 /**
- * Одна компания свёрнутой строкой. Раскрытие показывает то, что реально уходит в AI-оценку —
- * реквизиты, стаж, допуски и проекты, — чтобы не приходилось открывать форму ради проверки.
+ * Одна компания — отдельная карточка. Свёрнутая показывает шапку и ряд ключевых цифр (стаж,
+ * допуски, проекты, история, выручка), раскрытая — четыре самостоятельных блока, каждый в
+ * своём оттенке: реквизиты, допуски, проекты и досье с сайта. Так видно, что реально уходит
+ * в AI-оценку, без открытия формы; блоки различимы с первого взгляда, а не сливаются в один
+ * список «ключ — значение».
  */
 function CompanyRow({
   profile,
@@ -233,6 +294,7 @@ function CompanyRow({
   isConfirmingDelete,
   onToggle,
   onEdit,
+  onSyncRusprofile,
   onMakePrimary,
   onAskDelete,
   onCancelDelete,
@@ -245,40 +307,65 @@ function CompanyRow({
   isConfirmingDelete: boolean;
   onToggle: () => void;
   onEdit: () => void;
+  onSyncRusprofile: () => void;
   onMakePrimary: () => void;
   onAskDelete: () => void;
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
 }) {
+  const dossier = profile.rusprofile_data;
+  const purchases = dossier?.purchases;
+  const finance = dossier?.finance ?? {};
+  const canSync = Boolean(profile.inn || profile.rusprofile_card_id);
+
   return (
-    <div className="overflow-hidden rounded-lg border border-white/[0.08] bg-black/20">
-      <div className="flex items-center gap-2 px-3 py-2.5">
+    <div
+      className={`relative overflow-hidden rounded-2xl border ${
+        profile.is_primary
+          ? "border-indigo-500/30 bg-gradient-to-br from-indigo-500/[0.08] via-white/[0.03] to-transparent shadow-[0_0_60px_-20px_rgba(99,102,241,0.45)]"
+          : "border-white/[0.08] bg-gradient-to-br from-white/[0.04] to-transparent"
+      }`}
+    >
+      {profile.is_primary && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-indigo-500/20 blur-3xl"
+        />
+      )}
+
+      {/* Шапка */}
+      <div className="relative flex flex-wrap items-center gap-3 px-5 py-4">
         <button
           onClick={onToggle}
-          className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+          className="flex min-w-0 flex-1 items-center gap-3.5 text-left"
           title={isExpanded ? "Свернуть" : "Развернуть"}
         >
-          <span className="text-zinc-600">
-            {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          </span>
           <span
-            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
+            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-base font-semibold ${
               profile.is_primary
-                ? "bg-indigo-500/10 text-indigo-400"
-                : "bg-white/[0.04] text-zinc-500"
+                ? "bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-500/30"
+                : "bg-white/[0.06] text-zinc-300"
             }`}
           >
-            <Building2 size={14} />
+            {companyInitial(profile)}
           </span>
           <span className="min-w-0">
-            <span className="block truncate text-sm text-zinc-200">
-              {companyTitle(profile)}
+            <span className="flex items-center gap-2">
+              <span className="truncate text-[15px] font-semibold text-zinc-100">
+                {companyShortTitle(profile)}
+              </span>
+              <span className="text-zinc-600">
+                {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              </span>
             </span>
-            <span className="block truncate text-[11px] text-zinc-600">
+            <span className="block truncate text-[11px] text-zinc-500">
               {[
                 profile.inn ? `ИНН ${profile.inn}` : "ИНН не указан",
                 profile.kpp ? `КПП ${profile.kpp}` : null,
-                profile.years_of_experience ? `стаж ${profile.years_of_experience} лет` : null,
+                dossier?.status ?? null,
+                profile.rusprofile_synced_at
+                  ? `rusprofile · ${formatDateTime(profile.rusprofile_synced_at)}`
+                  : null,
               ]
                 .filter(Boolean)
                 .join(" · ")}
@@ -303,128 +390,503 @@ function CompanyRow({
             </button>
           </div>
         ) : (
-        <div className="flex shrink-0 items-center gap-1.5">
-          {profile.is_primary && (
-            <span className="rounded-md border border-indigo-500/30 bg-indigo-500/10 px-2 py-0.5 text-[11px] text-indigo-300">
-              основная
-            </span>
-          )}
-          {!profile.is_filled && (
-            <span className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
-              не заполнен
-            </span>
-          )}
-          {isBusy && <Loader2 size={13} className="animate-spin text-zinc-500" />}
-          {isAdmin && !profile.is_primary && (
-            <button
-              onClick={onMakePrimary}
-              disabled={isBusy}
-              className="rounded-lg border border-white/10 px-2 py-1 text-zinc-500 hover:bg-white/5 hover:text-indigo-300 disabled:opacity-50"
-              title="Сделать основной — с неё будет считаться AI-оценка"
-            >
-              <Star size={13} />
-            </button>
-          )}
-          {isAdmin && (
-            <button
-              onClick={onEdit}
-              className="rounded-lg border border-white/10 px-2 py-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
-              title="Изменить"
-            >
-              <Pencil size={13} />
-            </button>
-          )}
-          {isAdmin && !profile.is_primary && (
-            <button
-              onClick={onAskDelete}
-              disabled={isBusy}
-              className="rounded-lg border border-white/10 px-2 py-1 text-zinc-500 hover:bg-white/5 hover:text-red-400 disabled:opacity-50"
-              title="Удалить"
-            >
-              <Trash2 size={13} />
-            </button>
-          )}
-        </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+            {profile.is_primary && (
+              <span className="rounded-full border border-indigo-400/30 bg-indigo-500/15 px-2.5 py-0.5 text-[11px] font-medium text-indigo-200">
+                основная
+              </span>
+            )}
+            {!profile.is_filled && (
+              <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] text-amber-300">
+                не заполнен
+              </span>
+            )}
+            {isBusy && <Loader2 size={13} className="animate-spin text-zinc-500" />}
+            {isAdmin && (
+              <button
+                onClick={onSyncRusprofile}
+                disabled={isBusy || !canSync}
+                className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-[11px] text-zinc-300 hover:border-indigo-400/40 hover:text-indigo-200 disabled:opacity-50"
+                title={
+                  canSync
+                    ? "Заполнить реквизиты, допуски, проекты и историю участий с rusprofile.ru"
+                    : "Укажите ИНН — по нему компания ищется на rusprofile.ru"
+                }
+              >
+                <RefreshCw size={12} className={isBusy ? "animate-spin" : ""} />
+                Обновить из rusprofile
+              </button>
+            )}
+            {isAdmin && !profile.is_primary && (
+              <button
+                onClick={onMakePrimary}
+                disabled={isBusy}
+                className="rounded-full border border-white/10 p-1.5 text-zinc-500 hover:bg-white/5 hover:text-indigo-300 disabled:opacity-50"
+                title="Сделать основной — с неё будет считаться AI-оценка"
+              >
+                <Star size={13} />
+              </button>
+            )}
+            {isAdmin && (
+              <button
+                onClick={onEdit}
+                className="rounded-full border border-white/10 p-1.5 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
+                title="Изменить"
+              >
+                <Pencil size={13} />
+              </button>
+            )}
+            {isAdmin && !profile.is_primary && (
+              <button
+                onClick={onAskDelete}
+                disabled={isBusy}
+                className="rounded-full border border-white/10 p-1.5 text-zinc-500 hover:bg-white/5 hover:text-red-400 disabled:opacity-50"
+                title="Удалить"
+              >
+                <Trash2 size={13} />
+              </button>
+            )}
+          </div>
         )}
       </div>
 
-      {isExpanded && (
-        <div className="border-t border-white/[0.06] px-3 py-3">
-          <dl className="grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
-            <Detail label="Юридическое наименование" value={profile.legal_name} />
-            <Detail label="ОГРН" value={profile.ogrn} />
-            <Detail
-              label="Дата регистрации"
-              value={
-                profile.registration_date
-                  ? new Date(profile.registration_date).toLocaleDateString("ru-RU")
-                  : null
-              }
-            />
-            <Detail
-              label="Стаж работы"
-              value={
-                profile.years_of_experience ? `${profile.years_of_experience} лет` : null
-              }
-            />
-            <div className="sm:col-span-2">
-              <Detail label="Юридический адрес" value={profile.legal_address} />
-            </div>
-          </dl>
+      {/* Ключевые цифры — видны и в свёрнутом состоянии */}
+      <div className="relative grid grid-cols-2 gap-2 px-5 pb-4 sm:grid-cols-3 lg:grid-cols-5">
+        <Kpi
+          label="Стаж"
+          value={profile.years_of_experience ? String(profile.years_of_experience) : "—"}
+          unit={profile.years_of_experience ? plural(profile.years_of_experience, "год", "года", "лет") : undefined}
+          hint={
+            profile.registration_date
+              ? `с ${new Date(profile.registration_date).toLocaleDateString("ru-RU")}`
+              : "дата регистрации не указана"
+          }
+        />
+        <Kpi
+          label="Допуски"
+          value={String(profile.licenses.length)}
+          hint={profile.licenses.length ? "лицензии и сертификаты" : "не указаны"}
+          tone={profile.licenses.length ? "emerald" : undefined}
+        />
+        <Kpi
+          label="Проекты"
+          value={String(profile.past_projects.length)}
+          hint={profile.past_projects.length ? "реализованных" : "не указаны"}
+          tone={profile.past_projects.length ? "amber" : undefined}
+        />
+        <Kpi
+          label="Госзакупки"
+          value={purchases ? `${purchases.wins}` : "—"}
+          unit={purchases ? `побед · ${purchases.losses} проигр.` : undefined}
+          hint={
+            purchases
+              ? `${purchases.fetched} ${plural(purchases.fetched, "закупка", "закупки", "закупок")} на rusprofile`
+              : "обновите из rusprofile"
+          }
+          tone={purchases ? "sky" : undefined}
+        />
+        <Kpi
+          label={`Выручка${finance.year ? ` ${finance.year}` : ""}`}
+          value={finance.revenue ? finance.revenue.replace(/\s*руб\.?$/, "") : "—"}
+          unit={finance.revenue ? "руб." : undefined}
+          hint={finance.revenue_change ? `${finance.revenue_change} к прошлому году` : "нет данных"}
+          tone={finance.revenue ? "violet" : undefined}
+        />
+      </div>
 
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            <div>
-              <h4 className="mb-1 text-[11px] font-medium text-zinc-400">
-                Допуски и лицензии
-              </h4>
-              {profile.licenses.length === 0 ? (
-                <p className="text-[11px] text-zinc-600">
-                  Не указаны — «Компетенции» посчитают, что формальных подтверждений нет.
-                </p>
-              ) : (
-                <ul className="space-y-0.5 text-[11px] text-zinc-400">
-                  {profile.licenses.map((license, index) => (
-                    <li key={index}>
-                      {[license.name, license.number, license.valid_until]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </li>
-                  ))}
-                </ul>
+      {isExpanded && (
+        <div className="relative grid gap-3 border-t border-white/[0.06] bg-black/20 px-5 py-4 lg:grid-cols-2">
+          <SectionCard tone="indigo" icon={<FileText size={13} />} title="Реквизиты">
+            <dl className="grid gap-x-6 gap-y-2.5 text-xs sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <Detail label="Юридическое наименование" value={profile.legal_name} />
+              </div>
+              <Detail label="ИНН" value={profile.inn} mono />
+              <Detail label="КПП" value={profile.kpp} mono />
+              <Detail label="ОГРН" value={profile.ogrn} mono />
+              <Detail
+                label="Дата регистрации"
+                value={
+                  profile.registration_date
+                    ? new Date(profile.registration_date).toLocaleDateString("ru-RU")
+                    : null
+                }
+              />
+              <div className="sm:col-span-2">
+                <Detail label="Юридический адрес" value={profile.legal_address} />
+              </div>
+              {dossier?.codes && Object.keys(dossier.codes).length > 0 && (
+                <div className="sm:col-span-2">
+                  <dt className="text-[11px] text-zinc-500">Коды статистики</dt>
+                  <dd className="mt-1 flex flex-wrap gap-1.5">
+                    {Object.entries(dossier.codes).map(([key, value]) => (
+                      <span
+                        key={key}
+                        className="rounded-md border border-white/[0.08] bg-black/30 px-2 py-0.5 font-mono text-[10px] text-zinc-400"
+                      >
+                        {key.toUpperCase()} {value}
+                      </span>
+                    ))}
+                  </dd>
+                </div>
               )}
-            </div>
-            <div>
-              <h4 className="mb-1 text-[11px] font-medium text-zinc-400">
-                Реализованные проекты
-              </h4>
-              {profile.past_projects.length === 0 ? (
-                <p className="text-[11px] text-zinc-600">
-                  Не указаны — «Задаче» не с чем сопоставлять предмет закупки.
-                </p>
-              ) : (
-                <ul className="space-y-0.5 text-[11px] text-zinc-400">
-                  {profile.past_projects.map((project, index) => (
-                    <li key={index}>
-                      {[project.work_type, project.customer, project.volume, project.year]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
+            </dl>
+          </SectionCard>
+
+          <SectionCard
+            tone="emerald"
+            icon={<ShieldCheck size={13} />}
+            title="Допуски и лицензии"
+            count={profile.licenses.length}
+          >
+            {profile.licenses.length === 0 ? (
+              <EmptyNote>
+                Не указаны — «Компетенции» посчитают, что формальных подтверждений нет.
+              </EmptyNote>
+            ) : (
+              <ul className="space-y-1.5">
+                {profile.licenses.map((license, index) => (
+                  <li
+                    key={index}
+                    className="rounded-lg border border-white/[0.06] bg-black/25 px-3 py-2 text-xs"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="line-clamp-2 text-zinc-200">{license.name}</span>
+                      {license.source === "rusprofile" && <SourceMark />}
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-zinc-500">
+                      {license.number && <span className="font-mono">№ {license.number}</span>}
+                      {license.valid_until && <span>до {license.valid_until}</span>}
+                      {license.issuer && (
+                        <span className="line-clamp-1 max-w-[60%]">{license.issuer}</span>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </SectionCard>
+
+          <SectionCard
+            tone="amber"
+            icon={<Briefcase size={13} />}
+            title="Реализованные проекты"
+            count={profile.past_projects.length}
+          >
+            {profile.past_projects.length === 0 ? (
+              <EmptyNote>Не указаны — «Задаче» не с чем сопоставлять предмет закупки.</EmptyNote>
+            ) : (
+              <ul className="space-y-1.5">
+                {profile.past_projects.map((project, index) => (
+                  <li
+                    key={index}
+                    className="rounded-lg border border-white/[0.06] bg-black/25 px-3 py-2 text-xs"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="line-clamp-2 text-zinc-200">{project.work_type}</span>
+                      {project.year && (
+                        <span className="shrink-0 rounded-md bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] text-amber-300">
+                          {project.year}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-zinc-500">
+                      {project.customer && <span className="truncate">{project.customer}</span>}
+                      {project.volume && <span className="text-zinc-300">{project.volume}</span>}
+                      {project.source === "rusprofile" && <SourceMark />}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </SectionCard>
+
+          <SectionCard
+            tone="sky"
+            icon={<Globe size={13} />}
+            title="Досье rusprofile"
+            extra={
+              dossier ? (
+                <span className="text-[10px] text-zinc-500">
+                  {profile.rusprofile_synced_at
+                    ? `обновлено ${formatDateTime(profile.rusprofile_synced_at)} · `
+                    : ""}
+                  <a
+                    href={dossier.source_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-sky-300 hover:underline"
+                  >
+                    карточка на сайте
+                  </a>
+                </span>
+              ) : undefined
+            }
+          >
+            {dossier ? (
+              <RusprofileDossierBlock dossier={dossier} />
+            ) : (
+              <EmptyNote>
+                Досье ещё не загружалось. Нажмите «Обновить из rusprofile» — сайт отдаст
+                руководителя, численность, финансы, учредителей и историю госзакупок.
+              </EmptyNote>
+            )}
+          </SectionCard>
         </div>
       )}
     </div>
   );
 }
 
-function Detail({ label, value }: { label: string; value: string | null }) {
+type Tone = "indigo" | "emerald" | "amber" | "sky" | "violet";
+
+const TONE_CARD: Record<Tone, string> = {
+  indigo: "border-indigo-500/20 bg-indigo-500/[0.05]",
+  emerald: "border-emerald-500/20 bg-emerald-500/[0.05]",
+  amber: "border-amber-500/20 bg-amber-500/[0.05]",
+  sky: "border-sky-500/20 bg-sky-500/[0.05]",
+  violet: "border-violet-500/20 bg-violet-500/[0.05]",
+};
+
+const TONE_ICON: Record<Tone, string> = {
+  indigo: "bg-indigo-500/15 text-indigo-300",
+  emerald: "bg-emerald-500/15 text-emerald-300",
+  amber: "bg-amber-500/15 text-amber-300",
+  sky: "bg-sky-500/15 text-sky-300",
+  violet: "bg-violet-500/15 text-violet-300",
+};
+
+const TONE_VALUE: Record<Tone, string> = {
+  indigo: "text-indigo-200",
+  emerald: "text-emerald-200",
+  amber: "text-amber-200",
+  sky: "text-sky-200",
+  violet: "text-violet-200",
+};
+
+/** Плитка с одной цифрой — как в сводках дашбордов: подпись, крупное число, пояснение. */
+function Kpi({
+  label,
+  value,
+  unit,
+  hint,
+  tone,
+}: {
+  label: string;
+  value: string;
+  unit?: string;
+  hint?: string;
+  tone?: Tone;
+}) {
+  return (
+    <div className="rounded-xl border border-white/[0.06] bg-black/30 px-3.5 py-2.5">
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
+      <div className="mt-0.5 flex items-baseline gap-1.5">
+        <span className={`text-xl font-semibold leading-tight ${tone ? TONE_VALUE[tone] : "text-zinc-100"}`}>
+          {value}
+        </span>
+        {unit && <span className="text-[11px] text-zinc-500">{unit}</span>}
+      </div>
+      {hint && <div className="mt-0.5 truncate text-[10px] text-zinc-600">{hint}</div>}
+    </div>
+  );
+}
+
+/** Информационный блок компании в своём оттенке — чтобы блоки читались как разные сущности. */
+function SectionCard({
+  tone,
+  icon,
+  title,
+  count,
+  extra,
+  children,
+}: {
+  tone: Tone;
+  icon: React.ReactNode;
+  title: string;
+  count?: number;
+  extra?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className={`rounded-xl border p-4 ${TONE_CARD[tone]}`}>
+      <header className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h4 className="flex items-center gap-2 text-xs font-semibold text-zinc-100">
+          <span className={`flex h-6 w-6 items-center justify-center rounded-md ${TONE_ICON[tone]}`}>
+            {icon}
+          </span>
+          {title}
+          {typeof count === "number" && count > 0 && (
+            <span className="rounded-full bg-white/[0.06] px-1.5 py-px text-[10px] font-normal text-zinc-400">
+              {count}
+            </span>
+          )}
+        </h4>
+        {extra}
+      </header>
+      {children}
+    </section>
+  );
+}
+
+function EmptyNote({ children }: { children: React.ReactNode }) {
+  return <p className="text-[11px] leading-relaxed text-zinc-500">{children}</p>;
+}
+
+/** Пометка «с rusprofile» у допуска или проекта: такие записи ведёт синхронизация, а не человек. */
+function SourceMark() {
+  return (
+    <span
+      className="shrink-0 rounded border border-sky-500/20 bg-sky-500/[0.08] px-1 py-px text-[10px] text-sky-300/90"
+      title="Запись получена с rusprofile.ru и обновляется синхронизацией"
+    >
+      rusprofile
+    </span>
+  );
+}
+
+/**
+ * Содержимое блока «Досье rusprofile»: цифры плитками (численность, прибыль, капитал,
+ * заказчики), ниже — факты списком. Те же факты уходят в промпт AI-оценки: «Компетенции»
+ * сверяют с ними требования к участнику.
+ */
+function RusprofileDossierBlock({ dossier }: { dossier: RusprofileDossier }) {
+  const finance = dossier.finance ?? {};
+  const summary = dossier.purchases_summary ?? {};
+  const tiles: Array<{ label: string; value: string; hint?: string }> = [];
+  if (dossier.headcount) {
+    tiles.push({
+      label: "Численность",
+      value: `${dossier.headcount}`,
+      hint: dossier.headcount_year ? `чел. в ${dossier.headcount_year}` : "чел.",
+    });
+  }
+  if (finance.profit) {
+    tiles.push({ label: "Прибыль", value: finance.profit.replace(/\s*руб\.?$/, ""), hint: finance.profit_change ? `${finance.profit_change} к прошлому году` : "руб." });
+  }
+  if (dossier.authorized_capital) {
+    tiles.push({ label: "Уставный капитал", value: dossier.authorized_capital.replace(/\s*руб\.?$/, ""), hint: "руб." });
+  }
+  if (summary.contracts_count) {
+    tiles.push({
+      label: "Контрактов",
+      value: String(summary.contracts_count),
+      hint: summary.contracts_sum ? `на ${summary.contracts_sum}` : undefined,
+    });
+  }
+
+  const facts: Array<[string, string | null | undefined]> = [
+    [
+      "Руководитель",
+      dossier.ceo_name
+        ? [dossier.ceo_position, dossier.ceo_name, dossier.ceo_since].filter(Boolean).join(" ")
+        : null,
+    ],
+    [
+      "Учредители",
+      dossier.founders?.length
+        ? dossier.founders
+            .map((f) => [f.name, f.share ? `доля ${f.share}` : null].filter(Boolean).join(", "))
+            .join("; ")
+        : null,
+    ],
+    [
+      "Основной ОКВЭД",
+      dossier.main_okved_code
+        ? `${dossier.main_okved_code} ${dossier.main_okved_name ?? ""}${dossier.okved_count ? ` (всего ${dossier.okved_count})` : ""}`
+        : null,
+    ],
+    ["Реестр МСП", dossier.msp_status],
+    ["Налоговый режим", dossier.tax_regime],
+    ["Контакты", [...(dossier.phones ?? []), ...(dossier.emails ?? []), dossier.website].filter(Boolean).join(" · ") || null],
+    ["Исполнительные производства", dossier.enforcement],
+    ["Проверки", dossier.inspections],
+    ["Лицензии на сайте", dossier.licenses_note],
+  ];
+  const visible = facts.filter(([, value]) => value);
+  const ratings = Object.entries(finance.ratings ?? {}).filter(([, v]) => v);
+
+  return (
+    <div className="space-y-3">
+      {dossier.data_hidden && (
+        <div className="rounded-lg border border-amber-500/25 bg-amber-500/[0.07] px-3 py-2 text-[11px] text-amber-200/90">
+          Часть данных на сайте скрыта подпиской — проверьте, действует ли учётная запись.
+        </div>
+      )}
+
+      {tiles.length > 0 && (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {tiles.map((tile) => (
+            <div key={tile.label} className="rounded-lg border border-white/[0.06] bg-black/30 px-3 py-2">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500">{tile.label}</div>
+              <div className="mt-0.5 text-base font-semibold text-sky-100">{tile.value}</div>
+              {tile.hint && <div className="text-[10px] text-zinc-600">{tile.hint}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {ratings.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {ratings.map(([label, value]) => (
+            <span
+              key={label}
+              className="rounded-full border border-white/[0.08] bg-black/30 px-2.5 py-0.5 text-[10px] text-zinc-400"
+            >
+              {label}: <span className="text-zinc-200">{value}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {summary.top_customers && summary.top_customers.length > 0 && (
+        <div>
+          <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">Крупные заказчики</div>
+          <div className="flex flex-wrap gap-1.5">
+            {summary.top_customers.map((customer) => (
+              <span
+                key={customer.name}
+                className="rounded-lg border border-sky-500/20 bg-sky-500/[0.08] px-2.5 py-1 text-[11px] text-sky-100"
+                title={customer.sum ?? undefined}
+              >
+                {customer.name}
+                {customer.purchases ? (
+                  <span className="ml-1.5 text-[10px] text-sky-300/70">{customer.purchases}</span>
+                ) : null}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {visible.length > 0 && (
+        <dl className="grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
+          {visible.map(([label, value]) => (
+            <div key={label}>
+              <dt className="text-[11px] text-zinc-500">{label}</dt>
+              <dd className="line-clamp-3 text-zinc-300">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+
+      {dossier.summary_text && (
+        <p
+          className="line-clamp-4 border-t border-white/[0.06] pt-2 text-[11px] leading-relaxed text-zinc-500"
+          title={dossier.summary_text}
+        >
+          {dossier.summary_text}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Detail({ label, value, mono }: { label: string; value: string | null; mono?: boolean }) {
   return (
     <div>
-      <dt className="text-[11px] text-zinc-600">{label}</dt>
-      <dd className="text-zinc-300">{value?.trim() ? value : "—"}</dd>
+      <dt className="text-[11px] text-zinc-500">{label}</dt>
+      <dd className={`text-zinc-200 ${mono ? "font-mono" : ""}`}>{value?.trim() ? value : "—"}</dd>
     </div>
   );
 }

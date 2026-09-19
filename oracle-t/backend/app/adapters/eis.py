@@ -235,7 +235,7 @@ class EisAdapter(SourceAdapter):
                             summary = self._parse_card(card, outcome.errors)
                             if summary is None:
                                 continue
-                            seen[summary.external_id] = summary
+                            self._collect(seen, summary)
 
                         if stop or len(cards) < self.records_per_page:
                             break

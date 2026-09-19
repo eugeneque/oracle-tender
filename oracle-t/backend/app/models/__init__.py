@@ -37,7 +37,11 @@ from app.models.catalog_queue import (
 from app.models.company_profile import CompanyProfile
 from app.models.market import NicheSource, NicheStatistics, SimilarTender, TenderEmbedding
 from app.models.api_client import ApiClient
-from app.models.integration_setting import YandexAiStudioSettings
+from app.models.integration_setting import (
+    AiProviderSettings,
+    RusprofileSettings,
+    YandexAiStudioSettings,
+)
 from app.models.job import BackgroundJob, JobKind, JobStatus
 from app.models.log import Log
 from app.models.manufacturer import (
@@ -67,6 +71,7 @@ from app.models.source import Source
 from app.models.source_credential import SourceCredential
 from app.models.tender import RelevanceStatus, Tender, TenderStage
 from app.models.tender_bookmark import TenderBookmark
+from app.models.tender_tag import TenderTag, TenderTagLink
 from app.models.tender_card import TenderCard
 from app.models.tender_document import DocumentClass, TenderDocument
 from app.models.tender_history import HistoryKind, TenderHistoryEntry
@@ -111,6 +116,8 @@ __all__ = [
     "CatalogQueueReason",
     "CatalogQueueStatus",
     "ProductCharacteristic",
+    "AiProviderSettings",
+    "RusprofileSettings",
     "YandexAiStudioSettings",
     "Requirement",
     "ComplianceMatrixEntry",
@@ -144,6 +151,8 @@ __all__ = [
     "NotificationStatus",
     "NotificationTrigger",
     "TenderBookmark",
+    "TenderTag",
+    "TenderTagLink",
     "UpperSoftwareDevice",
     "UpperSoftwareProductLink",
 ]

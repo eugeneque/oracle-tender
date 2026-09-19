@@ -22,6 +22,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
+from typing import Callable
 
 from loguru import logger
 from sqlalchemy import and_, func, select
@@ -181,17 +182,49 @@ def _upsert_tender(
 # «Проверить моделью» в настройках: опрос источника не должен превращаться в получасовую
 # операцию из-за одной площадки, вывалившей сотню записей.
 AI_CHECK_ON_POLL_LIMIT = 25
+# Сколько накопившихся непроверенных закупок модель разбирает после опроса всех площадок.
+# Поштучный лимит выше защищает от лавины с одной площадки; этот — добирает хвост, чтобы
+# «не смотрели» не копилось неделями: пока модель не ответила, тендер висит в списке.
+AI_CHECK_AFTER_POLL_LIMIT = 200
+
+
+def check_pending_ai_relevance(db: Session, *, limit: int = AI_CHECK_AFTER_POLL_LIMIT) -> None:
+    """Добирает ИИ-отбором хвост прошедших профиль, но ещё не проверенных закупок."""
+
+    try:
+        result = ai_relevance_service.check_batch(db, limit=limit)
+    except Exception as exc:  # noqa: BLE001 - сбой модели не отменяет успешный сбор
+        logger.warning(f"ИИ-отбор после опроса не выполнен: {exc}")
+        return
+    if result.checked or result.failed:
+        logger.info(
+            f"ИИ-отбор после опроса: проверено {result.checked}, подобрано {result.relevant}, "
+            f"отклонено {result.rejected}, сбоев {result.failed}"
+        )
 
 
 def poll_source(
-    db: Session, source: Source, *, actor_id: uuid.UUID | None = None
+    db: Session,
+    source: Source,
+    *,
+    actor_id: uuid.UUID | None = None,
+    on_progress: Callable[[int, int, int], None] | None = None,
 ) -> SourcePollResult:
     """Опрашивает один источник. Ошибка этого источника не должна прерывать опрос
     остальных (раздел 5.1, 5.9 ТЗ) — вызывающий код (планировщик/CLI) может смело звать
-    эту функцию в цикле по всем источникам без try/except снаружи."""
+    эту функцию в цикле по всем источникам без try/except снаружи.
+
+    Выдача сохраняется порциями по `POLL_BATCH_SIZE` записей по мере того, как адаптер их
+    вычитывает (правка 17.09.2026): каждая порция коммитится сразу, и новые закупки видны в
+    списке ещё до конца опроса, а не после всех 11 000 строк ЭТП ГПБ. `on_progress`
+    получает (обработано, создано, обновлено) после каждой порции — для строки прогресса.
+    """
 
     # Ключевые слова берутся из профиля релевантности (раздел 5.1.1 ТЗ), а не из констант
-    # адаптера: охват — настройка компании, а не свойство кода площадки.
+    # адаптера: охват — настройка компании, а не свойство кода площадки. Профиль заводится
+    # здесь же, если его ещё нет (первый опрос из CLI на свежей базе): без него адаптер ушёл
+    # бы на площадку с двумя фразами из констант, а собранное осталось бы без отметок.
+    relevance_service.get_or_create_profile(db)
     adapter = get_adapter(
         source.adapter_key, search_keywords=relevance_service.search_queries(db)
     )
@@ -208,6 +241,38 @@ def poll_source(
         db.commit()
         return SourcePollResult(source.key, 0, 0, 0, 0)
 
+    created = 0
+    updated = 0
+    processed = 0
+    # Группы читаются один раз на весь опрос, а не на каждый тендер: их девять, а записей в
+    # выдаче — сотни.
+    groups = relevance_service.active_groups(db)
+    errors: list[PollError] = []
+    # Что уже сохранено из порций: адаптер после возврата отдаёт полную выдачу, и её
+    # остаток (меньше порции) и обновлённые по ходу записи досохраняются без повтора.
+    saved: dict[str, TenderSummary] = {}
+
+    def save_batch(summaries: list[TenderSummary]) -> None:
+        nonlocal created, updated, processed
+        for summary in summaries:
+            try:
+                # Точка сохранения на каждую запись: ошибка базы на одной строке откатывает
+                # только её, а не всю порцию, и не оставляет сессию в сломанном состоянии.
+                with db.begin_nested():
+                    is_new = _upsert_tender(db, source, summary, groups=groups)
+                if is_new:
+                    created += 1
+                else:
+                    updated += 1
+            except Exception as exc:  # noqa: BLE001 - ошибка одной записи не должна прервать остальные
+                errors.append(PollError(summary.external_id, str(exc)))
+            saved[summary.external_id] = summary
+            processed += 1
+        db.commit()
+        if on_progress is not None:
+            on_progress(processed, created, updated)
+
+    adapter.on_batch = save_batch
     try:
         outcome = adapter.list_new_tenders(since=source.last_polled_at)
     except Exception as exc:  # noqa: BLE001 - изоляция сбоя одного источника (раздел 5.1, 5.9 ТЗ)
@@ -230,22 +295,20 @@ def poll_source(
             subject=f"Опрос источника «{source.name}» завершился ошибкой",
             details=str(exc),
         )
-        return SourcePollResult(source.key, 0, 0, 0, 1)
+        return SourcePollResult(source.key, processed, created, updated, len(errors) + 1)
+    finally:
+        adapter.on_batch = None
 
-    created = 0
-    updated = 0
-    # Группы читаются один раз на весь опрос, а не на каждый тендер: их девять, а записей в
-    # выдаче — сотни.
-    groups = relevance_service.active_groups(db)
-    errors: list[PollError] = list(outcome.errors)
-    for summary in outcome.tenders:
-        try:
-            if _upsert_tender(db, source, summary, groups=groups):
-                created += 1
-            else:
-                updated += 1
-        except Exception as exc:  # noqa: BLE001 - ошибка одной записи не должна прервать остальные
-            errors.append(PollError(summary.external_id, str(exc)))
+    errors.extend(outcome.errors)
+    # Остаток выдачи: последняя неполная порция и записи, которые адаптер обновил уже после
+    # того, как отдал их (та же закупка встретилась по другому слову с новыми полями).
+    save_batch(
+        [
+            summary
+            for summary in outcome.tenders
+            if saved.get(summary.external_id) is not summary
+        ]
+    )
 
     source.last_polled_at = datetime.now(timezone.utc)
     db.add(source)
@@ -261,7 +324,7 @@ def poll_source(
         except Exception as exc:  # noqa: BLE001 - сбой модели не отменяет успешный сбор
             logger.warning(f"ИИ-отбор после опроса {source.key} не выполнен: {exc}")
 
-    details = f"Найдено {len(outcome.tenders)}, создано {created}, обновлено {updated}, ошибок {len(errors)}"
+    details = f"Найдено {processed}, создано {created}, обновлено {updated}, ошибок {len(errors)}"
     if errors:
         details += "; " + "; ".join(f"{e.external_id or '?'}: {e.message}" for e in errors[:10])
 
@@ -275,7 +338,7 @@ def poll_source(
         user_id=actor_id,
     )
     db.commit()
-    return SourcePollResult(source.key, len(outcome.tenders), created, updated, len(errors))
+    return SourcePollResult(source.key, processed, created, updated, len(errors))
 
 
 def poll_all_active_sources(
@@ -366,6 +429,8 @@ class TenderFilters:
     # подставляет эндпоинт из текущего пользователя, а не query-параметр: чужое избранное
     # через API читать нельзя.
     bookmarked_by_user_id: uuid.UUID | None = None
+    # Теги (замечание 17.09.2026): закупка проходит, если у неё есть хотя бы один из них.
+    tag_ids: list[uuid.UUID] = field(default_factory=list)
 
 
 # По каким столбцам разрешена сортировка (раздел 5.6 ТЗ — «по всем столбцам»). Явный
@@ -477,6 +542,12 @@ def _build_conditions(filters: TenderFilters) -> list:
             Tender.passed_relevance_filter.is_(None)
             | Tender.passed_relevance_filter.is_(True)
         )
+        # Второй слой того же отбора — модель (раздел 5.4 ТЗ). Ключевые слова слепы:
+        # «счетчик*» пропускает счётчики банкнот и посетителей, и без этого условия всё,
+        # что модель уже признала чужим, продолжало висеть в списке «по профилю». Прячется
+        # только явное «нет»; непроверенное (NULL) остаётся — это «не смотрели», а не
+        # «не подходит».
+        conditions.append(Tender.ai_relevant.is_not(False))
     if filters.only_ai_selected:
         conditions.append(Tender.ai_relevant.is_(True))
     if filters.hide_expired:
@@ -520,6 +591,14 @@ def _build_conditions(filters: TenderFilters) -> list:
                 select(TenderBookmark.tender_id).where(
                     TenderBookmark.user_id == filters.bookmarked_by_user_id
                 )
+            )
+        )
+    if filters.tag_ids:
+        from app.models.tender_tag import TenderTagLink
+
+        conditions.append(
+            Tender.id.in_(
+                select(TenderTagLink.tender_id).where(TenderTagLink.tag_id.in_(filters.tag_ids))
             )
         )
     if filters.okpd2_prefix:

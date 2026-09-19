@@ -131,7 +131,7 @@ export function RelevanceProfileSection({ isAdmin }: { isAdmin: boolean }) {
       const result = await api.post<AiCheckResult>("/relevance/ai-check?limit=50", {});
       setPending(result.pending);
       setNotice(
-        `Проверено моделью: ${result.checked}. Подобрано: ${result.relevant}, ` +
+        `Проверено моделью: ${result.checked}. Наша тематика: ${result.relevant}, ` +
           `отклонено: ${result.rejected}` +
           (result.failed ? `, сбоев: ${result.failed}` : "") +
           (result.pending ? `. Осталось разобрать: ${result.pending}.` : ". Архив разобран."),

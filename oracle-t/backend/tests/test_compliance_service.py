@@ -147,11 +147,44 @@ def _make_manufacturer(db_session, *, with_catalog: bool, is_mirtek: bool = Fals
     return manufacturer
 
 
-def _add_requirement(db_session, tender, text="Класс точности не хуже 1,0", criticality="critical"):
-    requirement = Requirement(tender_id=tender.id, text=text, criticality=criticality)
+def _add_requirement(
+    db_session, tender, text="Класс точности не хуже 1,0", criticality="critical", kind="product"
+):
+    requirement = Requirement(tender_id=tender.id, text=text, criticality=criticality, kind=kind)
     db_session.add(requirement)
     db_session.commit()
     return requirement
+
+
+def test_matrix_is_built_only_from_product_requirements(
+    db_session, admin_user: User, monkeypatch
+):
+    """Требования к работам и участнику в матрицу не идут (18.09.2026): сравнивать модель
+    счётчика с «группой допуска персонала» бессмысленно, а «нет данных» по ним обнуляло бы
+    процент. Закупка только на услуги — матрица не строится, и об этом сказано прямо."""
+
+    tender = _make_tender(db_session)
+    _add_requirement(db_session, tender, text="Гарантия на работы 12 месяцев", kind="service")
+    _add_requirement(db_session, tender, text="Группа допуска не ниже IV", kind="participant")
+    _make_manufacturer(db_session, with_catalog=True, is_mirtek=True)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        compliance_module,
+        "run_structured",
+        lambda db, **kwargs: calls.append("model") or ComplianceResult(verdicts=[]),
+    )
+
+    outcome = evaluate_tender(db_session, tender, actor=admin_user, use_manual_fallback=False)
+
+    assert outcome.manufacturers_processed == 0
+    assert calls == []
+    assert any("Матрица не строится" in message for message in outcome.messages)
+
+    # Появилось требование к товару — матрица считается по нему одному.
+    _add_requirement(db_session, tender, text="Класс точности не хуже 1,0", kind="product")
+    outcome = evaluate_tender(db_session, tender, actor=admin_user, use_manual_fallback=False)
+    assert outcome.requirements_total == 1
+    assert outcome.manufacturers_processed > 0
 
 
 def test_manufacturer_without_catalog_gets_no_data_without_calling_model(

@@ -3,7 +3,7 @@ import uuid
 from app.adapters.fgis import SiSearchResult
 from app.db.session import SessionLocal
 from app.models.manufacturer import Manufacturer
-from app.seed.manufacturers_data import MANUFACTURERS
+from app.seed.manufacturers_data import MANUFACTURERS, MANUFACTURERS_ADDED_2026_09, MARKET_SHARES_2024
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -96,7 +96,54 @@ def test_manufacturers_list_includes_seeded_13(client, admin_token):
     body = resp.json()
     legal_names = {m["legal_name"] for m in body}
     assert legal_names.issuperset(legal_name for legal_name, *_ in MANUFACTURERS)
+    assert legal_names.issuperset(legal_name for legal_name, *_ in MANUFACTURERS_ADDED_2026_09)
     assert sum(1 for m in body if m["is_mirtek"]) == 1
+
+
+def test_manufacturers_ordered_by_market_share(client, admin_token):
+    """Список — по убыванию доли рынка (замечание тестировщика 18.09.2026); у кого доля не
+    опубликована — после всех, кто с долей. Источник оценки хранится рядом с цифрой."""
+    resp = client.get("/manufacturers", headers=_auth_headers(admin_token))
+    body = resp.json()
+    with_share = [m for m in body if m["market_share_pct"] is not None]
+    shares = [m["market_share_pct"] for m in with_share]
+    assert shares == sorted(shares, reverse=True)
+    first_without = next(i for i, m in enumerate(body) if m["market_share_pct"] is None)
+    assert first_without == len(with_share)
+    by_name = {m["legal_name"]: m for m in body}
+    for legal_name, pct in MARKET_SHARES_2024.items():
+        assert by_name[legal_name]["market_share_pct"] == pct
+        assert by_name[legal_name]["market_share_source"]
+
+
+def test_manufacturer_create_and_update_market_share(client, admin_token):
+    name = f'ООО «Новый {uuid.uuid4().hex[:8]}»'
+    created = client.post(
+        "/manufacturers",
+        json={"legal_name": name, "brand_name": "Новый", "website": "https://example.com/"},
+        headers=_auth_headers(admin_token),
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["market_share_pct"] is None
+
+    patched = client.patch(
+        f"/manufacturers/{created.json()['id']}",
+        json={"market_share_pct": 99.5, "market_share_source": "тест"},
+        headers=_auth_headers(admin_token),
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["market_share_pct"] == 99.5
+    assert patched.json()["brand_name"] == "Новый"  # не присланное поле не тронуто
+
+    body = client.get("/manufacturers", headers=_auth_headers(admin_token)).json()
+    assert body[0]["legal_name"] == name
+
+    # Обычному пользователю запись запрещена.
+    user_token = _create_regular_user(client, admin_token)
+    assert client.post("/manufacturers", json={"legal_name": "x"}, headers=_auth_headers(user_token)).status_code == 403
+    assert client.patch(
+        f"/manufacturers/{created.json()['id']}", json={"brand_name": "y"}, headers=_auth_headers(user_token)
+    ).status_code == 403
 
 
 def test_si_types_search_requires_admin(client, admin_token):

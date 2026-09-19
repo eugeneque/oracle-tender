@@ -27,9 +27,20 @@ class UserOut(BaseModel):
     full_name: str
     role: UserRole
     is_active: bool
+    # Когда загружен аватар; `None` — аватара нет. Сами байты в ответ не входят: их отдаёт
+    # `GET /users/{id}/avatar`, а эта метка нужна интерфейсу, чтобы перечитать картинку.
+    avatar_updated_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
 
 class MeOut(UserOut):
-    pass
+    # Личный выбор модели ИИ; `None` — действует системная по умолчанию.
+    ai_provider: str | None = None
+
+
+class MeUpdate(BaseModel):
+    """Что пользователь меняет у себя сам (замечание 17.09.2026): только имя. Логин и
+    пароль сознательно не здесь — их меняет администратор в разделе «Пользователи»."""
+
+    full_name: str = Field(min_length=1, max_length=255)

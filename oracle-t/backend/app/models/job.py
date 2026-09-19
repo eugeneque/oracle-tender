@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -19,6 +19,16 @@ class JobKind(str, enum.Enum):
     # AI-оценка по профилю (раздел 5.5.1 ТЗ): три вызова модели подряд — два измерения и
     # текстовый блок «Резюме», плюс разбор девяти разделов «Дополнительно» перед ними.
     AI_PROFILE_SCORE = "ai_profile_score"
+    # Полный разбор закупки (18.09.2026): анализ документов → матрица соответствия (если в
+    # закупке есть товар) → AI-оценка по профилю, одной задачей. Три кнопки на три шага,
+    # где второй зависит от первого, а третий без первого считает вслепую, были лишним
+    # знанием для пользователя: он нажимал «Расчёт соответствия» раньше анализа и получал
+    # «нет требований». Итог каждого шага — в `payload`, ход — в `message`.
+    TENDER_FULL_REVIEW = "tender_full_review"
+    # Опрос площадок по кнопке «Синхронизировать» (17.09.2026). Не привязан к тендеру:
+    # `tender_id` пустой, набор площадок — в `payload["source_keys"]`. Опрос девяти площадок
+    # идёт 20–25 минут, и держать на нём HTTP-запрос из браузера нельзя так же, как на модели.
+    SOURCES_POLL = "sources_poll"
 
 
 class JobStatus(str, enum.Enum):
@@ -63,3 +73,6 @@ class BackgroundJob(Base):
     # (раздел 5.9 ТЗ — «повторные попытки при ошибке ИИ-анализа»).
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Входные данные и итог задачи, не привязанной к тендеру (опрос площадок): что
+    # опрашивать и что вышло по каждой площадке. У задач по тендеру пустое.
+    payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

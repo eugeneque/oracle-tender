@@ -1,57 +1,35 @@
-export function LogoMark({ size = 32 }: { size?: number }) {
+// Пиксельная сова — знак Sova Scanner. Исходник: Vector.svg (784×615), контур переведён
+// в `currentColor`, чтобы знак можно было красить классами текста; по умолчанию белый.
+const OWL_PATHS = [
+  "M102.672 34.7662H135.202V69.3292H33.5464V34.5629L0 35.7828V68.3126L33.5464 69.5325V103.892H102.672V136.422H33.5464V170.985H68.1093V205.548H169.765V240.314L102.672 239.094V272.641L170.375 273.047L237.874 273.657L239.094 307.203H169.765V341.766H271.217L272.437 374.703L305.984 374.906L339.53 375.313L340.75 408.859H204.328V443.422H169.765V408.656L136.219 409.876V442.406L169.765 443.625V477.985H67.906L69.1259 511.328L109.788 510.921C132.152 510.718 154.72 510.515 160.209 510.515H169.765V477.985H238.891V510.515H204.328V545.078L170.375 545.484L136.219 546.094V578.624L170.375 579.234L204.328 579.641V545.078H271.217L272.437 512.345L299.884 512.141C314.929 512.141 330.381 511.531 334.041 511.125L340.546 510.108V477.985H375.109V545.078H340.546V579.641H375.109V614.204H407.639L407.843 605.461C408.046 600.785 408.249 594.076 408.656 590.823C409.469 580.251 408.452 579.641 391.171 579.641H375.109V545.078H407.639V579.641H442.202V510.515H407.639V477.985H441.999L443.219 511.531H475.749L476.358 477.375L476.765 443.422H511.328V408.859H543.655L544.874 375.313L578.421 374.093V408.859H647.75L646.53 375.313L612.984 374.093V341.766H578.421V307.203H442.202V272.641H647.547V240.111H680.076V205.548H714.639V170.985H749.202V136.422H783.765V103.892L772.176 103.689C765.671 103.486 757.945 103.486 754.895 103.689L749.202 103.892V69.3292H680.076V34.7662H613.187L611.967 1.21991L578.421 0V34.7662H612.984V69.3292H647.75L646.53 102.469L612.577 102.672L578.421 103.079V69.3292H543.655L544.874 102.876L578.421 104.095V136.422H511.735L511.125 144.961C510.718 149.84 510.515 157.566 510.921 162.242L511.531 170.985H543.858V205.344L510.921 206.564L510.515 222.829L510.311 239.094L443.219 239.907L441.999 272.641H375.109V205.548H340.546V136.422H305.984V120.36C305.984 109.382 305.17 104.095 303.544 103.486C302.121 102.876 279.146 102.876 252.716 103.079L204.328 103.892V69.3292H169.765V34.9695L136.219 33.7497L136.015 17.4848V1.21991L102.672 0V34.7662ZM169.765 102.876H136.219L134.999 69.3292H169.765V102.876ZM442.202 341.766H407.639V307.203H442.202V341.766ZM271.421 477.985H238.891V443.422H271.421V477.985Z",
+  "M68.11 443.421H102.673V408.858H68.11V443.421Z",
+  "M476.765 545.077H511.531L510.312 511.53L476.765 510.311V545.077Z",
+];
+
+// Пропорции исходника: 784 × 615.
+const OWL_RATIO = 784 / 615;
+
+export function LogoMark({
+  size = 32,
+  className = "text-white",
+}: {
+  size?: number;
+  className?: string;
+}) {
   return (
     <svg
-      width={size}
+      width={Math.round(size * OWL_RATIO)}
       height={size}
-      viewBox="0 0 36 36"
+      viewBox="0 0 784 615"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
-      className="shrink-0"
+      className={`shrink-0 ${className}`}
+      aria-label="Sova Scanner"
+      role="img"
     >
-      {/* Каскад модульных блоков убывающего размера — асимметричный фрагментированный
-          знак с воздухом между частями, читается как разомкнутая "O" (ORACLE). */}
-      <rect x="12" y="3" width="15" height="13" rx="4" fill="url(#oracle-logo-gradient)" />
-      <rect
-        x="4"
-        y="12"
-        width="9"
-        height="9"
-        rx="3"
-        fill="url(#oracle-logo-gradient)"
-        fillOpacity="0.9"
-      />
-      <rect
-        x="14"
-        y="17"
-        width="6.5"
-        height="6.5"
-        rx="2.4"
-        fill="url(#oracle-logo-gradient)"
-        fillOpacity="0.75"
-      />
-      <rect x="5" y="23" width="9.5" height="9.5" rx="3" fill="url(#oracle-logo-gradient)" />
-      <rect
-        x="17.5"
-        y="25.5"
-        width="6.5"
-        height="6.5"
-        rx="2.4"
-        fill="url(#oracle-logo-gradient)"
-        fillOpacity="0.85"
-      />
-      <defs>
-        <linearGradient
-          id="oracle-logo-gradient"
-          x1="4"
-          y1="3"
-          x2="27"
-          y2="32"
-          gradientUnits="userSpaceOnUse"
-        >
-          <stop stopColor="#a5b4fc" />
-          <stop offset="1" stopColor="#6d28d9" />
-        </linearGradient>
-      </defs>
+      {OWL_PATHS.map((d) => (
+        <path key={d.slice(0, 24)} d={d} fill="currentColor" />
+      ))}
     </svg>
   );
 }
@@ -67,12 +45,12 @@ export function Logo({
     <div className="flex items-center gap-2.5">
       <LogoMark size={size} />
       {withWordmark && (
-        <span className="flex items-baseline gap-1 leading-none tracking-tight">
+        <span className="flex items-baseline gap-1.5 leading-none tracking-tight">
           <span className="font-bold text-white" style={{ fontSize: size * 0.52 }}>
-            ORACLE
+            Sova
           </span>
-          <span className="font-semibold text-indigo-400" style={{ fontSize: size * 0.36 }}>
-            (T)
+          <span className="font-semibold text-indigo-400" style={{ fontSize: size * 0.52 }}>
+            Scanner
           </span>
         </span>
       )}

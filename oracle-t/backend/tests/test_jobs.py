@@ -219,5 +219,106 @@ def test_analyze_endpoint_returns_job_without_waiting(client, admin_token, monke
         db.close()
 
 
+def test_full_review_runs_steps_and_skips_matrix_without_product_requirements(
+    db_session, admin_user, monkeypatch, no_background_execution
+):
+    """Полный разбор (18.09.2026): анализ → матрица → оценка одной задачей. У закупки на
+    услуги требований к товару нет — матрица пропускается, а не падает с «сначала выполните
+    анализ»; итог каждого шага лежит в `payload`, ход шагов — в `message`."""
+
+    from app.models.analysis import Requirement
+    from app.services import job_runner
+
+    tender = _tender(db_session)
+    job = jobs.enqueue(
+        db_session, kind=JobKind.TENDER_FULL_REVIEW, tender=tender, actor=admin_user
+    )
+    progress: list[str] = []
+    original_commit = db_session.commit
+
+    def commit_and_record():
+        original_commit()
+        if job.message and job.message.startswith("Шаг"):
+            progress.append(job.message)
+
+    def fake_analysis(db, t, actor):
+        db.add(Requirement(tender_id=t.id, text="Гарантия на работы", kind="service"))
+        db.flush()
+        return "требований сохранено: 1 (к услугам: 1)"
+
+    evaluation_calls: list[str] = []
+    monkeypatch.setattr(job_runner, "_run_analysis", fake_analysis)
+    monkeypatch.setattr(
+        job_runner, "_run_evaluation", lambda db, t, actor: evaluation_calls.append("x") or "?"
+    )
+    monkeypatch.setattr(job_runner, "_run_profile_score", lambda db, t, actor: "итоговая оценка: 40%")
+    monkeypatch.setattr(jobs, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(db_session, "close", lambda: None)
+    monkeypatch.setattr(db_session, "commit", commit_and_record)
+
+    jobs.run_job(job.id)
+
+    db_session.refresh(job)
+    assert job.status == JobStatus.SUCCESS.value
+    assert evaluation_calls == [], "без требований к товару матрица не считается"
+    assert job.payload["analysis"] == "требований сохранено: 1 (к услугам: 1)"
+    assert job.payload["evaluation"].startswith("пропущен")
+    assert job.payload["score"] == "итоговая оценка: 40%"
+    assert "Анализ:" in job.message and "Оценка: итоговая оценка: 40%" in job.message
+    assert progress[:1] == ["Шаг 1 из 3: анализ документов…"]
+    assert "Шаг 3 из 3: AI-оценка по профилю…" in progress
+
+
+def test_full_review_fails_only_when_both_analysis_and_score_fail(
+    db_session, admin_user, monkeypatch, no_background_execution
+):
+    from app.services import job_runner
+
+    tender = _tender(db_session)
+    job = jobs.enqueue(
+        db_session, kind=JobKind.TENDER_FULL_REVIEW, tender=tender, actor=admin_user
+    )
+
+    def boom(db, t, actor):
+        raise RuntimeError("модель недоступна")
+
+    monkeypatch.setattr(job_runner, "_run_analysis", boom)
+    monkeypatch.setattr(job_runner, "_run_profile_score", boom)
+    monkeypatch.setattr(jobs, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(db_session, "close", lambda: None)
+
+    jobs.run_job(job.id)
+
+    db_session.refresh(job)
+    assert job.status == JobStatus.ERROR.value
+    assert "модель недоступна" in job.message
+
+
 def test_jobs_endpoint_requires_auth(client):
     assert client.get("/jobs").status_code == 401
+
+
+def test_enqueue_standalone_dedupes_running_poll(db_session, admin_user, monkeypatch):
+    """Повторное нажатие «Синхронизировать», пока опрос идёт, возвращает ту же задачу:
+    второй опрос тех же площадок поверх первого только удвоил бы нагрузку и ожидание."""
+
+    monkeypatch.setattr(jobs, "_submit_poll", lambda job_id: None)
+
+    first = jobs.enqueue_standalone(
+        db_session, kind=JobKind.SOURCES_POLL, payload={"source_keys": ["eis"]}, actor=admin_user
+    )
+    second = jobs.enqueue_standalone(
+        db_session, kind=JobKind.SOURCES_POLL, payload={"source_keys": ["zakazrf"]}, actor=admin_user
+    )
+    assert second.id == first.id
+    assert first.tender_id is None
+    assert first.payload == {"source_keys": ["eis"]}
+    assert jobs.latest_standalone(db_session, JobKind.SOURCES_POLL).id == first.id
+
+    # Завершённая задача больше не «занимает» очередь — следующий вызов создаёт новую.
+    first.status = JobStatus.SUCCESS.value
+    db_session.flush()
+    third = jobs.enqueue_standalone(
+        db_session, kind=JobKind.SOURCES_POLL, payload={"source_keys": ["eis"]}, actor=admin_user
+    )
+    assert third.id != first.id

@@ -100,6 +100,15 @@ class CompanyProfile(Base):
     # заказчика вернуться к форме второй раз — лишняя работа для него.
     bank_requisites: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     letterhead_file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Синхронизация с rusprofile.ru (18.09.2026). Номер карточки запоминается после первого
+    # успешного поиска по ИНН, чтобы дальше не искать; `rusprofile_data` — досье целиком
+    # (руководитель, численность, финансы, учредители, сводка по закупкам), каким его отдал
+    # сайт: интерфейс и промпт AI-оценки читают его отсюда, не обращаясь к сайту повторно.
+    rusprofile_card_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    rusprofile_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    rusprofile_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

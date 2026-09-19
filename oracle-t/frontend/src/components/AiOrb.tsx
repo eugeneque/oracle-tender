@@ -8,11 +8,22 @@
  *
  * `prefers-reduced-motion` останавливает вращение: непрерывное движение на экране —
  * известная проблема для части пользователей, и системная настройка на этот счёт есть.
+ *
+ * `variant` — гамма под активного провайдера: розово-голубая у YandexGPT, оранжевая у
+ * Claude (см. `.ai-orb--claude` в index.css). Меняются только цвета пятен, не геометрия.
  */
-export function AiOrb({ size = 44, busy = false }: { size?: number; busy?: boolean }) {
+export function AiOrb({
+  size = 44,
+  busy = false,
+  variant = "yandex",
+}: {
+  size?: number;
+  busy?: boolean;
+  variant?: "yandex" | "claude";
+}) {
   return (
     <div
-      className="ai-orb"
+      className={variant === "claude" ? "ai-orb ai-orb--claude" : "ai-orb"}
       style={{ width: size, height: size }}
       data-busy={busy ? "true" : undefined}
       aria-hidden="true"

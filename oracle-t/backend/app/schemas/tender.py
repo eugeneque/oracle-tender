@@ -14,6 +14,14 @@ class TenderSourceOut(BaseModel):
     name: str
 
 
+class TenderTagOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    color: str
+
+
 class TenderOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -53,6 +61,9 @@ class TenderOut(BaseModel):
     # `attach_analysis_fields` одним запросом на выдачу.
     ai_score: Decimal | None = None
     ai_verdict: str | None = None
+    # Решение ИИ «смотреть / не смотреть» по трём измерениям (замечание 17.09.2026):
+    # `True`/`False` — вынесено, `None` — не выносилось. Знак в списке, доске и таблице.
+    ai_decision: bool | None = None
     # Процент победителя МИРТЕК (этап 6). Не колонка таблицы, а результат подзапроса в
     # `list_tenders` — в списке он нужен на каждой карточке, отдельным запросом на тендер
     # это дало бы N+1.
@@ -60,6 +71,9 @@ class TenderOut(BaseModel):
     requirements_count: int = 0
     # В избранном ли у текущего пользователя (замечание тестировщика 16.09.2026).
     is_bookmarked: bool = False
+    # Теги закупки (замечание 17.09.2026) — общие для команды, подставляются
+    # `attach_analysis_fields` одним запросом на выдачу.
+    tags: list[TenderTagOut] = Field(default_factory=list)
     # Решение модели «это правда наша закупка» (раздел 5.4 ТЗ). `None` — не проверяли;
     # это не то же самое, что `false`, и интерфейс показывает их по-разному.
     ai_relevant: bool | None = None
@@ -100,6 +114,7 @@ class RequirementOut(BaseModel):
     text: str
     normalized_text: str | None
     criticality: str
+    kind: str
     category: str | None
     verified_by_user: bool
     created_at: datetime
@@ -256,26 +271,6 @@ class TenderCardOut(BaseModel):
     tables: dict[str, TenderCardTable]
     tab_urls: dict[str, str]
     fetched_at: datetime | None
-    insights: dict | None = None
-
-
-class InsightItemOut(BaseModel):
-    title: str
-    detail: str
-    severity: str
-    evidence: str | None = None
-
-
-class TenderInsightsOut(BaseModel):
-    """Разбор карточки моделью: риски, пробелы в данных и восстановленные значения."""
-
-    summary: str
-    risks: list[InsightItemOut]
-    data_gaps: list[InsightItemOut]
-    filled_fields: list[dict]
-    checklist: list[str]
-    generated_at: str | None = None
-    applied_fields: list[str] = []
 
 
 class StageUpdate(BaseModel):
@@ -359,6 +354,7 @@ class AiProfileScoreOut(BaseModel):
     summary: str | None
     verdict: str | None
     verdict_label: str | None
+    decision: bool | None = None
     weak_points: list[WeakPointOut]
     recommended_strategy: RecommendedStrategyOut | None
     similar_tender_ids: list[uuid.UUID]
@@ -371,23 +367,30 @@ class AiProfileScoreOut(BaseModel):
 
 class LicenseItem(BaseModel):
     """Допуск или лицензия компании. Поля необязательные: у СРО, лицензии ФСБ и сертификата
-    ISO набор реквизитов разный, и требовать все от каждого — заставлять заполнять прочерки."""
+    ISO набор реквизитов разный, и требовать все от каждого — заставлять заполнять прочерки.
+
+    `source` — откуда запись: `rusprofile` ставит синхронизация, и такие записи она же и
+    обновляет; записи без источника (ручные) она не трогает."""
 
     name: str
     number: str | None = None
     issued_at: str | None = None
     valid_until: str | None = None
     issuer: str | None = None
+    source: str | None = None
 
 
 class PastProjectItem(BaseModel):
-    """Реализованный проект — вход измерения Task (раздел 5.5.1 ТЗ)."""
+    """Реализованный проект — вход измерения Task (раздел 5.5.1 ТЗ). `source` — как у
+    `LicenseItem`: проекты из выигранных закупок rusprofile помечены и обновляются
+    синхронизацией, ручные остаются как есть."""
 
     work_type: str
     customer: str | None = None
     volume: str | None = None
     year: int | None = None
     description: str | None = None
+    source: str | None = None
 
 
 class CompanyProfileOut(BaseModel):
@@ -413,6 +416,11 @@ class CompanyProfileOut(BaseModel):
     past_projects: list[PastProjectItem]
     bank_requisites: dict | None
     letterhead_file_path: str | None
+    # Синхронизация с rusprofile.ru (18.09.2026): номер карточки, досье целиком и когда
+    # обновлялось. Досье показывается в раскрытой строке компании и уходит в промпт оценки.
+    rusprofile_card_id: str | None = None
+    rusprofile_data: dict | None = None
+    rusprofile_synced_at: datetime | None = None
     updated_at: datetime
     # Хватает ли профиля для расчёта Task/Competencies — считает бэкенд, чтобы правило
     # «чем именно профиль считается заполненным» жило в одном месте.
@@ -477,6 +485,20 @@ class SimilarTenderOut(BaseModel):
     price: Decimal | None
     publish_date: date | None
     similarity_score: Decimal
+
+
+class TenderTagIn(BaseModel):
+    """Создание и правка тега. Цвет — ключ палитры (`TAG_COLORS`), проверяется сервисом."""
+
+    name: str = Field(min_length=1, max_length=60)
+    color: str | None = Field(default=None, max_length=20)
+
+
+class TenderTagsUpdate(BaseModel):
+    """Полный набор тегов закупки: интерфейс отправляет то, что должно остаться, а сервер
+    сам считает, что добавить и что снять, — так две быстрые правки не разойдутся."""
+
+    tag_ids: list[uuid.UUID]
 
 
 class TenderBookmarkIn(BaseModel):

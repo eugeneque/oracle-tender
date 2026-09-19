@@ -12,7 +12,30 @@ class ManufacturerOut(BaseModel):
     brand_name: str | None
     website: str | None
     is_mirtek: bool
+    # Доля рынка, % и источник оценки — по доле сортируется список (замечание тестировщика
+    # 18.09.2026). `None` — доля не опубликована, не ноль.
+    market_share_pct: float | None = None
+    market_share_source: str | None = None
     created_at: datetime
+
+
+class ManufacturerCreate(BaseModel):
+    legal_name: str = Field(min_length=1, max_length=500)
+    brand_name: str | None = Field(default=None, max_length=255)
+    website: str | None = Field(default=None, max_length=500)
+    market_share_pct: float | None = Field(default=None, ge=0, le=100)
+    market_share_source: str | None = None
+
+
+class ManufacturerUpdate(BaseModel):
+    """Поле, не присланное в запросе, не меняется; `market_share_pct: null` явно снимает
+    долю (та же семантика, что и у `SiTypeUpdate`)."""
+
+    legal_name: str | None = Field(default=None, min_length=1, max_length=500)
+    brand_name: str | None = Field(default=None, max_length=255)
+    website: str | None = Field(default=None, max_length=500)
+    market_share_pct: float | None = Field(default=None, ge=0, le=100)
+    market_share_source: str | None = None
 
 
 class SiTypeOut(BaseModel):
@@ -90,6 +113,12 @@ class ProductOut(BaseModel):
     review_status: str = "ok"
     review_reason: str | None = None
     last_seen_at: datetime | None = None
+    # Форм-фактор, выведенный из характеристик и наименования (см.
+    # `services/product_form_factor.py`): фазность 1/3 и способы установки
+    # (`split` / `din` / `panel`, возможно несколько). Заполняется в списке моделей
+    # производителя; пустые значения — «не определено».
+    phases: int | None = None
+    mountings: list[str] = []
     created_at: datetime
     updated_at: datetime
 

@@ -255,7 +255,108 @@ def snapshot(profile: CompanyProfile) -> dict:
         "licenses": profile.licenses or [],
         "past_projects": profile.past_projects or [],
         "field_sources": profile.field_sources or {},
+        # Досье rusprofile — той же версии, что видела модель: без него строки
+        # `rusprofile:*` в evidence указывали бы на данные следующей синхронизации.
+        "rusprofile_synced_at": (
+            profile.rusprofile_synced_at.isoformat() if profile.rusprofile_synced_at else None
+        ),
+        "rusprofile_facts": [text for _key, text in rusprofile_fields(profile)],
     }
+
+
+def rusprofile_fields(profile: CompanyProfile) -> list[tuple[str, str]]:
+    """Факты из досье rusprofile (18.09.2026) в том же формате «ключ → текст».
+
+    Измерение Competencies сверяет с ними требования к участнику, которые из реквизитов не
+    видны: «выручка за год не менее N», «численность не менее N», «статус МСП», «отсутствие
+    исполнительных производств». Лицензии и проекты сюда не входят — они уже лежат в
+    `licenses` и `past_projects` профиля.
+    """
+
+    data = profile.rusprofile_data or {}
+    if not data:
+        return []
+    fields: list[tuple[str, str]] = []
+    if data.get("status"):
+        fields.append(("rusprofile:status", f"Статус по ЕГРЮЛ (rusprofile): {data['status']}"))
+    if data.get("ceo_name"):
+        position = data.get("ceo_position") or "руководитель"
+        since = f" ({data['ceo_since']})" if data.get("ceo_since") else ""
+        fields.append(("rusprofile:ceo", f"Руководитель: {position} {data['ceo_name']}{since}"))
+    if data.get("headcount"):
+        year = f" в {data['headcount_year']} году" if data.get("headcount_year") else ""
+        fields.append(
+            ("rusprofile:headcount", f"Среднесписочная численность: {data['headcount']} чел.{year}")
+        )
+    finance = data.get("finance") or {}
+    if finance.get("revenue"):
+        year = f" за {finance['year']} год" if finance.get("year") else ""
+        change = f" ({finance['revenue_change']} к предыдущему году)" if finance.get("revenue_change") else ""
+        fields.append(("rusprofile:revenue", f"Выручка{year}: {finance['revenue']}{change}"))
+    if finance.get("profit"):
+        fields.append(("rusprofile:profit", f"Прибыль: {finance['profit']}"))
+    for label, value in (finance.get("ratings") or {}).items():
+        if value:
+            fields.append((f"rusprofile:rating:{label}", f"{label} (оценка rusprofile): {value}"))
+    if data.get("authorized_capital"):
+        fields.append(("rusprofile:capital", f"Уставный капитал: {data['authorized_capital']}"))
+    if data.get("msp_status"):
+        fields.append(("rusprofile:msp", f"Реестр МСП: {data['msp_status']}"))
+    if data.get("main_okved_code") or data.get("main_okved_name"):
+        count = f", всего видов деятельности: {data['okved_count']}" if data.get("okved_count") else ""
+        fields.append(
+            (
+                "rusprofile:okved",
+                f"Основной ОКВЭД: {data.get('main_okved_code') or ''} "
+                f"{data.get('main_okved_name') or ''}{count}".strip(),
+            )
+        )
+    founders = data.get("founders") or []
+    if founders:
+        names = ", ".join(
+            f"{item.get('name')}" + (f" (доля {item['share']})" if item.get("share") else "")
+            for item in founders
+            if item.get("name")
+        )
+        if names:
+            fields.append(("rusprofile:founders", f"Учредители: {names}"))
+    purchases = data.get("purchases") or {}
+    summary = data.get("purchases_summary") or {}
+    if purchases.get("fetched") or summary.get("purchases_count"):
+        parts = []
+        if summary.get("purchases_count"):
+            parts.append(f"участий в госзакупках {summary['purchases_count']}")
+        if summary.get("purchases_sum"):
+            parts.append(f"на {summary['purchases_sum']}")
+        if summary.get("contracts_count"):
+            parts.append(f"контрактов заключено {summary['contracts_count']}")
+        if summary.get("contracts_sum"):
+            parts.append(f"на {summary['contracts_sum']}")
+        if purchases.get("fetched"):
+            parts.append(
+                f"по данным сайта: побед {purchases.get('wins', 0)}, проигрышей {purchases.get('losses', 0)}"
+            )
+        fields.append(("rusprofile:purchases", "Госзакупки (rusprofile): " + ", ".join(parts)))
+    for item in (summary.get("top_customers") or [])[:5]:
+        if item.get("name"):
+            detail = ", ".join(
+                p for p in (
+                    f"{item['purchases']} закуп." if item.get("purchases") else None,
+                    item.get("sum"),
+                ) if p
+            )
+            fields.append(
+                ("rusprofile:customer", f"Крупный заказчик: {item['name']}" + (f" ({detail})" if detail else ""))
+            )
+    if data.get("enforcement"):
+        fields.append(("rusprofile:enforcement", f"Исполнительные производства: {data['enforcement'][:300]}"))
+    if data.get("inspections"):
+        fields.append(("rusprofile:inspections", f"Проверки: {data['inspections'][:300]}"))
+    if data.get("arbitration"):
+        fields.append(("rusprofile:arbitration", f"Арбитраж: {data['arbitration'][:300]}"))
+    if data.get("branches"):
+        fields.append(("rusprofile:branches", f"Филиалы: {data['branches'][:200]}"))
+    return fields
 
 
 def profile_fields(profile: CompanyProfile) -> list[tuple[str, str]]:
@@ -305,6 +406,9 @@ def profile_fields(profile: CompanyProfile) -> list[tuple[str, str]]:
             if project.get(key)
         ]
         fields.append((f"project:{index}", "Реализованный проект: " + ", ".join(parts)))
+    # Досье rusprofile — после допусков и проектов: это дополнительные факты о компании,
+    # а не замена того, что заполнено в профиле.
+    fields.extend(rusprofile_fields(profile))
     return fields
 
 

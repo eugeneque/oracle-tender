@@ -16,6 +16,7 @@ from app.api.endpoints import (
     notifications,
     relevance,
     sources,
+    tags,
     tenders,
     upper_software,
     registry_records,
@@ -28,6 +29,7 @@ api_router.include_router(auth.router)
 api_router.include_router(users.router)
 api_router.include_router(sources.router)
 api_router.include_router(tenders.router)
+api_router.include_router(tags.router)
 api_router.include_router(integrations.router)
 api_router.include_router(manufacturers.router)
 api_router.include_router(dictionaries.router)

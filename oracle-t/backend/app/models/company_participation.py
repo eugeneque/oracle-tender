@@ -60,12 +60,17 @@ class ParticipationSource(str, enum.Enum):
     # Проигрыш, выведенный из пайплайна: заявку подавали (наша отметка), контракт достался
     # другому (факт из ЕИС). Отдельный источник, потому что это не выгрузка и не ручной ввод.
     EIS_RESULTS = "eis_results"
+    # Раздел «Госзакупки» на rusprofile.ru под учётной записью заказчика (18.09.2026):
+    # единственный источник, где рядом с победами видны и закупки, которые компания не
+    # выиграла, — поэтому в `WINS_ONLY_SOURCES` его нет.
+    RUSPROFILE = "rusprofile"
     MANUAL = "manual"
 
 
 SOURCE_LABELS: dict[str, str] = {
     ParticipationSource.EIS_CONTRACTS.value: "Реестр контрактов ЕИС",
     ParticipationSource.EIS_RESULTS.value: "Итоги закупок ЕИС",
+    ParticipationSource.RUSPROFILE.value: "Rusprofile · Госзакупки",
     ParticipationSource.MANUAL.value: "Вручную",
 }
 

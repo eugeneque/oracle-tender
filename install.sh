@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-#  ORACLE-T · установщик
+#  Sova Scanner · установщик
 #
 #  Ставит систему на чистую машину целиком: системные пакеты, PostgreSQL, Python-окружение
 #  backend с браузером Playwright, сборку frontend и — в серверном режиме — службы systemd
@@ -226,7 +226,7 @@ confirm() {
 
 usage() {
   cat <<'USAGE'
-ORACLE-T — установщик.
+Sova Scanner — установщик.
 
   ./install.sh [ключи]
 
@@ -800,7 +800,7 @@ step_frontend() {
 write_systemd_unit() {
   $SUDO tee "/etc/systemd/system/$SERVICE_NAME.service" >/dev/null <<UNIT
 [Unit]
-Description=ORACLE-T backend (FastAPI)
+Description=Sova Scanner backend (FastAPI)
 Documentation=file://$APP_DIR/README.md
 After=network-online.target postgresql.service
 Wants=network-online.target
@@ -840,7 +840,7 @@ write_nginx_site() {
   $SUDO mkdir -p "$conf_dir"
 
   $SUDO tee "$conf_dir/$NGINX_SITE.conf" >/dev/null <<SITE
-# ORACLE-T. Статика и API на одном origin: фронтенд ходит в /api/ относительным путём.
+# Sova Scanner. Статика и API на одном origin: фронтенд ходит в /api/ относительным путём.
 server {
     listen $HTTP_PORT default_server;
     server_name _;
@@ -1101,7 +1101,7 @@ summary() {
     printf '\n'
     return 0
   fi
-  printf '  %s%s ORACLE-T установлен%s\n' "$C_GREEN$C_B" "$G_OK" "$C_OFF"
+  printf '  %s%s Sova Scanner установлен%s\n' "$C_GREEN$C_B" "$G_OK" "$C_OFF"
   rule
   printf '\n'
 

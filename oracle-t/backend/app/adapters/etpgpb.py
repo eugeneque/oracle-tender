@@ -201,7 +201,7 @@ class EtpgpbAdapter(SourceAdapter):
                         for item in items:
                             summary = self._parse_item(item, outcome.errors)
                             if summary is not None:
-                                seen[summary.external_id] = summary
+                                self._collect(seen, summary)
 
                         total_pages = (payload.get("meta") or {}).get("total_pages", page)
                         if page >= total_pages:

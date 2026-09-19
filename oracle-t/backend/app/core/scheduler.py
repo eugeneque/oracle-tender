@@ -25,7 +25,7 @@ from app.db.session import SessionLocal
 from app.services.availability_service import ping_all_sources
 from app.services.log_service import purge_old_entries
 from app.services.notification_service import notify_deadlines_soon
-from app.services.tender_service import poll_all_active_sources
+from app.services.tender_service import check_pending_ai_relevance, poll_all_active_sources
 
 _scheduler: BackgroundScheduler | None = None
 
@@ -35,6 +35,7 @@ def _run_poll_job() -> None:
     try:
         results = poll_all_active_sources(db)
         logger.info(f"Плановый опрос источников завершён: {results}")
+        check_pending_ai_relevance(db)
     finally:
         db.close()
     _run_gaps_job()

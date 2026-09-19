@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Callable
 
 
 @dataclass
@@ -74,10 +75,41 @@ class PollOutcome:
     errors: list[PollError] = field(default_factory=list)
 
 
+# Сколько записей адаптер накапливает, прежде чем отдать их сервису опроса на сохранение
+# (правка 17.09.2026: «пусть передаёт по 100 тендеров, по очереди»). Раньше адаптер
+# возвращал всю выдачу разом — у ЭТП ГПБ это 11 000 записей и несколько минут, — и всё это
+# время в базе не появлялось ничего, а список в интерфейсе ждал конца опроса.
+POLL_BATCH_SIZE = 100
+
+
 class SourceAdapter(ABC):
     """Базовый интерфейс адаптера источника (раздел 5.1 ТЗ)."""
 
     source_key: str
+
+    # Получатель порций (`poll_source` ставит его перед опросом). `None` — порции никому не
+    # нужны, и адаптер просто возвращает всё в `PollOutcome`, как раньше: так работают CLI,
+    # тесты адаптеров и любой код, который зовёт `list_new_tenders` напрямую.
+    on_batch: Callable[[list[TenderSummary]], None] | None = None
+    batch_size: int = POLL_BATCH_SIZE
+    _pending: list[TenderSummary]
+
+    def _collect(self, seen: dict[str, TenderSummary], summary: TenderSummary) -> None:
+        """Кладёт запись в `seen` (дедупликация внутри выдачи) и, если подписчик есть, — в
+        очередную порцию; полная порция тут же отдаётся ему. Остаток меньше порции адаптер
+        не сбрасывает сам: `poll_source` дочитывает его из `outcome.tenders` после
+        возврата, сверяясь с тем, что уже получил."""
+
+        seen[summary.external_id] = summary
+        if self.on_batch is None:
+            return
+        pending = getattr(self, "_pending", None)
+        if pending is None:
+            pending = self._pending = []
+        pending.append(summary)
+        if len(pending) >= self.batch_size:
+            self._pending = []
+            self.on_batch(pending)
 
     @abstractmethod
     def list_new_tenders(self, since: datetime | None) -> PollOutcome:

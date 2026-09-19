@@ -13,6 +13,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from sqlalchemy import select
 
 from app.models.search_profile import SearchKeywordGroup
 from app.models.source import Source
@@ -53,6 +54,11 @@ def _group(**overrides) -> SearchKeywordGroup:
         # Слово без звёздочки всё равно ловит словоформы: требовать `*` в каждом ключе —
         # лишняя обязанность для того, кто их пишет.
         ("Работы по поверке приборов", "поверка", True),
+        # Но общая основа — ещё не то же слово: без ограничения по длине ключ «миртек»
+        # ловил заказчика «МИРТЕЛЕКОМ», и в список приходили муфты и грозозащита.
+        ("Счетчики Миртек для АСКУЭ", "миртек", True),
+        ("Заказчик МИРТЕЛЕКОМ, поставка оптических муфт", "миртек", False),
+        ("Поверка счетчиками", "счетчик", True),
         # Близость: слова могут стоять в любом порядке, важен только разброс.
         ("Поверка счетчиков электрической энергии", "(поверк* счетчик*)~3", True),
         ("Счетчиков поверка", "(поверк* счетчик*)~3", True),
@@ -167,10 +173,31 @@ def test_all_nine_groups_are_seeded(seeded_groups):
         ("Замена газовых счетчиков в жилом фонде", False),
         ("Техническое обслуживание пожарной сигнализации", False),
         ("Поставка канцелярских товаров", False),
+        # Находки тестировщицы 19.09.2026: заказчик с похожим названием и работы, у которых
+        # с приборами учёта общего только слово «приборы».
+        ("RFI на поставку устройств грозозащиты МИРТЕЛЕКОМ", False),
+        ("Работы по замене осветительных приборов в терминале «А»", False),
+        ("Бумага для заметок, стикеры, этикетки; Бумага для офисной техники", False),
     ],
 )
 def test_real_profile_decisions(seeded_groups, title, expected):
     assert evaluate(tokenize(title), seeded_groups).passed is expected
+
+
+@pytest.mark.parametrize(
+    ("title", "okpd2_code", "expected"),
+    [
+        # Код самого товара проходит и без слов: заголовок бывает «Поставка оборудования».
+        ("Поставка оборудования", "26.51.63.130", True),
+        # Коды отраслей — нет: по 43.21.10 приходила замена светильников в аэропорту, по
+        # 71.12.40 пришла бы поверка манометров, по 26.51.63.120 — счётчики воды.
+        ("Работы по замене осветительных приборов в терминале «А»", "43.21.10.140", False),
+        ("Оказание услуг по поверке средств измерений", "71.12.40.120", False),
+        ("Поставка расходомеров", "26.51.63.120", False),
+    ],
+)
+def test_okpd2_alone_passes_only_the_product_code(seeded_groups, title, okpd2_code, expected):
+    assert evaluate(tokenize(title), seeded_groups, okpd2_code=okpd2_code).passed is expected
 
 
 def test_search_queries_cover_more_than_supply(db_session, seeded_groups):
@@ -262,3 +289,96 @@ def test_rejected_tender_is_hidden_but_not_deleted(db_session, seeded_groups):
         db_session, limit=10, offset=0, filters=TenderFilters(only_profile_relevant=False, search=title)
     )
     assert [item.id for item in visible] == [tender.id]
+
+
+def test_bootstrap_creates_profile_and_marks_unprocessed(db_session):
+    """Профиль появляется при старте, а не при первом заходе в настройки.
+
+    Пока он создавался лениво, на сервере без визита в настройки отбор не работал вовсе:
+    каждый тендер оставался с NULL, а список показывает NULL как «прошёл» — так в выдаче
+    «по профилю» оказались бумага для заметок и грозозащита.
+    """
+
+    from app.models.search_profile import SearchProfile
+
+    source = Source(
+        key=f"relevance_{uuid.uuid4().hex[:8]}",
+        name="Источник для теста релевантности",
+        url="https://example.test",
+        type="etp_federal_commercial",
+    )
+    db_session.add(source)
+    db_session.flush()
+    junk = Tender(
+        source_id=source.id,
+        external_id=f"REL-{uuid.uuid4().hex[:6]}",
+        title=f"Бумага для заметок, стикеры, этикетки {uuid.uuid4().hex[:6]}",
+        currency="RUB",
+    )
+    ours = Tender(
+        source_id=source.id,
+        external_id=f"REL-{uuid.uuid4().hex[:6]}",
+        title=f"Поставка счетчиков электрической энергии {uuid.uuid4().hex[:6]}",
+        currency="RUB",
+    )
+    db_session.add_all([junk, ours])
+    db_session.commit()
+
+    result = relevance_service.bootstrap(db_session)
+
+    assert db_session.scalar(select(SearchProfile)) is not None
+    # Повторный запуск ничего не пересчитывает: отметки уже стоят.
+    assert relevance_service.bootstrap(db_session)["processed"] == 0
+    assert result["processed"] >= 2
+    db_session.refresh(junk)
+    db_session.refresh(ours)
+    assert junk.passed_relevance_filter is False
+    assert ours.passed_relevance_filter is True
+
+
+def test_model_rejection_hides_tender_from_profile_list(db_session, seeded_groups):
+    """Второй слой отбора: явное «нет» модели прячет закупку из списка «по профилю».
+
+    Ключевые слова слепы — «счетчик*» пропускает счётчики банкнот. Непроверенное (NULL)
+    при этом остаётся видимым: «не смотрели» — не «не подходит».
+    """
+
+    from app.services.tender_service import TenderFilters, list_tenders
+
+    source = Source(
+        key=f"relevance_{uuid.uuid4().hex[:8]}",
+        name="Источник для теста релевантности",
+        url="https://example.test",
+        type="etp_federal_commercial",
+    )
+    db_session.add(source)
+    db_session.flush()
+    marker = uuid.uuid4().hex[:6]
+    rejected = Tender(
+        source_id=source.id,
+        external_id=f"REL-{uuid.uuid4().hex[:6]}",
+        title=f"Поставка счетчиков банкнот {marker}",
+        currency="RUB",
+        passed_relevance_filter=True,
+        ai_relevant=False,
+    )
+    unchecked = Tender(
+        source_id=source.id,
+        external_id=f"REL-{uuid.uuid4().hex[:6]}",
+        title=f"Поставка счетчиков электроэнергии {marker}",
+        currency="RUB",
+        passed_relevance_filter=True,
+        ai_relevant=None,
+    )
+    db_session.add_all([rejected, unchecked])
+    db_session.commit()
+
+    by_profile = list_tenders(
+        db_session, limit=10, offset=0, filters=TenderFilters(only_profile_relevant=True, search=marker)
+    )
+    assert [item.id for item in by_profile] == [unchecked.id]
+
+    everything = list_tenders(
+        db_session, limit=10, offset=0, filters=TenderFilters(only_profile_relevant=False, search=marker)
+    )
+    assert {item.id for item in everything} == {rejected.id, unchecked.id}

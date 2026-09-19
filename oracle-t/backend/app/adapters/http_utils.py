@@ -17,7 +17,7 @@ from loguru import logger
 from app.core.config import get_settings
 
 DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (compatible; OracleTBot/1.0; +tender collection for ORACLE-T)"
+    "Mozilla/5.0 (compatible; SovaScannerBot/1.0; +tender collection for Sova Scanner)"
 )
 
 _CERTS_DIR = Path(__file__).resolve().parent.parent / "certs"

@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -156,4 +157,74 @@ def reset_admin(db: Session, username: str, password: str, full_name: str) -> Us
     )
     db.commit()
     db.refresh(user)
+    return user
+
+
+# ------------------------------------------------------------ своя учётная запись (17.09.2026)
+
+# Предел на аватар — после уменьшения браузером до 256 px картинка весит десятки килобайт,
+# и полмегабайта — это уже не аватар, а исходное фото, которое кто-то отправил в обход.
+MAX_AVATAR_BYTES = 512 * 1024
+AVATAR_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
+class AvatarError(ValueError):
+    """Ошибка входных данных аватара — интерфейс показывает её текст как есть."""
+
+
+def rename_self(db: Session, user: User, full_name: str) -> User:
+    full_name = " ".join(full_name.split())
+    if full_name and full_name != user.full_name:
+        old = user.full_name
+        user.full_name = full_name
+        log_action(
+            db,
+            component="users",
+            action=f"rename_self:{user.username}",
+            result="success",
+            details=f"Имя изменено: «{old}» → «{full_name}»",
+            user_id=user.id,
+        )
+        db.commit()
+        db.refresh(user)
+    return user
+
+
+def set_avatar(db: Session, user: User, *, content: bytes, content_type: str) -> User:
+    if content_type not in AVATAR_CONTENT_TYPES:
+        raise AvatarError("Аватар должен быть картинкой JPEG, PNG или WebP")
+    if not content:
+        raise AvatarError("Файл пуст")
+    if len(content) > MAX_AVATAR_BYTES:
+        raise AvatarError(f"Аватар больше предела {MAX_AVATAR_BYTES // 1024} КБ")
+    user.avatar = content
+    user.avatar_content_type = content_type
+    user.avatar_updated_at = datetime.now(timezone.utc)
+    log_action(
+        db,
+        component="users",
+        action=f"set_avatar:{user.username}",
+        result="success",
+        details=f"{content_type}, {len(content)} байт",
+        user_id=user.id,
+    )
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def clear_avatar(db: Session, user: User) -> User:
+    if user.avatar is not None:
+        user.avatar = None
+        user.avatar_content_type = None
+        user.avatar_updated_at = None
+        log_action(
+            db,
+            component="users",
+            action=f"clear_avatar:{user.username}",
+            result="success",
+            user_id=user.id,
+        )
+        db.commit()
+        db.refresh(user)
     return user

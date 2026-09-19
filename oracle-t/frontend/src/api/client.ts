@@ -91,11 +91,20 @@ export async function uploadFile<T>(path: string, file: File): Promise<T> {
  * выставляется — boundary добавит браузер.
  */
 export async function postForm<T>(path: string, form: FormData): Promise<T> {
+  return sendForm<T>("POST", path, form);
+}
+
+/** То же, что `postForm`, но методом PUT — замена одного объекта целиком (аватар). */
+export async function putForm<T>(path: string, form: FormData): Promise<T> {
+  return sendForm<T>("PUT", path, form);
+}
+
+async function sendForm<T>(method: "POST" | "PUT", path: string, form: FormData): Promise<T> {
   const token = getToken();
   const headers = new Headers();
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
-  const response = await fetch(`/api${path}`, { method: "POST", headers, body: form });
+  const response = await fetch(`/api${path}`, { method, headers, body: form });
   if (!response.ok) {
     let detail = response.statusText;
     try {
@@ -164,4 +173,18 @@ export async function downloadFile(
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 
   return { fileName, rows: rowsHeader ? Number(rowsHeader) : null };
+}
+
+/**
+ * Загружает защищённую токеном картинку (аватар) и отдаёт object URL для `<img src>`.
+ * `<img>` сам заголовок Authorization не отправляет, поэтому байты забираются fetch-ом.
+ * Вызывающий код обязан освободить URL через `URL.revokeObjectURL`.
+ */
+export async function fetchImageUrl(path: string): Promise<string | null> {
+  const token = getToken();
+  const headers = new Headers();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(`/api${path}`, { method: "GET", headers });
+  if (!response.ok) return null;
+  return URL.createObjectURL(await response.blob());
 }

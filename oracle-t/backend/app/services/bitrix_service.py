@@ -162,7 +162,7 @@ def build_lead(db: Session, tender: Tender) -> dict[str, Any]:
         "OPPORTUNITY": _format_amount(tender.price),
         "CURRENCY_ID": tender.currency or "RUB",
         "SOURCE_ID": "OTHER",
-        "SOURCE_DESCRIPTION": f"ORACLE-T / {platform}" if platform else "ORACLE-T",
+        "SOURCE_DESCRIPTION": f"Sova Scanner / {platform}" if platform else "Sova Scanner",
         "ASSIGNED_BY_NAME": responsible,
         "STATUS_ID": _STATUS_TO_LEAD_STAGE.get(tender.relevance_status, "NEW"),
         "COMMENTS": _build_comment(tender, requirements_total, win_percentage),
@@ -233,4 +233,4 @@ def build_leads_csv(
 
 
 def build_file_name() -> str:
-    return f"oracle-t_bitrix24_leads_{datetime.now(timezone.utc):%Y-%m-%d}.csv"
+    return f"sova-scanner_bitrix24_leads_{datetime.now(timezone.utc):%Y-%m-%d}.csv"

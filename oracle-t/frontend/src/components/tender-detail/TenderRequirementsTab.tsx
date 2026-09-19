@@ -1,5 +1,23 @@
-import type { Requirement } from "../../api/types";
+import type { Requirement, RequirementKind } from "../../api/types";
 import { criticalityLabel } from "../../utils/format";
+
+/** Вид требования (18.09.2026). Подпись у товара не показывается — это умолчание, а у
+ * закупок на поставку он у всех требований; чип нужен, чтобы отличить «к работам» и
+ * «к участнику», которые в матрицу соответствия не идут. */
+const KIND_LABELS: Record<RequirementKind, string> = {
+  product: "к товару",
+  service: "к работам",
+  participant: "к участнику",
+};
+
+function KindBadge({ value }: { value: RequirementKind }) {
+  if (value === "product") return null;
+  return (
+    <span className="shrink-0 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[11px] text-sky-300">
+      {KIND_LABELS[value] ?? value}
+    </span>
+  );
+}
 
 /** Критичность определяет вес требования в проценте победителя (раздел 5.5 ТЗ), поэтому
  * она вынесена в цветной бейдж, а не спрятана в подпись. */
@@ -53,7 +71,7 @@ function EmptyRequirements({ analysis }: { analysis: AnalysisState | null }) {
   if (!analysis.ran) {
     return (
       <div className={shell}>
-        Требования ещё не извлечены. Запустите «Анализ документов» — система разберёт
+        Требования ещё не извлечены. Запустите «Разобрать закупку» — система разберёт
         документацию тендера и выделит требования с критичностью (раздел 5.4 ТЗ).
       </div>
     );
@@ -75,12 +93,12 @@ function EmptyRequirements({ analysis }: { analysis: AnalysisState | null }) {
 
   return (
     <div className={shell}>
-      <p className="text-zinc-400">Анализ выполнен, но требований к товару в документации нет.</p>
+      <p className="text-zinc-400">Анализ выполнен, но требований в документации нет.</p>
       <p className="mt-2">
-        Документы разобраны, и ни одного проверяемого требования к прибору в них не нашлось.
-        Так бывает у закупок на работы, где техническое задание публикуют отдельным
-        приложением или не публикуют вовсе. Проверьте по вкладке «Документы», есть ли среди
-        файлов техническое задание; если оно там есть, запустите анализ ещё раз.
+        Документы разобраны, и ни одного проверяемого требования — к товару, к работам или к
+        участнику — в них не нашлось. Так бывает, когда техническое задание публикуют
+        отдельным приложением или не публикуют вовсе. Проверьте по вкладке «Документы», есть
+        ли среди файлов техническое задание; если оно там есть, запустите разбор ещё раз.
       </p>
       {analysis.message && <p className="mt-2 text-xs text-zinc-600">{analysis.message}</p>}
     </div>
@@ -98,10 +116,20 @@ export function TenderRequirementsTab({
     return <EmptyRequirements analysis={analysis} />;
   }
 
+  const byKind = requirements.reduce<Record<string, number>>((acc, item) => {
+    acc[item.kind] = (acc[item.kind] ?? 0) + 1;
+    return acc;
+  }, {});
+  const kindSummary = (Object.keys(KIND_LABELS) as RequirementKind[])
+    .filter((kind) => byKind[kind])
+    .map((kind) => `${KIND_LABELS[kind]}: ${byKind[kind]}`)
+    .join(", ");
+
   return (
     <div className="space-y-2">
       <div className="mb-3 text-xs text-zinc-500">
-        Всего требований: {requirements.length}. Порядок — от критичных к второстепенным.
+        Всего требований: {requirements.length} ({kindSummary}). Порядок — от критичных к
+        второстепенным. В матрицу соответствия идут только требования к товару.
       </div>
       {requirements.map((requirement) => (
         <div
@@ -110,7 +138,10 @@ export function TenderRequirementsTab({
         >
           <div className="flex items-start justify-between gap-3">
             <p className="text-sm leading-snug text-zinc-200">{requirement.text}</p>
-            <CriticalityBadge value={requirement.criticality} />
+            <div className="flex shrink-0 items-center gap-1.5">
+              <KindBadge value={requirement.kind} />
+              <CriticalityBadge value={requirement.criticality} />
+            </div>
           </div>
           {(requirement.category || requirement.normalized_text) && (
             <div className="mt-1.5 space-y-0.5 text-[11px] text-zinc-600">

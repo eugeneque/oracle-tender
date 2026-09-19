@@ -17,3 +17,5 @@ class BackgroundJobOut(BaseModel):
     finished_at: datetime | None
     attempts: int
     message: str | None
+    # Итог задачи без тендера (опрос площадок): результаты по каждой площадке.
+    payload: dict | None = None

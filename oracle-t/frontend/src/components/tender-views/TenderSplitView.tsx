@@ -1,7 +1,9 @@
 import { Building2, Clock, Sparkles, Star } from "lucide-react";
 
 import type { Tender } from "../../api/types";
+import { DecisionMark } from "../DecisionMark";
 import { TenderDetailPanel } from "../TenderDetailPanel";
+import { TagRow } from "../tags/TagChip";
 import {
   daysLeft,
   formatPrice,
@@ -42,7 +44,8 @@ function SplitListItem({
       }`}
     >
       <div className="mb-1.5 flex items-start justify-between gap-2">
-        <span className="line-clamp-2 text-sm leading-snug text-zinc-100">
+        <DecisionMark decision={tender.ai_decision} size="sm" className="mt-0.5" />
+        <span className="line-clamp-2 min-w-0 flex-1 text-sm leading-snug text-zinc-100">
           {tender.is_bookmarked && (
             <Star
               size={12}
@@ -66,18 +69,23 @@ function SplitListItem({
       <div className="mb-1.5 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
         {/* Метка модели показывается только при положительном решении: «ИИ посмотрел и
             отклонил» — состояние списка, а не свойство закупки, и загромождать им каждую
-            карточку незачем. Отклонённые и так уходят вниз выдачи. */}
+            карточку незачем. Отклонённые и так уходят вниз выдачи.
+
+            Подпись «Наша тематика», а не «Подобрано ИИ» (18.09.2026): прежняя читалась как
+            «ИИ рекомендует участвовать», хотя метка отвечает только на вопрос «это про
+            счётчики электроэнергии?». Рекомендация — отдельный знак решения слева от
+            названия и вердикт в карточке. */}
         {tender.ai_relevant === true && (
           <span
             className="flex items-center gap-1 rounded-md border border-indigo-400/40 bg-indigo-500/25 px-1.5 py-0.5 font-medium text-indigo-100 shadow-[0_0_0_1px_rgba(99,102,241,0.15)]"
             title={
               tender.ai_relevance_reason
-                ? `Модель признала закупку профильной: ${tender.ai_relevance_reason}`
-                : "Модель признала закупку профильной"
+                ? `Модель признала предмет закупки профильным (это не рекомендация участвовать — за неё отвечает знак решения слева): ${tender.ai_relevance_reason}`
+                : "Модель признала предмет закупки профильным. Это не рекомендация участвовать — за неё отвечает знак решения слева"
             }
           >
             <Sparkles size={11} />
-            Подобрано ИИ
+            Наша тематика
           </span>
         )}
         <span className="rounded bg-white/5 px-1.5 py-0.5">{stageLabel(tender.stage)}</span>
@@ -88,6 +96,12 @@ function SplitListItem({
           </span>
         )}
       </div>
+
+      {tender.tags.length > 0 && (
+        <div className="mb-1.5">
+          <TagRow tags={tender.tags} max={3} />
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-2 text-[11px]">
         {left !== null && (

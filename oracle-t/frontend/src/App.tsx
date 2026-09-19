@@ -2,12 +2,15 @@ import { Route, Routes } from "react-router-dom";
 
 import { AuthProvider } from "./context/AuthContext";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import { AccountPage } from "./pages/Account";
 import { AnalyticsPage } from "./pages/Analytics";
 import { CatalogPage } from "./pages/Catalog";
 import { CompanyPage } from "./pages/Company";
 import { DashboardPage } from "./pages/Dashboard";
+import { IntegrationsPage } from "./pages/Integrations";
 import { LoginPage } from "./pages/Login";
 import { SettingsPage } from "./pages/Settings";
+import { TenderFullPage } from "./pages/TenderFull";
 import { TendersPage } from "./pages/Tenders";
 import { UsersPage } from "./pages/Users";
 
@@ -29,6 +32,22 @@ export default function App() {
           element={
             <ProtectedRoute>
               <TendersPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/tenders/:tenderId"
+          element={
+            <ProtectedRoute>
+              <TenderFullPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/account"
+          element={
+            <ProtectedRoute>
+              <AccountPage />
             </ProtectedRoute>
           }
         />
@@ -61,6 +80,14 @@ export default function App() {
           element={
             <ProtectedRoute>
               <CompanyPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/integrations"
+          element={
+            <ProtectedRoute>
+              <IntegrationsPage />
             </ProtectedRoute>
           }
         />

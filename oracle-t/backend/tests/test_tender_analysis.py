@@ -13,7 +13,7 @@ import uuid
 import pytest
 
 import app.services.tender_analysis as analysis_module
-from app.models.analysis import Criticality, Requirement
+from app.models.analysis import Criticality, Requirement, RequirementKind
 from app.models.source import Source
 from app.models.tender import Tender, TenderType
 from app.models.user import User
@@ -112,6 +112,7 @@ def _requirement(**overrides) -> ExtractedRequirement:
     data = {
         "text": "Требование",
         "normalized_text": "",
+        "kind": RequirementKind.PRODUCT.value,
         "criticality": Criticality.IMPORTANT.value,
         "group_name": "",
     }
@@ -250,6 +251,47 @@ def test_duplicate_requirements_from_overlapping_chunks_saved_once(
     outcome = analyze_tender(db_session, tender, actor=admin_user)
 
     assert outcome.requirements_saved == 2
+
+
+def test_service_and_participant_requirements_are_saved_with_kind(
+    db_session, admin_user: User, monkeypatch
+):
+    """Закупка на обслуживание АИИС КУЭ (Фабрикант 3214995, 18.09.2026): требования к
+    работам и участнику сохраняются со своим видом, группа характеристик у них не
+    ставится, а неизвестный вид приводится к «к товару»."""
+
+    tender = _make_tender(db_session)
+    _patch_model(
+        monkeypatch,
+        classification=_classification(),
+        requirements=RequirementsResult(
+            requirements=[
+                _requirement(
+                    text="Гарантия на выполненные работы — не менее 12 месяцев",
+                    kind="service",
+                    group_name="Общие",  # модель подставила группу — для работ её нет
+                ),
+                _requirement(
+                    text="Группа допуска по электробезопасности не ниже IV",
+                    kind="participant",
+                ),
+                _requirement(text="Класс точности 0,5S", kind="что-то"),
+            ]
+        ),
+    )
+
+    outcome = analyze_tender(db_session, tender, actor=admin_user)
+
+    assert outcome.requirements_saved == 3
+    assert outcome.requirements_by_kind == {"service": 1, "participant": 1, "product": 1}
+    saved = {
+        item.text: item
+        for item in db_session.query(Requirement).filter(Requirement.tender_id == tender.id)
+    }
+    assert saved["Гарантия на выполненные работы — не менее 12 месяцев"].kind == "service"
+    assert saved["Гарантия на выполненные работы — не менее 12 месяцев"].category is None
+    assert saved["Группа допуска по электробезопасности не ниже IV"].kind == "participant"
+    assert saved["Класс точности 0,5S"].kind == RequirementKind.PRODUCT.value
 
 
 def test_unknown_criticality_falls_back_to_important(db_session, admin_user: User, monkeypatch):

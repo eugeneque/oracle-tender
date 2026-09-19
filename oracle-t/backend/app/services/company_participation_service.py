@@ -229,21 +229,21 @@ class SyncResult:
     checked_submitted: int = 0
 
 
-def _match_tender(db: Session, record: ParticipationRecord) -> uuid.UUID | None:
+def match_tender(db: Session, external_tender_id: str | None) -> uuid.UUID | None:
     """Пытается связать запись с тендером нашей базы по номеру закупки.
 
     Совпадения может не быть, и это норма: история покрывает годы, когда система ещё не
     работала. Связь нужна лишь для того, чтобы из карточки тендера был виден наш прошлый
-    заход на ту же закупку.
+    заход на ту же закупку. Общая для всех источников истории — ЕИС и rusprofile.
     """
 
-    if not record.external_tender_id:
+    if not external_tender_id:
         return None
     return db.scalar(
         select(Tender.id).where(
             or_(
-                Tender.external_id == record.external_tender_id,
-                Tender.registry_number == record.external_tender_id,
+                Tender.external_id == external_tender_id,
+                Tender.registry_number == external_tender_id,
             )
         )
     )
@@ -349,7 +349,7 @@ def sync_from_eis(db: Session, *, actor: User) -> SyncResult:
         # `lessons_learned_md` не трогаем сознательно — это заметка человека.
 
         if target.tender_id is None:
-            matched = _match_tender(db, record)
+            matched = match_tender(db, record.external_tender_id)
             if matched is not None:
                 target.tender_id = matched
                 result.matched_tenders += 1

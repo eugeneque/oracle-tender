@@ -53,6 +53,11 @@ _PROXIMITY_RE = re.compile(r"^\((?P<terms>[^)]+)\)~(?P<distance>\d+)$")
 # собой. Пять — компромисс: «поверка»/«поверке» и «счетчик»/«счетчиков» сходятся, а слова
 # короче уже сравниваются целиком.
 _STEM_PREFIX = 5
+# На сколько букв слово текста может быть длиннее ключа при сравнении по основе. Русские
+# окончания не длиннее трёх букв («-ами», «-ого»), а всё, что длиннее, — уже другое слово с
+# той же основой: без этого ограничения ключ «миртек» ловил заказчика «МИРТЕЛЕКОМ», и в
+# список попадали оптические муфты и грозозащита.
+_MAX_ENDING = 3
 
 
 @dataclass
@@ -105,13 +110,16 @@ def _term_positions(tokens: list[str], term: str) -> list[int]:
         prefix = term[:-1]
         return [i for i, token in enumerate(tokens) if token.startswith(prefix)]
     # Сравнение по основе включается только для достаточно длинных ключей: у коротких
-    # («воды», «газа») общий префикс означал бы совпадение с «водитель» и «газета».
+    # («воды», «газа») общий префикс означал бы совпадение с «водитель» и «газета». И только
+    # для слов сопоставимой длины: общая основа у «миртек» и «миртелеком» есть, а слово —
+    # другое.
     stem = _stem(term)
     by_stem = len(term) > _STEM_PREFIX
+    longest = len(term) + _MAX_ENDING
     return [
         i
         for i, token in enumerate(tokens)
-        if token == term or (by_stem and _stem(token) == stem)
+        if token == term or (by_stem and len(token) <= longest and _stem(token) == stem)
     ]
 
 
@@ -298,6 +306,21 @@ def get_or_create_profile(db: Session) -> SearchProfile:
     db.flush()
     logger.info(f"Создан профиль релевантности с {len(KEYWORD_GROUPS)} группами")
     return profile
+
+
+def bootstrap(db: Session) -> dict[str, int]:
+    """Заводит профиль и применяет его к тендерам без отметки. Вызывается при старте.
+
+    До этого профиль создавался только при первом открытии раздела в настройках. На сервере,
+    где туда никто не заходил, отбор не работал вовсе: `active_groups` отдавал пустой список,
+    каждый собранный тендер оставался с `passed_relevance_filter = NULL`, а список трактует
+    NULL как «показывать». В итоге вся выдача ЭТП ГПБ — бумага, светильники, грозозащита —
+    висела в списке «по профилю» как новые закупки.
+    """
+
+    get_or_create_profile(db)
+    db.commit()
+    return backfill(db, only_unprocessed=True)
 
 
 def active_groups(db: Session) -> list[SearchKeywordGroup]:

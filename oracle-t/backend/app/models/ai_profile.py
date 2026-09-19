@@ -106,6 +106,12 @@ class AiProfileScore(Base):
     weak_points: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     # {verdict, price, first_step} — три подпункта фиксированного формата (раздел 5.5.1 ТЗ).
     recommended_strategy: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Решение «смотреть / не смотреть» (замечание 17.09.2026): модель сводит три измерения в
+    # служебную сводку (`decision_summary`, пользователю не показывается) и по ней выносит
+    # двоичный ответ. `None` — решение не выносилось: оценка посчитана до этой правки или
+    # модель не ответила; интерфейс показывает это серым знаком, а не как «нет».
+    decision: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    decision_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Копия профиля компании на момент расчёта: без неё старые оценки нельзя ни объяснить,
     # ни проверить по `*_evidence` после того, как профиль поправили.
     company_profile_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

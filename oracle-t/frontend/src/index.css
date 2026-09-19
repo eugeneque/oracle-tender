@@ -127,6 +127,61 @@ body {
   to { background-position: 300% 50%; }
 }
 
+/*
+ * Раскраска под Claude (переключатель провайдера, 18.09.2026). Розово-фиолетово-голубая
+ * гамма выше — «родная» для YandexGPT и остаётся ему; когда активен Claude, блок «Разбор ИИ»
+ * и сфера переходят в тёплую оранжевую гамму его фирменного знака. Смена цвета — единственное,
+ * что сообщает пользователю, какая модель писала разбор, поэтому она заметная, а не оттенок.
+ *
+ * Волна переливается тем же кадром `ai-wave-slide`, но по более широкому полотну и чуть
+ * быстрее: тёплые цвета близки друг к другу, и на медленном сдвиге переливание терялось бы.
+ */
+.ai-wave--claude {
+  background:
+    linear-gradient(120deg,
+      rgba(217, 119, 87, 0.22) 0%,
+      rgba(251, 146, 60, 0.26) 25%,
+      rgba(253, 186, 116, 0.18) 50%,
+      rgba(234, 88, 12, 0.24) 75%,
+      rgba(217, 119, 87, 0.22) 100%);
+  background-size: 400% 100%;
+  animation: ai-wave-slide 9s linear infinite;
+}
+
+.ai-orb--claude {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 0 18px rgba(249, 115, 22, 0.45),
+    inset 0 0 12px rgba(255, 255, 255, 0.06);
+}
+
+.ai-orb--claude .ai-orb__blob--pink {
+  background: radial-gradient(circle at 35% 35%, rgba(234, 88, 12, 0.95), transparent 55%);
+}
+
+.ai-orb--claude .ai-orb__blob--blue {
+  background: radial-gradient(circle at 65% 60%, rgba(253, 186, 116, 0.9), transparent 55%);
+}
+
+.ai-orb--claude .ai-orb__blob--violet {
+  background: radial-gradient(circle at 50% 75%, rgba(217, 119, 87, 0.9), transparent 60%);
+}
+
+.ai-orb--claude .ai-orb__ring {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
+    inset 0 0 14px rgba(254, 215, 170, 0.35);
+}
+
+.ai-orb--claude[data-busy="true"] {
+  animation-name: ai-orb-pulse-claude;
+}
+
+@keyframes ai-orb-pulse-claude {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 0 18px rgba(249,115,22,0.4); }
+  50% { box-shadow: 0 0 0 1px rgba(255,255,255,0.14), 0 0 30px rgba(251,191,36,0.6); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ai-orb__blob,
   .ai-orb[data-busy="true"],
@@ -163,3 +218,66 @@ body {
 .letter-body pre,
 .letter-body code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
 .letter-body hr { margin: 0.8em 0; border-color: rgba(255, 255, 255, 0.12); }
+
+
+/* --- Шкалы измерений AI-оценки (см. TenderAiScorePanel.tsx) ----------------------------
+   Два состояния. Зелёное (оценка выше порога) — плотная сетка точек, заполненная слева до
+   доли процента и переливающаяся зелёной волной: система прямо сигнализирует «можем
+   участвовать». Красное (ниже порога) — без точек, сплошная полоса с медленно
+   переливающимся красным градиентом. Задержка каждой точки задаётся через --i (номер
+   колонки), чтобы волна шла слева направо без JS. */
+.dotbar {
+  display: grid;
+  grid-template-columns: repeat(var(--dot-columns, 64), 1fr);
+  grid-template-rows: repeat(4, 3px);
+  row-gap: 2px;
+  align-content: center;
+  justify-items: center;
+  height: 22px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+.dotbar__dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.dotbar__dot[data-filled="true"] {
+  background: #6ee7b7;
+  animation: dotbar-wave 2.4s ease-in-out infinite;
+  animation-delay: calc(var(--i) * 30ms);
+  box-shadow: 0 0 5px rgba(52, 211, 153, 0.35);
+}
+
+@keyframes dotbar-wave {
+  0%, 100% { opacity: 0.45; transform: scale(0.85); background: #059669; }
+  50% { opacity: 1; transform: scale(1.2); background: #a7f3d0; }
+}
+
+.solidbar {
+  position: relative;
+  height: 22px;
+  padding: 5px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+.solidbar__fill {
+  height: 100%;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #7f1d1d, #ef4444, #fca5a5, #ef4444, #7f1d1d);
+  background-size: 300% 100%;
+  animation: solidbar-shimmer 6s ease-in-out infinite;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.25);
+}
+
+@keyframes solidbar-shimmer {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}

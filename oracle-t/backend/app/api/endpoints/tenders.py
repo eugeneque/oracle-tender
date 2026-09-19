@@ -27,7 +27,6 @@ from app.schemas.tender import (
     StageUpdate,
     TenderCardOut,
     TenderExtraSectionsOut,
-    TenderInsightsOut,
     ComplianceMatrixOut,
     RelevanceUpdate,
     RequirementOut,
@@ -36,6 +35,8 @@ from app.schemas.tender import (
     TenderHistoryOut,
     TenderBookmarkIn,
     TenderBookmarkOut,
+    TenderTagOut,
+    TenderTagsUpdate,
     TenderOut,
     TenderBoardOut,
     TenderPageOut,
@@ -58,6 +59,7 @@ from app.services.analysis_service import (
 )
 from app.services import (
     bookmark_service,
+    tag_service,
     ai_profile_service,
     company_profile_service,
     similarity_service,
@@ -72,7 +74,7 @@ from app.services.manual_request_service import (
     create_manual_request,
 )
 from app.services.document_service import get_storage_root, sync_tender_documents
-from app.services.yandex_ai_client import YandexAiNotConfiguredError
+from app.services.ai_client import AiNotConfiguredError
 from app.services.tender_service import (
     DEFAULT_SORT,
     TenderFilters,
@@ -112,6 +114,7 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
     win_percentage_max: Decimal | None = Query(default=None, ge=0, le=100),
     ai_score_min: Decimal | None = Query(default=None, ge=0, le=100),
     ai_score_max: Decimal | None = Query(default=None, ge=0, le=100),
+    tag: list[uuid.UUID] | None = Query(default=None, description="Теги закупки (любой из)"),
 ) -> TenderFilters:
     """Общий разбор фильтров для списка и доски.
 
@@ -138,6 +141,7 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
         relevance_statuses=relevance_status or [],
         stages=stage or [],
         assignee_ids=assignee or [],
+        tag_ids=tag or [],
         okpd2_prefix=okpd2,
         win_percentage_min=win_percentage_min,
         win_percentage_max=win_percentage_max,
@@ -338,6 +342,34 @@ def delete_tender_bookmark(
     return attach_analysis_fields(db, [tender], user_id=user.id)[0]
 
 
+@router.put("/{tender_id}/tags", response_model=TenderOut)
+def put_tender_tags(
+    tender_id: uuid.UUID,
+    payload: TenderTagsUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Полный набор тегов закупки (замечание 17.09.2026): что прислали — то и остаётся."""
+
+    tender = _get_tender_or_404(db, tender_id)
+    try:
+        tag_service.set_tags(db, tender, payload.tag_ids, actor=user)
+    except tag_service.TagError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    return attach_analysis_fields(db, [tender], user_id=user.id)[0]
+
+
+@router.get("/{tender_id}/tags", response_model=list[TenderTagOut])
+def get_tender_tags(
+    tender_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    return tag_service.tags_of(db, _get_tender_or_404(db, tender_id))
+
+
 @router.get("/{tender_id}/bookmark", response_model=TenderBookmarkOut | None)
 def get_tender_bookmark(
     tender_id: uuid.UUID,
@@ -481,7 +513,7 @@ def analyze(
     прогресс виден в карточке и в разделе «Логирование», а сбой повторяется автоматически
     (раздел 5.9 ТЗ).
 
-    Ненастроенное подключение к Yandex AI Studio — ошибка конфигурации, а не сбой сервера:
+    Ненастроенное подключение к ИИ-провайдеру — ошибка конфигурации, а не сбой сервера:
     её текст окажется в `message` задачи, туда же смотрит интерфейс."""
 
     tender = _get_tender_or_404(db, tender_id)
@@ -500,6 +532,21 @@ def evaluate(
 
     tender = _get_tender_or_404(db, tender_id)
     job = enqueue(db, kind=JobKind.TENDER_EVALUATION, tender=tender, actor=user)
+    return BackgroundJobOut.model_validate(job, from_attributes=True)
+
+
+@router.post("/{tender_id}/review", response_model=BackgroundJobOut)
+def review(
+    tender_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> BackgroundJobOut:
+    """Полный разбор закупки одной задачей: анализ документов → матрица соответствия →
+    AI-оценка по профилю (18.09.2026). Раздельные `/analyze`, `/evaluate` и `/ai-score`
+    остаются для интеграций и точечного пересчёта; карточка запускает этот."""
+
+    tender = _get_tender_or_404(db, tender_id)
+    job = enqueue(db, kind=JobKind.TENDER_FULL_REVIEW, tender=tender, actor=user)
     return BackgroundJobOut.model_validate(job, from_attributes=True)
 
 
@@ -622,42 +669,6 @@ def get_tender_card(
         tables=payload.get("tables", {}),
         tab_urls=payload.get("tab_urls", {}),
         fetched_at=card.fetched_at,
-        insights=payload.get("insights"),
-    )
-
-
-@router.post("/{tender_id}/insights", response_model=TenderInsightsOut)
-def build_tender_insights(
-    tender_id: uuid.UUID,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> TenderInsightsOut:
-    """ИИ-разбор карточки: риски, пробелы в данных и восстановленные значения (раздел 5.4 ТЗ).
-
-    Выполняется синхронно, в отличие от анализа документации: здесь один запрос к модели по
-    короткому тексту карточки — секунды, а не минуты, и результат нужен сразу на экране.
-    """
-
-    tender = _get_tender_or_404(db, tender_id)
-    card = tender_card_service.sync_card(db, tender, actor=user)
-
-    try:
-        result = tender_insights.build_insights(db, tender, card, actor=user)
-    except YandexAiNotConfiguredError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 - сбой модели показываем текстом, а не 500-й
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Модель не ответила: {exc}",
-        ) from exc
-
-    applied = tender_insights.apply_filled_fields(db, tender, result)
-    tender_insights.store_insights(db, tender, result)
-
-    return TenderInsightsOut(
-        **result.model_dump(),
-        generated_at=(tender_insights.get_stored_insights(db, tender) or {}).get("generated_at"),
-        applied_fields=applied,
     )
 
 
@@ -809,7 +820,7 @@ def build_extra_sections(
     card = tender_card_service.sync_card(db, tender, actor=user)
     try:
         sections = tender_insights.build_extra_sections(db, tender, card, actor=user)
-    except YandexAiNotConfiguredError as exc:
+    except AiNotConfiguredError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     if not sections:
@@ -901,7 +912,7 @@ def refresh_similar_tenders(
     tender = _get_tender_or_404(db, tender_id)
     try:
         similarity_service.refresh_similar(db, tender, actor=user)
-    except YandexAiNotConfiguredError as exc:
+    except AiNotConfiguredError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return get_similar_tenders(tender_id, limit=10, db=db, _user=user)
 

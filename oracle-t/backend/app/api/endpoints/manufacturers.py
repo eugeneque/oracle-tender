@@ -20,7 +20,9 @@ from app.schemas.manufacturer import (
     LinkSiTypesOutcomeOut,
     ManualIngestOutcomeOut,
     ManualExtractionOutcomeOut,
+    ManufacturerCreate,
     ManufacturerOut,
+    ManufacturerUpdate,
     CatalogSiteOut,
     CatalogSyncOutcomeOut,
     DescriptionIngestOutcomeOut,
@@ -49,7 +51,7 @@ from app.services import (
     registry_modifications,
     si_type_linking,
 )
-from app.services.yandex_ai_client import YandexAiNotConfiguredError
+from app.services.ai_client import AiNotConfiguredError
 
 router = APIRouter(tags=["manufacturers"])
 
@@ -71,6 +73,38 @@ def _get_si_type_or_404(db: Session, si_type_id: uuid.UUID) -> SiType:
 @router.get("/manufacturers", response_model=list[ManufacturerOut])
 def get_manufacturers(db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
     return product_catalog_service.list_manufacturers(db)
+
+
+@router.post("/manufacturers", response_model=ManufacturerOut, status_code=status.HTTP_201_CREATED)
+def post_manufacturer(
+    payload: ManufacturerCreate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Новый производитель заводится строкой без переработки схемы (раздел 6.3 ТЗ) —
+    администратором из интерфейса, а не миграцией."""
+    return product_catalog_service.create_manufacturer(
+        db,
+        legal_name=payload.legal_name,
+        brand_name=payload.brand_name,
+        website=payload.website,
+        market_share_pct=payload.market_share_pct,
+        market_share_source=payload.market_share_source,
+        actor=admin,
+    )
+
+
+@router.patch("/manufacturers/{manufacturer_id}", response_model=ManufacturerOut)
+def patch_manufacturer(
+    manufacturer_id: uuid.UUID,
+    payload: ManufacturerUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    manufacturer = _get_manufacturer_or_404(db, manufacturer_id)
+    return product_catalog_service.update_manufacturer(
+        db, manufacturer, fields=payload.model_dump(exclude_unset=True), actor=admin
+    )
 
 
 @router.get("/manufacturers/{manufacturer_id}/si-types", response_model=list[SiTypeOut])
@@ -139,7 +173,7 @@ def get_products(
     _user: User = Depends(get_current_user),
 ):
     _get_manufacturer_or_404(db, manufacturer_id)
-    return product_catalog_service.list_products(db, manufacturer_id)
+    return product_catalog_service.list_products_out(db, manufacturer_id)
 
 
 @router.post(
@@ -265,7 +299,7 @@ def post_extract_from_si_type(
             characteristic_source=CharacteristicSource.FGIS_DESCRIPTION_TYPE,
             actor=admin,
         )
-    except YandexAiNotConfiguredError as exc:
+    except AiNotConfiguredError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     return ExtractionOutcomeOut(**vars(outcome))
 
@@ -297,7 +331,7 @@ def post_extract_from_manufacturer_site(
         outcome = characteristic_extraction.extract_characteristics_from_manufacturer_site(
             db, product, website=manufacturer.website, actor=admin
         )
-    except YandexAiNotConfiguredError as exc:
+    except AiNotConfiguredError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
     return ManualExtractionOutcomeOut(

@@ -2,6 +2,8 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
+from sqlalchemy import select
+
 from app.adapters.base import PollOutcome, SourceAdapter, TenderSummary
 from app.db.session import SessionLocal
 from app.models.source import Source
@@ -474,6 +476,11 @@ def test_poll_sources_bulk_any_authenticated_user(client, admin_token, monkeypat
     monkeypatch.setattr(
         tender_service_module, "get_adapter", lambda key, **kwargs: _StubAdapter()
     )
+    # ИИ-отбор после сбора ходит в YandexGPT с тремя попытками — в фоне это десятки секунд
+    # ожидания ради теста механики очереди.
+    monkeypatch.setattr(
+        tender_service_module.ai_relevance_service, "check_batch", lambda db, limit: BatchResult()
+    )
 
     db = SessionLocal()
     try:
@@ -507,8 +514,98 @@ def test_poll_sources_bulk_any_authenticated_user(client, admin_token, monkeypat
         json={"source_keys": [source_key, "unknown_key"]},
         headers=_auth_headers(user_token),
     )
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert len(body) == 1  # неизвестный ключ молча пропущен
-    assert body[0]["source_key"] == source_key
-    assert body[0]["created"] == 1
+    # Ответ приходит сразу — задачей, а не итогом опроса (баг 17.09.2026: запрос на весь
+    # 25-минутный опрос гас при перезапуске сервера, и интерфейс крутился вечно).
+    assert response.status_code == 202, response.text
+    job = response.json()
+    assert job["kind"] == "sources_poll"
+    assert job["payload"]["source_keys"] == [source_key]  # неизвестный ключ молча пропущен
+
+    import time
+
+    for _ in range(300):
+        current = client.get("/sources/poll/current", headers=_auth_headers(user_token)).json()
+        if current["status"] in {"success", "error"}:
+            break
+        time.sleep(0.1)
+    assert current["id"] == job["id"]
+    assert current["status"] == "success", current["message"]
+    results = current["payload"]["results"]
+    assert len(results) == 1
+    assert results[0]["source_key"] == source_key
+    assert results[0]["created"] == 1
+    assert "новых закупок 1" in current["message"]
+
+    # Без площадок — ошибка сразу, а не пустая задача.
+    empty = client.post(
+        "/sources/poll", json={"source_keys": ["unknown_key"]}, headers=_auth_headers(user_token)
+    )
+    assert empty.status_code == 422
+
+
+def test_poll_source_saves_in_batches(db_session, monkeypatch):
+    """Выдача сохраняется порциями по 100 по мере вычитки (правка 17.09.2026), а не одним
+    куском в конце: после каждой порции — коммит и отчёт о прогрессе, остаток меньше порции
+    досохраняется после возврата адаптера, обновлённая по ходу запись не дублируется."""
+
+    import app.services.tender_service as tender_service_module
+    from app.adapters.base import SourceAdapter
+
+    class _BatchingAdapter(SourceAdapter):
+        source_key = "batching"
+
+        def list_new_tenders(self, since):
+            outcome = PollOutcome()
+            seen = {}
+            for i in range(250):
+                self._collect(
+                    seen,
+                    TenderSummary(external_id=f"B-{i}", title=f"Тендер {i}", source_url=f"https://example.test/{i}"),
+                )
+            # Та же закупка встретилась ещё раз с уточнённым названием — уже после того, как
+            # ушла в первую порцию.
+            self._collect(
+                seen,
+                TenderSummary(external_id="B-1", title="Тендер 1 (уточнено)", source_url="https://example.test/1"),
+            )
+            outcome.tenders = list(seen.values())
+            return outcome
+
+        def get_tender_details(self, external_id):
+            raise NotImplementedError
+
+        def download_documents(self, external_id, source_url=None):
+            raise NotImplementedError
+
+    monkeypatch.setattr(tender_service_module, "get_adapter", lambda key, **kwargs: _BatchingAdapter())
+    monkeypatch.setattr(tender_service_module.ai_relevance_service, "check_batch", lambda db, limit: BatchResult())
+    commits: list[int] = []
+    original_commit = db_session.commit
+    monkeypatch.setattr(db_session, "commit", lambda: (commits.append(1), original_commit())[1])
+
+    source = Source(
+        key=f"batch_{uuid.uuid4().hex[:8]}",
+        name="Batch stub",
+        url="https://example.test",
+        type="etp_federal_commercial",
+        adapter_key="batching",
+        adapter_status="implemented",
+    )
+    db_session.add(source)
+    db_session.flush()
+
+    progress: list[tuple[int, int, int]] = []
+    result = tender_service_module.poll_source(
+        db_session, source, on_progress=lambda *args: progress.append(args)
+    )
+
+    # Две полные порции по 100 по ходу, затем остаток: 50 новых + 1 обновлённая.
+    assert [p[0] for p in progress] == [100, 200, 251]
+    assert result.created == 250
+    assert result.updated == 1
+    assert result.found == 251
+    assert len(commits) >= 3
+    title = db_session.scalar(
+        select(Tender.title).where(Tender.source_id == source.id, Tender.external_id == "B-1")
+    )
+    assert title == "Тендер 1 (уточнено)"

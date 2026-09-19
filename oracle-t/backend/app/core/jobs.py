@@ -27,6 +27,7 @@ from app.models.job import BackgroundJob, JobKind, JobStatus
 from app.models.log import LogLevel
 from app.models.tender import Tender
 from app.models.user import User
+from app.services.ai_context import acting_as
 from app.services.audit import log_action
 
 MAX_ATTEMPTS = 2
@@ -35,14 +36,92 @@ MAX_ATTEMPTS = 2
 RETRY_DELAY_SECONDS = 5.0
 
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="oraclet-job")
+# Опрос площадок — в своём пуле на один поток (17.09.2026): он идёт 20–25 минут и занял бы
+# половину общего пула, оставив ИИ-анализу один поток; а два одновременных опроса одних и
+# тех же площадок бессмысленны — второй запрос и так возвращает уже идущую задачу.
+_poll_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="oraclet-poll")
+
+
+def _submit_poll(job_id: uuid.UUID) -> None:
+    """Пул опроса пересоздаётся после `shutdown()`: в тестах приложение поднимается и гасится
+    на каждый `TestClient`, и закрытый пул отвечал бы «cannot schedule new futures»."""
+
+    global _poll_executor
+    if _poll_executor._shutdown:  # noqa: SLF001 - у ThreadPoolExecutor нет публичного признака
+        _poll_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="oraclet-poll")
+    _poll_executor.submit(run_job, job_id)
 
 # Обработчики регистрируются при импорте `app.services.job_runner` — так модуль очереди не
 # зависит от прикладных сервисов (иначе получился бы цикл импортов: сервис → очередь → сервис).
 _HANDLERS: dict[str, Callable[[Session, Tender, User | None], str]] = {}
+# Обработчики задач без тендера (опрос площадок): получают саму задачу — входные данные
+# лежат в её `payload`, и туда же по ходу пишется прогресс.
+_JOB_HANDLERS: dict[str, Callable[[Session, BackgroundJob, User | None], str]] = {}
 
 
 def register_handler(kind: JobKind, handler: Callable[[Session, Tender, User | None], str]) -> None:
     _HANDLERS[kind.value] = handler
+
+
+def register_job_handler(
+    kind: JobKind, handler: Callable[[Session, BackgroundJob, User | None], str]
+) -> None:
+    _JOB_HANDLERS[kind.value] = handler
+
+
+def enqueue_standalone(
+    db: Session, *, kind: JobKind, payload: dict, actor: User | None
+) -> BackgroundJob:
+    """Ставит в очередь задачу без тендера (опрос площадок). Пока такая задача стоит в
+    очереди или идёт, повторный вызов возвращает её же: второй опрос тех же площадок поверх
+    первого только удвоил бы нагрузку на сайты и время ожидания."""
+
+    existing = db.execute(
+        select(BackgroundJob)
+        .where(
+            BackgroundJob.tender_id.is_(None),
+            BackgroundJob.kind == kind.value,
+            BackgroundJob.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+        )
+        .order_by(BackgroundJob.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    job = BackgroundJob(
+        kind=kind.value,
+        status=JobStatus.QUEUED.value,
+        payload=payload,
+        created_by_id=actor.id if actor else None,
+    )
+    db.add(job)
+    log_action(
+        db,
+        component="jobs",
+        action=f"enqueue:{kind.value}",
+        result="queued",
+        level=LogLevel.INFO,
+        user_id=actor.id if actor else None,
+    )
+    db.commit()
+    db.refresh(job)
+
+    _submit_poll(job.id)
+    return job
+
+
+def latest_standalone(db: Session, kind: JobKind) -> BackgroundJob | None:
+    """Последняя задача этого вида без тендера — идущая или уже завершённая. Интерфейс
+    спрашивает её при входе на страницу: опрос, запущенный до перезагрузки вкладки, должен
+    быть виден, а не потерян."""
+
+    return db.execute(
+        select(BackgroundJob)
+        .where(BackgroundJob.tender_id.is_(None), BackgroundJob.kind == kind.value)
+        .order_by(BackgroundJob.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
 
 
 def enqueue(db: Session, *, kind: JobKind, tender: Tender, actor: User | None) -> BackgroundJob:
@@ -102,13 +181,35 @@ def run_job(job_id: uuid.UUID) -> None:
             logger.warning(f"Фоновая задача {job_id} не найдена")
             return
 
+        actor = db.get(User, job.created_by_id) if job.created_by_id else None
+
+        # Задача без тендера — одна попытка: опрос площадок сам изолирует ошибку каждой
+        # площадки, а повторять 25-минутный проход целиком из-за сбоя было бы хуже, чем
+        # честно показать ошибку.
+        job_handler = _JOB_HANDLERS.get(job.kind)
+        if job_handler is not None:
+            job.status = JobStatus.RUNNING.value
+            job.started_at = datetime.now(timezone.utc)
+            job.attempts = 1
+            db.commit()
+            try:
+                # Модель ИИ — та, что выбрал автор задачи (см. app/services/ai_context.py);
+                # у задач без автора (расписание) — системная по умолчанию.
+                with acting_as(actor.id if actor else None):
+                    message = job_handler(db, job, actor)
+            except Exception as exc:  # noqa: BLE001 - сбой задачи не должен ронять поток пула
+                db.rollback()
+                logger.exception(f"Фоновая задача {job.kind} завершилась ошибкой")
+                _finish(db, job, JobStatus.ERROR, str(exc), actor=actor)
+                return
+            _finish(db, job, JobStatus.SUCCESS, message, actor=actor)
+            return
+
         handler = _HANDLERS.get(job.kind)
         tender = db.get(Tender, job.tender_id) if job.tender_id else None
         if handler is None or tender is None:
             _finish(db, job, JobStatus.ERROR, "Задача не может быть выполнена: неизвестный вид или тендер удалён")
             return
-
-        actor = db.get(User, job.created_by_id) if job.created_by_id else None
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             job.status = JobStatus.RUNNING.value
@@ -117,7 +218,8 @@ def run_job(job_id: uuid.UUID) -> None:
             db.commit()
 
             try:
-                message = handler(db, tender, actor)
+                with acting_as(actor.id if actor else None):
+                    message = handler(db, tender, actor)
             except Exception as exc:  # noqa: BLE001 - сбой задачи не должен ронять поток пула
                 db.rollback()
                 logger.warning(
@@ -210,3 +312,4 @@ def recover_interrupted_jobs() -> None:
 
 def shutdown() -> None:
     _executor.shutdown(wait=False, cancel_futures=True)
+    _poll_executor.shutdown(wait=False, cancel_futures=True)

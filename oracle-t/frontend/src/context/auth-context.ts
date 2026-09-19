@@ -7,6 +7,9 @@ export interface AuthContextValue {
   isLoading: boolean;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  /** Подменить текущего пользователя после правки своей учётной записи (имя, аватар) —
+   * без повторного логина и без перечитывания `/auth/me`. */
+  updateUser: (user: User) => void;
 }
 
 // Сам контекст вынесен из `AuthContext.tsx` в отдельный модуль: Fast Refresh в Vite работает

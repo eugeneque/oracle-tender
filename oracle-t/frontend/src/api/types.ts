@@ -6,8 +6,35 @@ export interface User {
   full_name: string;
   role: UserRole;
   is_active: boolean;
+  /** Когда загружен аватар; `null` — аватара нет. Байты отдаёт `/auth/me/avatar`. */
+  avatar_updated_at: string | null;
+  /** Личный выбор модели ИИ; `null` — действует системная по умолчанию. Поле есть только
+   * у своей учётной записи (`/auth/me`). */
+  ai_provider?: AiProviderKey | null;
   created_at: string;
   updated_at: string;
+}
+
+// --- Теги закупок (замечание 17.09.2026) ---
+
+/** Ключи палитры тегов — те же, что `TAG_COLORS` на бэкенде. */
+export const TAG_COLORS = [
+  "zinc",
+  "red",
+  "orange",
+  "amber",
+  "emerald",
+  "sky",
+  "indigo",
+  "violet",
+  "pink",
+] as const;
+export type TagColor = (typeof TAG_COLORS)[number];
+
+export interface TenderTag {
+  id: string;
+  name: string;
+  color: TagColor;
 }
 
 export interface TokenResponse {
@@ -100,8 +127,14 @@ export interface Manufacturer {
   brand_name: string | null;
   website: string | null;
   is_mirtek: boolean;
+  // Доля рынка, % и источник оценки — по доле отсортирован список (замечание
+  // тестировщика 18.09.2026). null — доля не опубликована, не ноль.
+  market_share_pct: number | null;
+  market_share_source: string | null;
   created_at: string;
 }
+
+export type ProductMounting = "split" | "din" | "panel";
 
 export type SiTypeSource = "auto_search" | "manual" | "import";
 
@@ -156,6 +189,10 @@ export interface Product {
   review_status: ReviewStatus;
   review_reason: string | null;
   last_seen_at: string | null;
+  // Форм-фактор, выведенный сервером из характеристик и наименования: фазность и
+  // способы установки (модель может подходить под несколько). null / [] — не определено.
+  phases: 1 | 3 | null;
+  mountings: ProductMounting[];
   created_at: string;
   updated_at: string;
 }
@@ -394,6 +431,63 @@ export interface YandexConnectionTestResult {
   message: string;
 }
 
+/** Провайдер ИИ-модуля (18.09.2026): YandexGPT или Claude через RouterAI. Выбор — у каждого
+ * пользователя свой; без него действует системная модель по умолчанию. */
+export type AiProviderKey = "yandex" | "claude";
+
+/** Какая модель обслуживает запросы текущего пользователя. `source` — откуда она взялась:
+ * личный выбор (`user`) или системная по умолчанию (`default`). */
+export interface AiProviderStatus {
+  active_provider: AiProviderKey;
+  label: string;
+  model: string | null;
+  is_configured: boolean;
+  source: "user" | "default";
+  default_provider: AiProviderKey;
+  default_label: string;
+  configured_providers: AiProviderKey[];
+}
+
+export interface RouterAiSettings {
+  is_configured: boolean;
+  api_key_masked: string | null;
+  model: string;
+  base_url: string;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+/** Учётная запись rusprofile.ru (18.09.2026). Пароль наружу не отдаётся — только признак,
+ * что он задан; логин виден, чтобы было понятно, чей это аккаунт. */
+export interface RusprofileSettings {
+  is_configured: boolean;
+  login: string | null;
+  has_password: boolean;
+  updated_at: string | null;
+  updated_by: string | null;
+  last_sync_at: string | null;
+  last_sync_status: "ok" | "error" | null;
+  last_sync_message: string | null;
+}
+
+/** Итог кнопки «Обновить из rusprofile»: что изменилось в разделе «Моя компания». */
+export interface RusprofileSyncResult {
+  card_id: string;
+  source_url: string;
+  profile_fields_updated: string[];
+  licenses_total: number;
+  projects_total: number;
+  purchases_fetched: number;
+  purchases_total_on_site: number | null;
+  participations_created: number;
+  participations_updated: number;
+  wins: number;
+  losses: number;
+  /** Часть данных на сайте скрыта (подписка не действует) — «0 проигрышей» не факт. */
+  data_hidden: boolean;
+  message: string;
+}
+
 export type TenderKanbanStatus = "collecting_bids" | "evaluation" | "completed" | "cancelled";
 
 /** Этап внутреннего пайплайна МИРТЕК (раздел 5.6 ТЗ, решение 03.09.2026).
@@ -412,8 +506,8 @@ export type TenderStage =
 export const STAGE_LABELS: Record<TenderStage, string> = {
 // Этап `ai_selected` показывается как «Новая» (04.09.2026), а не «AI отобрал».
 // Прежняя подпись обманывала: это значение по умолчанию, которое получает КАЖДАЯ собранная
-// закупка, никакого решения модели за ним нет. Решение модели — отдельная метка «Подобрано
-// ИИ» (`tenders.ai_relevant`), и две разные вещи под похожими названиями путали работу.
+// закупка, никакого решения модели за ним нет. Решение модели — отдельная метка «Наша
+// тематика» (`tenders.ai_relevant`), и две разные вещи под похожими названиями путали работу.
   ai_selected: "Новая",
   under_review: "На проверке",
   application_submitted: "Заявка подана",
@@ -473,12 +567,17 @@ export interface Tender {
    * `null` — расчёт ещё не выполнялся. */
   ai_score: string | null;
   ai_verdict: VerdictCode | null;
+  /** Решение ИИ «смотреть / не смотреть» по трём измерениям (17.09.2026);
+   * `null` — не выносилось. */
+  ai_decision: boolean | null;
   /** Процент победителя МИРТЕК (этап 6) — деталь уровня матрицы соответствия, а не главная
    * метрика: с 03.09.2026 в списке показывается `ai_score`. */
   win_percentage: string | null;
   requirements_count: number;
   /** В избранном ли у текущего пользователя (замечание тестировщика 16.09.2026). */
   is_bookmarked: boolean;
+  /** Теги закупки — общие для команды (замечание 17.09.2026). */
+  tags: TenderTag[];
   /** Решение модели «это правда наша закупка». `null` — не проверяли (не то же, что false). */
   ai_relevant: boolean | null;
   ai_relevance_reason: string | null;
@@ -510,12 +609,16 @@ export type ComplianceSourceCode =
   | "upper_software"
   | "admission_registry";
 
+export type RequirementKind = "product" | "service" | "participant";
+
 export interface Requirement {
   id: string;
   tender_id: string;
   text: string;
   normalized_text: string | null;
   criticality: Criticality;
+  /** К чему требование: товар (идёт в матрицу), работы/услуги или участник (18.09.2026). */
+  kind: RequirementKind;
   category: string | null;
   verified_by_user: boolean;
   created_at: string;
@@ -557,14 +660,23 @@ export interface ComplianceMatrix {
  */
 export interface BackgroundJob {
   id: string;
-  kind: "tender_analysis" | "tender_evaluation";
+  kind:
+    | "tender_analysis"
+    | "tender_evaluation"
+    | "ai_profile_score"
+    | "tender_full_review"
+    | "sources_poll";
   status: "queued" | "running" | "success" | "error";
   tender_id: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
   attempts: number;
+  /** У опроса площадок — прогресс («Опрос 3 из 9: …»), по завершении — итог. */
   message: string | null;
+  /** Задача без тендера (опрос площадок): входные данные и итог по каждой площадке.
+   * У полного разбора — итог каждого шага: `analysis`, `evaluation`, `score`. */
+  payload: Record<string, unknown> | null;
 }
 
 export interface TenderPage {
@@ -868,27 +980,7 @@ export interface TenderCard {
   tables: Record<string, TenderCardTable>;
   tab_urls: Record<string, string>;
   fetched_at: string | null;
-  insights: TenderInsights | null;
 }
-
-export interface InsightItem {
-  title: string;
-  detail: string;
-  severity: "high" | "medium" | "low" | "info";
-  evidence: string | null;
-}
-
-/** Разбор карточки моделью: риски, пробелы в данных и восстановленные значения. */
-export interface TenderInsights {
-  summary: string;
-  risks: InsightItem[];
-  data_gaps: InsightItem[];
-  filled_fields: { field: string; value: string; source: string; confidence: number }[];
-  checklist: string[];
-  generated_at: string | null;
-  applied_fields?: string[];
-}
-
 
 // --- AI-оценка по профилю (раздел 5.5.1 ТЗ, решение 03.09.2026) ---
 
@@ -941,6 +1033,9 @@ export interface AiProfileScore {
   summary: string | null;
   verdict: VerdictCode | null;
   verdict_label: string | null;
+  /** Решение «смотреть / не смотреть» по трём измерениям; сводка решения — служебная и
+   * в API не отдаётся. */
+  decision: boolean | null;
   weak_points: WeakPoint[];
   recommended_strategy: RecommendedStrategy | null;
   similar_tender_ids: string[];
@@ -958,6 +1053,8 @@ export interface CompanyLicense {
   issued_at?: string | null;
   valid_until?: string | null;
   issuer?: string | null;
+  /** `rusprofile` — запись завела синхронизация; она же её и обновляет. Без источника — ручная. */
+  source?: string | null;
 }
 
 export interface CompanyPastProject {
@@ -966,12 +1063,69 @@ export interface CompanyPastProject {
   volume?: string | null;
   year?: number | null;
   description?: string | null;
+  source?: string | null;
 }
 
 /** Откуда взялось значение поля и подтвердил ли его человек (раздел 7 ТЗ). */
 export interface FieldSource {
-  source: "auto_search" | "manual";
+  source: "auto_search" | "manual" | "rusprofile";
   verified_by_user: boolean;
+}
+
+/** Досье компании с rusprofile.ru, каким его отдал сайт (18.09.2026). Поля необязательные:
+ * у разных компаний разделы разные, а без подписки часть значений скрыта. */
+export interface RusprofileDossier {
+  card_id: string;
+  source_url: string;
+  fetched_at: string;
+  status?: string | null;
+  short_name?: string | null;
+  authorized_capital?: string | null;
+  ceo_name?: string | null;
+  ceo_position?: string | null;
+  ceo_since?: string | null;
+  headcount?: number | null;
+  headcount_year?: number | null;
+  average_salary?: string | null;
+  tax_regime?: string | null;
+  msp_status?: string | null;
+  main_okved_code?: string | null;
+  main_okved_name?: string | null;
+  okved_count?: number | null;
+  tax_authority?: string | null;
+  codes?: Record<string, string>;
+  phones?: string[];
+  emails?: string[];
+  website?: string | null;
+  finance?: {
+    year?: number;
+    revenue?: string;
+    revenue_change?: string;
+    profit?: string;
+    profit_change?: string;
+    net_assets?: string;
+    net_assets_change?: string;
+    ratings?: Record<string, string | null>;
+  };
+  founders?: Array<{ name?: string | null; share?: string | null; inn?: string | null }>;
+  purchases_summary?: {
+    purchases_count?: number;
+    purchases_sum?: string;
+    contracts_count?: number;
+    contracts_sum?: string;
+    won?: number;
+    lost?: number;
+    top_customers?: Array<{ name: string; purchases?: number | null; sum?: string | null }>;
+  };
+  purchases?: { fetched: number; total_on_site: number | null; wins: number; losses: number; undecided: number };
+  arbitration?: string | null;
+  inspections?: string | null;
+  enforcement?: string | null;
+  licenses_note?: string | null;
+  branches?: string | null;
+  trademarks?: string | null;
+  summary_text?: string | null;
+  data_hidden?: boolean;
 }
 
 export interface CompanyProfile {
@@ -993,6 +1147,10 @@ export interface CompanyProfile {
   past_projects: CompanyPastProject[];
   bank_requisites: Record<string, unknown> | null;
   letterhead_file_path: string | null;
+  /** Синхронизация с rusprofile.ru: номер карточки, досье и когда обновлялось. */
+  rusprofile_card_id: string | null;
+  rusprofile_data: RusprofileDossier | null;
+  rusprofile_synced_at: string | null;
   updated_at: string;
   /** Считает бэкенд: правило «чем профиль считается заполненным» живёт в одном месте. */
   is_filled: boolean;
@@ -1078,7 +1236,7 @@ export interface CompanyParticipation {
   final_contract_value: string | null;
   executed_at: string | null;
   lessons_learned_md: string | null;
-  source: "eis_contracts" | "manual";
+  source: "eis_contracts" | "eis_results" | "rusprofile" | "manual";
   source_label: string;
   last_synced_at: string | null;
   created_at: string;

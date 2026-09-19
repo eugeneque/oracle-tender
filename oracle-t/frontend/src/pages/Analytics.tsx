@@ -232,7 +232,7 @@ export function AnalyticsPage() {
     <AppShell>
       <div className="mx-auto w-full max-w-[1400px] px-8 py-8">
         <PageHeader
-          breadcrumb={["ORACLE-T", "Аналитика"]}
+          breadcrumb={["Sova Scanner", "Аналитика"]}
           title="Аналитика"
           icon={
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">

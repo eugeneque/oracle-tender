@@ -34,7 +34,7 @@ from app.models.manufacturer import CharacteristicSource, Product, ProductCharac
 from app.models.user import User
 from app.seed.characteristics_data import fields_for_source, resolve_field
 from app.services.audit import log_action
-from app.services.yandex_ai_client import chunk_text, run_structured
+from app.services.ai_client import chunk_text, run_structured
 
 # Кусок текста на один запрос к модели. Контекст YandexGPT Pro — 32k токенов (раздел 5.4 ТЗ
 # упоминает облачную модель без указания лимита); 12k символов кириллицы — консервативная
