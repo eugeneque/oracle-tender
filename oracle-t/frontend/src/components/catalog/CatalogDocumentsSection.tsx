@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ChevronDown, ChevronRight, ExternalLink, FileClock, Loader2 } from "lucide-react";
+import { AlertTriangle, ExternalLink, FileClock, Loader2 } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
 import type { CatalogDocument, CatalogDocumentsSummary, CatalogTask } from "../../api/types";
@@ -37,7 +37,6 @@ export function CatalogDocumentsSection({
   manufacturerId: string | null;
   isAdmin: boolean;
 }) {
-  const [open, setOpen] = useState(false);
   const [documents, setDocuments] = useState<CatalogDocument[]>([]);
   const [summary, setSummary] = useState<CatalogDocumentsSummary | null>(null);
   const [busy, setBusy] = useState(false);
@@ -91,14 +90,9 @@ export function CatalogDocumentsSection({
 
   return (
     <div className="rounded-xl border border-white/[0.08] bg-white/[0.03]">
-      <div
-        className={`flex flex-wrap items-center justify-between gap-2 px-5 py-3 ${
-          open ? "border-b border-white/[0.08]" : ""
-        }`}
-      >
-        <button onClick={() => setOpen((v) => !v)} className="flex items-start gap-2 text-left" aria-expanded={open}>
-          <span className="mt-0.5 text-zinc-500">{open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
-          <span>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] px-5 py-3">
+        <div>
+          <div>
             <h2 className="text-sm font-semibold text-zinc-100">
               Документы по СИ и руководства
               {summary && summary.total > 0 && <span className="ml-1.5 text-zinc-500">({summary.total})</span>}
@@ -118,8 +112,8 @@ export function CatalogDocumentsSection({
               раз в неделю, отчёт об изменениях — на почту.
               {summary?.last_checked_at && ` Последняя сверка: ${formatDateTime(summary.last_checked_at)}.`}
             </p>
-          </span>
-        </button>
+          </div>
+        </div>
         {isAdmin && manufacturerId && (
           <button
             onClick={handleCheck}
@@ -133,7 +127,7 @@ export function CatalogDocumentsSection({
         )}
       </div>
 
-      <div className="px-5 py-3" hidden={!open}>
+      <div className="px-5 py-3">
         {error && (
           <div className="mb-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-400">{error}</div>
         )}

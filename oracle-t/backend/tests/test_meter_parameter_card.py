@@ -59,7 +59,9 @@ def test_card_lists_all_39_and_new_field_can_be_filled(client, admin_token, monk
     response = client.get(f"/products/{product_id}/meter-parameters", headers=headers)
     assert response.status_code == 200, response.text
     rows = {row["no"]: row for row in response.json()}
-    assert sorted(rows) == list(range(1, 40))
+    # П26 (трёхпозиционное реле) бывает только у Энергомеры, Тайпита и Пульсара — у
+    # остальных производителей параметр не выводится.
+    assert sorted(rows) == [no for no in range(1, 40) if no != 26]
 
     tilt = rows[34]
     assert tilt["filled"] is True
@@ -73,12 +75,10 @@ def test_card_lists_all_39_and_new_field_can_be_filled(client, admin_token, monk
     assert "не проверялось" in rows[35]["facts"][0]["text"]
     assert rows[38]["facts"][0]["tone"] == "muted"
 
-    # Трёхпозиционное реле: правило файла — только Энергомера, Тайпит, Пульсар.
-    assert rows[26]["facts"][0]["tone"] == "bad"
     assert "недоступен" in rows[39]["facts"][0]["text"]
 
 
-def test_three_position_relay_rule_confirms_listed_brands(client, admin_token, monkeypatch):
+def test_three_position_relay_shown_for_listed_brands(client, admin_token, monkeypatch):
     from app.adapters import astra_compatible
 
     monkeypatch.setattr(astra_compatible, "load_catalog", lambda **kwargs: None)
@@ -89,4 +89,5 @@ def test_three_position_relay_rule_confirms_listed_brands(client, admin_token, m
             f"/products/{product_id}/meter-parameters", headers=_auth_headers(admin_token)
         ).json()
     }
-    assert rows[26]["facts"][0]["tone"] == "ok"
+    assert 26 in rows
+    assert len(rows) == 39

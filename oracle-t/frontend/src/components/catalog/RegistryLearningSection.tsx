@@ -1,19 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  BookOpen,
-  ChevronDown,
-  ChevronRight,
-  GraduationCap,
-  Layers,
-  Loader2,
-  Search,
-} from "lucide-react";
+import { BookOpen, FileText, GraduationCap, Layers, Loader2, Search } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
 import type {
   CatalogTask,
   DescriptionIngestOutcome,
   DiscoveryOutcome,
+  ManualIngestOutcome,
   ModificationsOutcome,
   UnknownField,
 } from "../../api/types";
@@ -38,7 +31,6 @@ export function RegistryLearningSection({
   // перечитывает модели и коды СИ.
   onChanged: () => Promise<void>;
 }) {
-  const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -129,6 +121,19 @@ export function RegistryLearningSection({
       return `Поиск документации на официальном сайте (Яндекс): ${parts.join(", ")}.${found}`;
     });
 
+  // Руководства по эксплуатации — самый подробный источник о приборе (интерфейсы, протоколы,
+  // функции). Раньше кнопка стояла в блоке кодов СИ, хотя к реестру отношения не имеет.
+  const handleManuals = () =>
+    run("manuals", async () => {
+      const o = await api.post<ManualIngestOutcome>(`/manufacturers/${manufacturerId}/ingest-manuals`);
+      const parts = [`разобрано руководств ${o.processed}`, `характеристик сохранено ${o.characteristics_saved}`];
+      if (o.skipped_have_data) parts.push(`уже разобраны ранее ${o.skipped_have_data}`);
+      if (o.skipped_no_link) parts.push(`без ссылки на руководство ${o.skipped_no_link}`);
+      if (o.skipped_by_robots) parts.push(`закрыто robots.txt сайта ${o.skipped_by_robots}`);
+      if (o.failed) parts.push(`не загрузилось ${o.failed}`);
+      return `Руководства: ${parts.join(", ")}.`;
+    });
+
   const button = (
     key: string,
     label: string,
@@ -149,25 +154,18 @@ export function RegistryLearningSection({
 
   return (
     <div className="rounded-xl border border-white/[0.08] bg-white/[0.03]">
-      <div
-        className={`flex flex-wrap items-center justify-between gap-2 px-5 py-3 ${
-          open ? "border-b border-white/[0.08]" : ""
-        }`}
-      >
-        <button onClick={() => setOpen((v) => !v)} className="flex items-start gap-2 text-left" aria-expanded={open}>
-          <span className="mt-0.5 text-zinc-500">{open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
-          <span>
-            <h2 className="text-sm font-semibold text-zinc-100">
-              Обучение по Аршину
-              {unknownFields.length > 0 && (
-                <span className="ml-1.5 text-zinc-500">· вне справочника {unknownFields.length}</span>
-              )}
-            </h2>
-            <p className="mt-0.5 text-xs text-zinc-500">
-              Исполнения и характеристики из реестра ФГИС, документация с официального сайта через поиск.
-            </p>
-          </span>
-        </button>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] px-5 py-3">
+        <div>
+          <h2 className="text-sm font-semibold text-zinc-100">
+            Обучение по Аршину
+            {unknownFields.length > 0 && (
+              <span className="ml-1.5 text-zinc-500">· вне справочника {unknownFields.length}</span>
+            )}
+          </h2>
+          <p className="mt-0.5 text-xs text-zinc-500">
+            Исполнения и характеристики из реестра ФГИС, документация с официального сайта через поиск.
+          </p>
+        </div>
         {isAdmin && manufacturerId && (
           <div className="flex flex-wrap gap-2">
             {button(
@@ -198,6 +196,13 @@ export function RegistryLearningSection({
               <Search size={13} />,
               handleDocuments
             )}
+            {button(
+              "manuals",
+              "Разобрать руководства",
+              "Скачать руководства по эксплуатации моделей и извлечь из них характеристики. За один запуск — до 20 документов; уже разобранные пропускаются",
+              <FileText size={13} />,
+              handleManuals
+            )}
           </div>
         )}
       </div>
@@ -218,7 +223,7 @@ export function RegistryLearningSection({
         </div>
       )}
 
-      <div className="px-5 py-3" hidden={!open}>
+      <div className="px-5 py-3">
         {unknownFields.length === 0 ? (
           <p className="text-xs text-zinc-500">
             Характеристик вне Приложения C пока нет: всё, что извлечено из документов, нашло своё поле в справочнике.

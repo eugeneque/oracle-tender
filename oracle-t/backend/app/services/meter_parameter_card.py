@@ -12,8 +12,8 @@
 * П36 (ПО верхнего уровня) — вдобавок к полям совместимости, списки поддерживаемого
   оборудования площадок (`upper_software_service`);
 * П39 (Astra Linux) — каталог «Ready for Astra» по производителю, как в сопоставлении;
-* П26 (трёхпозиционное реле) — правило из комментария файла: такое реле только у трёх
-  производителей.
+* П26 (трёхпозиционное реле) — по комментарию файла такое реле бывает только у Энергомеры,
+  Тайпита и Пульсара, у моделей остальных производителей параметр не выводится.
 
 Ничего нового не хранится: вид собирается из уже существующих данных на каждый запрос.
 """
@@ -140,15 +140,11 @@ def _astra_fact(manufacturer: Manufacturer | None) -> ParameterFact:
     )
 
 
-def _relay_fact(manufacturer: Manufacturer | None) -> ParameterFact:
-    brand = ((manufacturer.brand_name or manufacturer.legal_name) if manufacturer else "") or ""
-    lowered = brand.lower()
-    if any(name in lowered for name in THREE_POSITION_RELAY_BRANDS):
-        return ParameterFact(f"По файлу тендерного отдела такое реле есть у «{brand}»", tone="ok")
-    return ParameterFact(
-        "По файлу тендерного отдела такое реле есть только у Энергомеры, Тайпита и Пульсара",
-        tone="bad",
-    )
+def _has_three_position_relay(manufacturer: Manufacturer | None) -> bool:
+    if manufacturer is None:
+        return False
+    brand = (manufacturer.brand_name or manufacturer.legal_name or "").lower()
+    return any(name in brand for name in THREE_POSITION_RELAY_BRANDS)
 
 
 def product_parameters(db: Session, product: Product) -> list[ParameterRow]:
@@ -157,9 +153,15 @@ def product_parameters(db: Session, product: Product) -> list[ParameterRow]:
     }
     manufacturer = db.get(Manufacturer, product.manufacturer_id) if product.manufacturer_id else None
     registry_facts = _registry_facts(db, product)
+    relay_applies = _has_three_position_relay(manufacturer)
 
     rows: list[ParameterRow] = []
     for parameter in METER_PARAMETERS:
+        # П26: трёхпозиционное реле по файлу бывает только у Энергомеры, Тайпита и
+        # Пульсара — у остальных строка «у вас такого нет» в каждой карточке была бы шумом
+        # (замечание 28.09.2026), параметр не выводится.
+        if parameter.rule == RULE_ONLY_MANUFACTURERS and not relay_applies:
+            continue
         row = ParameterRow(
             no=parameter.no, name=parameter.name, note=parameter.note, rule=parameter.rule
         )
@@ -176,7 +178,5 @@ def product_parameters(db: Session, product: Product) -> list[ParameterRow]:
             row.facts.append(_upper_software_fact(db, product))
         if parameter.rule == RULE_ASTRA:
             row.facts.append(_astra_fact(manufacturer))
-        if parameter.rule == RULE_ONLY_MANUFACTURERS:
-            row.facts.append(_relay_fact(manufacturer))
         rows.append(row)
     return rows
