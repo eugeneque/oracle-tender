@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import date
 
 import pytest
 from sqlalchemy import select
@@ -26,6 +27,7 @@ from app.adapters.fgis import (
 )
 from app.adapters.yandex_search import SearchHit, YandexSearchError, parse_search_xml
 from app.models.manufacturer import (
+    ProductStatus,
     CharacteristicSource,
     Manufacturer,
     Product,
@@ -237,6 +239,25 @@ class TestDiscoverModifications:
         _product(db_session, manufacturer, "НАРТИС‑И100")
         outcome = registry_modifications.discover_modifications(db_session, manufacturer)
         assert outcome.products_created == 1
+
+    def test_type_without_executions_gets_base_model(self, db_session, manufacturer):
+        """Карточка без списка исполнений: код СИ не должен остаться без модели (жалоба
+        28.09.2026, Ленэлектро). Короткое обозначение «ЛЕ» не совпадает префиксом с «ЛЕ-2»,
+        а тип с истёкшим свидетельством заводится снятым с выпуска."""
+
+        _product(db_session, manufacturer, "ЛЕ-2")
+        active = _si_type(db_session, manufacturer, notation="ЛЕ", tested_modifications=[], valid_to=date(2099, 1, 1))
+        expired = _si_type(db_session, manufacturer, notation="ЛЕ3", tested_modifications=[], valid_to=date(2015, 4, 1))
+
+        outcome = registry_modifications.discover_modifications(db_session, manufacturer)
+
+        assert outcome.base_models_created == 2
+        by_type = {p.si_type_id: p for p in db_session.scalars(select(Product).where(Product.manufacturer_id == manufacturer.id))}
+        assert by_type[active.id].model_code == "ЛЕ"
+        assert by_type[active.id].status == ProductStatus.ACTIVE.value
+        assert by_type[expired.id].status == ProductStatus.DISCONTINUED.value
+        again = registry_modifications.discover_modifications(db_session, manufacturer)
+        assert again.products_created == 0
 
     def test_unlinked_site_product_gets_its_type(self, db_session, manufacturer):
         si_type = _si_type(db_session, manufacturer, tested_modifications=[W112])

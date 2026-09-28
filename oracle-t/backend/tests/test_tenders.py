@@ -8,6 +8,7 @@ from app.adapters.base import PollOutcome, SourceAdapter, TenderSummary
 from app.db.session import SessionLocal
 from app.models.source import Source
 from app.models.tender import Tender
+from app.services.ai_relevance_service import BatchResult
 
 
 def _auth_headers(token: str) -> dict[str, str]:

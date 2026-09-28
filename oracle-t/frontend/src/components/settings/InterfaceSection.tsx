@@ -1,0 +1,37 @@
+import { Moon } from "lucide-react";
+
+import { useTheme } from "../../hooks/useTheme";
+import { NavLayoutSection } from "./NavLayoutSection";
+import { SettingCard, SettingsGroup, SettingsPanel, Toggle } from "./ui";
+
+/** Вкладка «Интерфейс»: личные настройки вида — тема и расположение меню. Хранятся в этом
+ * браузере и на других пользователей не влияют. */
+export function InterfaceSection() {
+  const { theme, setTheme } = useTheme();
+  const isDark = theme === "dark";
+
+  return (
+    <SettingsPanel
+      title="Интерфейс"
+      description="Как выглядит приложение у вас. Эти настройки хранятся в браузере и не меняют ничего у коллег."
+    >
+      <SettingsGroup id="interface-theme" label="Оформление">
+        <SettingCard
+          id="interface-dark-theme"
+          active={isDark}
+          icon={<Moon size={18} />}
+          title="Тёмная тема"
+          description="Тот же переключатель есть в шапке приложения."
+          control={
+            <Toggle
+              label="Тёмная тема"
+              checked={isDark}
+              onChange={(value) => setTheme(value ? "dark" : "light")}
+            />
+          }
+        />
+      </SettingsGroup>
+      <NavLayoutSection />
+    </SettingsPanel>
+  );
+}

@@ -32,7 +32,7 @@ class YandexConnectionTestResult(BaseModel):
 
 # --- переключатель ИИ-провайдера и Claude через RouterAI (18.09.2026) --------------------
 
-AiProviderKey = Literal["yandex", "claude"]
+AiProviderKey = Literal["yandex", "claude", "deepseek"]
 
 
 class AiProviderStatus(BaseModel):
@@ -69,6 +69,8 @@ class RouterAiSettingsOut(BaseModel):
     is_configured: bool
     api_key_masked: str | None
     model: str
+    # Модель DeepSeek (28.09.2026) — через тот же ключ и шлюз.
+    deepseek_model: str
     base_url: str
     updated_at: datetime | None
     updated_by: str | None
@@ -80,6 +82,7 @@ class RouterAiSettingsUpdate(BaseModel):
 
     api_key: str | None = None
     model: str | None = None
+    deepseek_model: str | None = None
     base_url: str | None = None
 
 

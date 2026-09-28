@@ -9,6 +9,7 @@ os.environ.setdefault("BOOTSTRAP_ADMIN_USERNAME", "admin")
 os.environ.setdefault("BOOTSTRAP_ADMIN_PASSWORD", "TestAdmin123!")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret")
 os.environ.setdefault("SCHEDULER_ENABLED", "false")
+os.environ.setdefault("JOBS_RESUME_INTERRUPTED", "false")
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 

@@ -1,3 +1,5 @@
+import type { AiProviderKey } from "../api/types";
+
 /**
  * Светящаяся сфера ИИ — визуальный маркер того, что содержимое блока сгенерировала модель.
  *
@@ -10,7 +12,8 @@
  * известная проблема для части пользователей, и системная настройка на этот счёт есть.
  *
  * `variant` — гамма под активного провайдера: розово-голубая у YandexGPT, оранжевая у
- * Claude (см. `.ai-orb--claude` в index.css). Меняются только цвета пятен, не геометрия.
+ * Claude, синяя у DeepSeek (см. `.ai-orb--claude`, `.ai-orb--deepseek` в index.css).
+ * Меняются только цвета пятен, не геометрия.
  */
 export function AiOrb({
   size = 44,
@@ -19,11 +22,11 @@ export function AiOrb({
 }: {
   size?: number;
   busy?: boolean;
-  variant?: "yandex" | "claude";
+  variant?: AiProviderKey;
 }) {
   return (
     <div
-      className={variant === "claude" ? "ai-orb ai-orb--claude" : "ai-orb"}
+      className={variant === "yandex" ? "ai-orb" : `ai-orb ai-orb--${variant}`}
       style={{ width: size, height: size }}
       data-busy={busy ? "true" : undefined}
       aria-hidden="true"

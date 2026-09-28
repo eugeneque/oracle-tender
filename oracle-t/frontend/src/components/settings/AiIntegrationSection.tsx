@@ -91,8 +91,8 @@ export function AiIntegrationSection() {
             Искусственный интеллект
           </h2>
           <p className="mt-0.5 text-xs text-zinc-500">
-            Модели ИИ-модуля (раздел 5.4 ТЗ): YandexGPT или Claude через RouterAI. Каждый пользователь
-            выбирает модель сам; здесь — ключи обоих провайдеров и модель по умолчанию. Yandex AI
+            Модели ИИ-модуля (раздел 5.4 ТЗ): YandexGPT, Claude или DeepSeek через RouterAI. Каждый пользователь
+            выбирает модель сам; здесь — ключи провайдеров и модель по умолчанию. Yandex AI
             Studio также даёт OCR-fallback для сканов (раздел 5.2). Ключи хранятся в БД, без .env.
           </p>
         </div>
@@ -153,7 +153,7 @@ export function AiIntegrationSection() {
                 <button
                   onClick={handleSave}
                   disabled={isSaving}
-                  className="rounded-lg bg-indigo-500 px-3.5 py-2 text-xs font-medium text-white hover:bg-indigo-400 disabled:opacity-50"
+                  className="rounded-lg bg-indigo-500 px-3.5 py-2 text-xs font-medium text-snow hover:bg-indigo-400 disabled:opacity-50"
                 >
                   {isSaving ? "Сохраняю…" : "Сохранить"}
                 </button>

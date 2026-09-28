@@ -1,7 +1,8 @@
 """Единая точка входа ИИ-модуля: `run_structured` уходит к активному провайдеру.
 
 До 18.09.2026 вызывающие сервисы импортировали `run_structured` прямо из `yandex_ai_client`.
-Теперь провайдеров два (YandexGPT и Claude через RouterAI), и какой из них активен, решает
+Теперь провайдеров три (YandexGPT, а через RouterAI — Claude и с 28.09.2026 DeepSeek; у двух
+последних один клиент, разница только в модели), и какой из них активен, решает
 администратор на странице «Интеграции» (блок «Искусственный интеллект»). Сервисы-потребители (извлечение требований,
 оценка по профилю, сводка аналитики и т.д.) об этом не знают: контракт `run_structured`
 одинаков у обоих клиентов, а выбор делается здесь на каждый вызов — переключение вступает
@@ -23,11 +24,14 @@ from sqlalchemy.orm import Session
 
 from app.services import routerai_client, yandex_ai_client
 from app.services.ai_provider_service import (
-    PROVIDER_CLAUDE,
+    PROVIDER_LABELS,
+    PROVIDER_YANDEX,
+    ROUTERAI_PROVIDERS,
     AiNotConfiguredError,
     AiQuotaExceededError,
     get_active_provider,
     get_routerai_credentials,
+    is_provider_configured,
 )
 
 ResponseT = TypeVar("ResponseT", bound=pydantic.BaseModel)
@@ -54,14 +58,25 @@ def run_structured(
     Ошибка «ключ не задан» у любого из них — `AiNotConfiguredError`, остальное поднимается как
     есть: вызывающий сервис сам решает, как логировать и изолировать сбой (раздел 5.9 ТЗ)."""
 
-    if get_active_provider(db) == PROVIDER_CLAUDE:
-        return routerai_client.run_structured(
-            db,
-            system_prompt=system_prompt,
-            user_text=user_text,
-            response_model=response_model,
-            temperature=temperature,
-        )
+    provider = get_active_provider(db)
+    if provider in ROUTERAI_PROVIDERS:
+        try:
+            return routerai_client.run_structured(
+                db,
+                system_prompt=system_prompt,
+                user_text=user_text,
+                response_model=response_model,
+                temperature=temperature,
+                provider=provider,
+            )
+        except AiQuotaExceededError as exc:
+            # Лимит расходов ключа RouterAI исчерпан (28.09.2026: DeepSeek — системная модель,
+            # и всё фоновое без автора — автозаполнение каталога, ИИ-отбор новых закупок,
+            # ночная достройка — падало сотнями вызовов). Деньги сами не вернутся, повтор
+            # бессмыслен; если YandexGPT подключён, запрос уходит в него, а не теряется.
+            if not is_provider_configured(db, PROVIDER_YANDEX):
+                raise
+            _warn_quota_fallback(provider, exc)
     return yandex_ai_client.run_structured(
         db,
         system_prompt=system_prompt,
@@ -71,6 +86,26 @@ def run_structured(
     )
 
 
+_quota_warned_at: float = 0.0
+
+
+def _warn_quota_fallback(provider: str, exc: Exception) -> None:
+    """Одно предупреждение в 10 минут, а не на каждый вызов: при исчерпанном лимите их сотни."""
+
+    global _quota_warned_at
+    import time
+
+    from loguru import logger
+
+    yandex_ai_client._note_fallback(
+        f"{PROVIDER_LABELS.get(provider, provider)} недоступен (исчерпан лимит RouterAI) — "
+        "ответ дал YandexGPT"
+    )
+    if time.monotonic() - _quota_warned_at > 600:
+        _quota_warned_at = time.monotonic()
+        logger.warning(f"{exc} — запросы переключены на YandexGPT до пополнения лимита")
+
+
 def active_model(db: Session) -> tuple[str, str | None]:
     """Провайдер и модель, которые обслужат текущее обращение: `("claude",
     "anthropic/claude-opus-5")`. Пишется рядом с результатом (AI-оценка, 25.09.2026), чтобы
@@ -78,9 +113,9 @@ def active_model(db: Session) -> tuple[str, str | None]:
     заполнен ключ: сам вызов тогда всё равно упадёт с понятной ошибкой."""
 
     provider = get_active_provider(db)
-    if provider == PROVIDER_CLAUDE:
+    if provider in ROUTERAI_PROVIDERS:
         try:
-            return provider, get_routerai_credentials(db)[1]
+            return provider, get_routerai_credentials(db, provider)[1]
         except AiNotConfiguredError:
             return provider, None
     return provider, yandex_ai_client.DEFAULT_MODEL

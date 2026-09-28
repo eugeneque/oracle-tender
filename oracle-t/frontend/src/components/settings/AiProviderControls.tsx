@@ -10,7 +10,7 @@ import {
   useAiProvider,
 } from "../../hooks/useAiProvider";
 import { formatDateTime } from "../../utils/format";
-import { AI_PROVIDERS } from "../../utils/aiProviders";
+import { AI_PROVIDER_ACCENT, AI_PROVIDERS } from "../../utils/aiProviders";
 import { AiProviderIcon } from "../AiProviderIcon";
 
 /**
@@ -86,10 +86,7 @@ export function AiProviderSwitcher({ scope }: { scope: "me" | "default" }) {
           {AI_PROVIDERS.map((item) => {
             const isActive = current === item.key;
             const isConfigured = status?.configured_providers.includes(item.key) ?? false;
-            const isClaude = item.key === "claude";
-            const activeClasses = isClaude
-              ? "bg-orange-500/20 text-orange-100 shadow-[inset_0_0_0_1px_rgba(251,146,60,0.45)]"
-              : "bg-indigo-500/20 text-indigo-100 shadow-[inset_0_0_0_1px_rgba(129,140,248,0.45)]";
+            const activeClasses = AI_PROVIDER_ACCENT[item.key].segment;
             return (
               <button
                 key={item.key}
@@ -151,10 +148,7 @@ export function ProviderCard({
   isConfigured: boolean;
   children: React.ReactNode;
 }) {
-  const activeBorder =
-    provider === "claude"
-      ? "border-orange-400/30 bg-orange-500/[0.04]"
-      : "border-indigo-400/30 bg-indigo-500/[0.04]";
+  const activeBorder = AI_PROVIDER_ACCENT[provider].card;
   return (
     <div
       className={`rounded-xl border p-4 ${isActive ? activeBorder : "border-white/[0.08] bg-white/[0.02]"}`}
@@ -176,9 +170,7 @@ export function ProviderCard({
         {isActive && (
           <span
             className={`ml-auto rounded-full px-2.5 py-1 text-[11px] font-medium ${
-              provider === "claude"
-                ? "bg-orange-500/15 text-orange-200"
-                : "bg-indigo-500/15 text-indigo-200"
+              AI_PROVIDER_ACCENT[provider].pill
             }`}
           >
             по умолчанию
@@ -195,6 +187,7 @@ export function RouterAiCard() {
   const [settings, setSettings] = useState<RouterAiSettings | null>(null);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [modelInput, setModelInput] = useState("");
+  const [deepseekModelInput, setDeepseekModelInput] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -209,6 +202,7 @@ export function RouterAiCard() {
       .then((data) => {
         setSettings(data);
         setModelInput(data.model);
+        setDeepseekModelInput(data.deepseek_model);
       })
       .catch((err) =>
         setError(
@@ -225,8 +219,9 @@ export function RouterAiCard() {
     setIsSaving(true);
     try {
       // Ключ уходит только если введён заново — PATCH-семантика, как у Yandex.
-      const payload: { model: string; api_key?: string } = {
+      const payload: { model: string; deepseek_model: string; api_key?: string } = {
         model: modelInput,
+        deepseek_model: deepseekModelInput,
       };
       if (apiKeyInput !== "") payload.api_key = apiKeyInput;
       const data = await api.patch<RouterAiSettings>(
@@ -235,6 +230,7 @@ export function RouterAiCard() {
       );
       setSettings(data);
       setModelInput(data.model);
+      setDeepseekModelInput(data.deepseek_model);
       setApiKeyInput("");
       // Подпись модели и список настроенных провайдеров в переключателях — из свежего статуса.
       void refreshAiProvider();
@@ -270,11 +266,18 @@ export function RouterAiCard() {
     }
   };
 
+  // Один ключ RouterAI обслуживает две модели — Claude и DeepSeek (28.09.2026). Карточка
+  // подсвечивается цветом той из них, что выбрана по умолчанию.
+  const defaultRouterAi =
+    status?.default_provider === "claude" || status?.default_provider === "deepseek"
+      ? status.default_provider
+      : null;
+
   return (
     <ProviderCard
-      provider="claude"
-      title="Claude · RouterAI"
-      isActive={status?.default_provider === "claude"}
+      provider={defaultRouterAi ?? "claude"}
+      title="RouterAI · Claude и DeepSeek"
+      isActive={defaultRouterAi !== null}
       isConfigured={settings?.is_configured ?? false}
     >
       {error && (
@@ -295,13 +298,23 @@ export function RouterAiCard() {
           />
         </label>
         <label className="block text-xs text-zinc-400">
-          Модель
+          Модель Claude
           <input
             type="text"
             value={modelInput}
             onChange={(e) => setModelInput(e.target.value)}
             placeholder="anthropic/claude-opus-5"
             className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-orange-400/50 focus:outline-none"
+          />
+        </label>
+        <label className="block text-xs text-zinc-400 sm:col-start-2">
+          Модель DeepSeek
+          <input
+            type="text"
+            value={deepseekModelInput}
+            onChange={(e) => setDeepseekModelInput(e.target.value)}
+            placeholder="deepseek/deepseek-v4-pro-0813"
+            className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-blue-400/50 focus:outline-none"
           />
         </label>
       </div>
@@ -316,7 +329,7 @@ export function RouterAiCard() {
         <button
           onClick={() => void handleSave()}
           disabled={isSaving}
-          className="rounded-lg bg-orange-500 px-3.5 py-2 text-xs font-medium text-white hover:bg-orange-400 disabled:opacity-50"
+          className="rounded-lg bg-orange-500 px-3.5 py-2 text-xs font-medium text-snow hover:bg-orange-400 disabled:opacity-50"
         >
           {isSaving ? "Сохраняю…" : "Сохранить"}
         </button>
@@ -338,7 +351,7 @@ export function RouterAiCard() {
               : "border-red-500/20 bg-red-500/10 text-red-400"
           }`}
         >
-          {testResult.message}
+          <p className="whitespace-pre-line">{testResult.message}</p>
         </div>
       )}
     </ProviderCard>

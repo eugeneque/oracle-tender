@@ -136,7 +136,7 @@ export function AccountPage() {
     <AppShell>
       <div className="px-8 pb-10 pt-6">
         <PageHeader
-          breadcrumb={["Sova Scanner", "Учётная запись"]}
+          breadcrumb={["Sova", "Учётная запись"]}
           title="Учётная запись"
           icon={
             <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-400">
@@ -168,8 +168,8 @@ export function AccountPage() {
                 title="Загрузить новую картинку"
               >
                 <UserAvatar user={user} size="xl" />
-                <span className="absolute inset-0 flex items-center justify-center rounded-full bg-black/50 opacity-0 transition-opacity group-hover:opacity-100">
-                  <Camera size={22} className="text-white" />
+                <span className="absolute inset-0 flex items-center justify-center rounded-full bg-scrim/50 opacity-0 transition-opacity group-hover:opacity-100">
+                  <Camera size={22} className="text-snow" />
                 </span>
               </button>
               <input
@@ -252,7 +252,7 @@ export function AccountPage() {
               <button
                 onClick={() => void saveName()}
                 disabled={!isDirty || isSaving}
-                className="flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-40"
+                className="flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-2 text-sm font-medium text-snow hover:opacity-90 disabled:opacity-40"
               >
                 <Save size={14} />
                 {isSaving ? "Сохраняю…" : "Сохранить"}

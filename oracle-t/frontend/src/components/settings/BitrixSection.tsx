@@ -211,7 +211,7 @@ export function BitrixSection({ isAdmin }: { isAdmin: boolean }) {
                 <button
                   onClick={handleCreate}
                   disabled={isBusy || !newName.trim()}
-                  className="flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3.5 py-2 text-xs font-medium text-white hover:bg-indigo-400 disabled:opacity-50"
+                  className="flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3.5 py-2 text-xs font-medium text-snow hover:bg-indigo-400 disabled:opacity-50"
                 >
                   <KeyRound size={13} />
                   Выпустить ключ

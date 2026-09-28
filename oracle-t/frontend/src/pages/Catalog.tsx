@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  BadgeCheck,
+  AlertTriangle,
+  Check,
   Boxes,
   ChevronRight,
   ExternalLink,
-  FileDown,
   Link2,
   Loader2,
   Pencil,
@@ -16,6 +16,7 @@ import {
 
 import { ApiError, api, uploadFile } from "../api/client";
 import type {
+  CatalogAutofillStatus,
   CatalogImportOutcome,
   CatalogSite,
   CatalogTask,
@@ -29,6 +30,8 @@ import { CatalogDocumentsSection } from "../components/catalog/CatalogDocumentsS
 import { ProductDrawer } from "../components/catalog/ProductDrawer";
 import { ProductMatrix } from "../components/catalog/ProductMatrix";
 import { RegistryLearningSection } from "../components/catalog/RegistryLearningSection";
+import { SiTypeGroups } from "../components/catalog/SiTypeGroups";
+import { siTypeGroup } from "../components/catalog/siTypeGroup";
 import { UpperSoftwareSection } from "../components/catalog/UpperSoftwareSection";
 import { PageHeader } from "../components/PageHeader";
 import { useAuth } from "../context/useAuth";
@@ -85,12 +88,6 @@ const STEPS: { key: StepKey; title: string; caption: string; about: string }[] =
   },
 ];
 
-const SI_SOURCE_LABELS: Record<string, string> = {
-  auto_search: "автопоиск",
-  manual: "вручную",
-  import: "импорт",
-};
-
 function readStep(): StepKey {
   try {
     const stored = localStorage.getItem("catalog.step");
@@ -100,15 +97,75 @@ function readStep(): StepKey {
   }
 }
 
-function Badge({ tone, children }: { tone: "green" | "amber" | "zinc"; children: React.ReactNode }) {
-  const tones = {
-    green: "bg-emerald-500/10 text-emerald-400",
-    amber: "bg-amber-500/10 text-amber-400",
-    zinc: "bg-zinc-500/10 text-zinc-400",
-  };
+// Порядок списка производителей: по доле рынка (как отдаёт сервер, без доли — в конце) или по
+// алфавиту. Выбор запоминается в браузере.
+type ManufacturerSort = "share" | "alpha";
+
+function readManufacturerSort(): ManufacturerSort {
+  try {
+    return localStorage.getItem("catalog.manufacturerSort") === "alpha" ? "alpha" : "share";
+  } catch {
+    return "share";
+  }
+}
+
+const manufacturerTitle = (m: Manufacturer) => m.brand_name ?? m.legal_name;
+
+// Автозаполнение каталога (28.09.2026): сервер раз в сутки опрашивает все источники по
+// каждому производителю по очереди — ФГИС, сайт, Аршин, руководства. Здесь — значок хода
+// опроса в списке и ручной запуск.
+const AUTOFILL_STEP_LABELS: Record<string, string> = {
+  si_search: "коды СИ в ФГИС",
+  site: "сайт производителя",
+  link: "привязка кодов СИ",
+  registry: "модели из реестра",
+  relink: "привязка исполнений",
+};
+
+const isAutofillActive = (s?: CatalogAutofillStatus) => s?.status === "queued" || s?.status === "running";
+
+function autofillTitle(s: CatalogAutofillStatus): string {
+  if (s.status === "queued") return "В очереди на опрос источников";
+  if (s.status === "running")
+    return `Идёт опрос${s.current_step ? `: ${AUTOFILL_STEP_LABELS[s.current_step] ?? s.current_step}` : ""}`;
+  const when = s.finished_at ? ` ${formatDate(s.finished_at)}` : "";
+  if (s.status === "error") return `Опрос${when} не удался: ${s.message ?? "подробности в журнале"}`;
+  if (s.empty) {
+    const why = s.failed_steps.length
+      ? `не ответили: ${s.failed_steps.map((k) => AUTOFILL_STEP_LABELS[k] ?? k).join(", ")}`
+      : "источники не нашли ни одного прибора";
+    return `Опрошен${when}, моделей нет — ${why}`;
+  }
+  if (s.failed_steps.length)
+    return `Опрошен${when}, но не всё: ${s.failed_steps.map((k) => AUTOFILL_STEP_LABELS[k] ?? k).join(", ")} — подробности в журнале`;
+  if (s.enriching) return `Опрошен${when}: приборы и коды СИ заведены, характеристики дополняются по Аршину и руководствам`;
+  return `Опрошен${when}: каталог заполнен`;
+}
+
+function AutofillMark({ status }: { status?: CatalogAutofillStatus }) {
+  if (!status) return null;
+  const title = autofillTitle(status);
+  if (status.status === "running")
+    return (
+      <span title={title} className="inline-flex text-indigo-400">
+        <Search size={12} className="catalog-searching" />
+      </span>
+    );
+  if (status.status === "queued")
+    return (
+      <span title={title} className="inline-flex text-zinc-500">
+        <Search size={12} />
+      </span>
+    );
+  if (status.status === "error" || status.empty)
+    return (
+      <span title={title} className="inline-flex text-red-400">
+        <AlertTriangle size={12} />
+      </span>
+    );
   return (
-    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${tones[tone]}`}>
-      {children}
+    <span title={title} className={`inline-flex ${status.failed_steps.length ? "text-amber-400" : "text-emerald-400"}`}>
+      <Check size={13} strokeWidth={2.5} />
     </span>
   );
 }
@@ -151,6 +208,7 @@ export function CatalogPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [openProductId, setOpenProductId] = useState<string | null>(null);
   const [step, setStep] = useState<StepKey>(readStep);
+  const [manufacturerSort, setManufacturerSort] = useState<ManufacturerSort>(readManufacturerSort);
 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -160,6 +218,31 @@ export function CatalogPage() {
   // производителей, для чьего сайта есть разобранный профиль.
   const [catalogSites, setCatalogSites] = useState<CatalogSite[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [autofill, setAutofill] = useState<Record<string, CatalogAutofillStatus>>({});
+  const autofillActive = useMemo(() => Object.values(autofill).some(isAutofillActive), [autofill]);
+  // Ход опроса для полосы над списком: сколько производителей этого прогона уже опрошено,
+  // кого опрашивают прямо сейчас и на каком шаге, скольким ещё дополняются характеристики.
+  // «Этот прогон» начался, когда встала в очередь самая ранняя ещё не выполненная задача;
+  // опрошенными в нём считаются закончившие после этого момента (по времени окончания, а не
+  // постановки — иначе закончившие раньше соседей по очереди выпадали из счёта).
+  const autofillProgress = useMemo(() => {
+    const rows = Object.values(autofill);
+    const active = rows.filter(isAutofillActive);
+    const enriching = rows.filter((r) => !isAutofillActive(r) && r.enriching).length;
+    const running = rows.find((r) => r.status === "running");
+    const current = running ? manufacturers.find((m) => m.id === running.manufacturer_id) : undefined;
+    if (!active.length) return { done: 0, total: 0, current: null, step: null, enriching };
+    // Сравнение моментов, а не строк: время постановки приходит в поясе базы, окончания — в UTC.
+    const since = Math.min(...active.map((r) => Date.parse(r.created_at)));
+    const done = rows.filter((r) => !isAutofillActive(r) && r.finished_at != null && Date.parse(r.finished_at) >= since).length;
+    return {
+      done,
+      total: done + active.length,
+      current: current ? manufacturerTitle(current) : null,
+      step: running?.current_step ? AUTOFILL_STEP_LABELS[running.current_step] ?? running.current_step : null,
+      enriching,
+    };
+  }, [autofill, manufacturers]);
   // Форма производителя (администратор): добавить нового или поправить долю рынка и сайт.
   // `editingId === "new"` — создание. Доля рынка вводится вместе с источником оценки.
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -171,13 +254,22 @@ export function CatalogPage() {
     market_share_source: "",
   });
 
+  const sortedManufacturers = useMemo(
+    () =>
+      manufacturerSort === "alpha"
+        ? [...manufacturers].sort((a, b) => manufacturerTitle(a).localeCompare(manufacturerTitle(b), "ru"))
+        : manufacturers,
+    [manufacturers, manufacturerSort]
+  );
   const selected = useMemo(() => manufacturers.find((m) => m.id === selectedId) ?? null, [manufacturers, selectedId]);
   const openProduct = useMemo(() => products.find((p) => p.id === openProductId) ?? null, [products, openProductId]);
   const selectedSite = useMemo(
     () => catalogSites.find((site) => site.manufacturer_id === selectedId) ?? null,
     [catalogSites, selectedId]
   );
-  const siTypesNeedingReview = useMemo(() => siTypes.filter((s) => s.review_status === "needs_review").length, [siTypes]);
+  // «Ждут проверки» — только коды, по которым от человека требуется действие; истёкшие и
+  // «не электросчётчики» — факты реестра, подтверждение их не меняет.
+  const siTypesNeedingReview = useMemo(() => siTypes.filter((s) => siTypeGroup(s) === "pending").length, [siTypes]);
   const activeProducts = useMemo(() => products.filter((p) => p.status !== "discontinued").length, [products]);
   const productsNeedingReview = useMemo(() => products.filter((p) => p.review_status === "needs_review").length, [products]);
 
@@ -223,6 +315,49 @@ export function CatalogPage() {
     void run("manufacturer", () => loadManufacturerData(selectedId));
   }, [selectedId]);
 
+  // Ход автозаполнения: пока кто-то в очереди или опрашивается — каждые 5 секунд, иначе раз
+  // в минуту (ночной проход начинается сам). Когда опрос открытого производителя закончился,
+  // его данные перечитываются — пользователь видит заполненное без перезагрузки.
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const autofillRef = useRef<Record<string, CatalogAutofillStatus>>({});
+  const loadAutofill = useCallback(async () => {
+    try {
+      const rows = await api.get<CatalogAutofillStatus[]>("/catalog/autofill/status");
+      const next: Record<string, CatalogAutofillStatus> = Object.fromEntries(rows.map((r) => [r.manufacturer_id, r]));
+      const current = selectedIdRef.current;
+      if (current && isAutofillActive(autofillRef.current[current]) && next[current] && !isAutofillActive(next[current])) {
+        void loadManufacturerData(current).catch(() => undefined);
+      }
+      autofillRef.current = next;
+      setAutofill(next);
+    } catch {
+      // статус опроса — подсказка, без него каталог работает
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAutofill();
+    const timer = window.setInterval(() => void loadAutofill(), autofillActive ? 5000 : 60000);
+    return () => window.clearInterval(timer);
+  }, [autofillActive, loadAutofill]);
+
+  const handleAutofillAll = () =>
+    run("autofill-all", async () => {
+      const { queued } = await api.post<{ queued: number }>("/catalog/autofill");
+      setNotice(
+        `Опрос каталога запущен: производителей в очереди — ${queued}. Они опрашиваются по одному; ` +
+          "лупа в списке — идёт опрос, галочка — готово. Раз в сутки это происходит само."
+      );
+      await loadAutofill();
+    });
+
+  const handleAutofillOne = () =>
+    run("autofill-one", async () => {
+      await api.post<CatalogTask>(`/manufacturers/${selectedId}/autofill`);
+      await loadAutofill();
+    });
+
   const closeProduct = useCallback(() => setOpenProductId(null), []);
 
   const switchStep = (next: StepKey) => {
@@ -231,6 +366,15 @@ export function CatalogPage() {
       localStorage.setItem("catalog.step", next);
     } catch {
       // без сохранения — шаг просто не запомнится
+    }
+  };
+
+  const switchManufacturerSort = (next: ManufacturerSort) => {
+    setManufacturerSort(next);
+    try {
+      localStorage.setItem("catalog.manufacturerSort", next);
+    } catch {
+      // без сохранения — порядок просто не запомнится
     }
   };
 
@@ -357,7 +501,7 @@ export function CatalogPage() {
     <AppShell>
       <div className="mx-auto max-w-7xl px-8 py-8">
         <PageHeader
-          breadcrumb={["Sova Scanner", "Каталог продукции"]}
+          breadcrumb={["Sova", "Каталог продукции"]}
           title="Каталог продукции"
           icon={
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
@@ -455,9 +599,75 @@ export function CatalogPage() {
                 </div>
               </div>
             )}
+            {(isAdmin || autofillActive || autofillProgress.enriching > 0) && (
+              <div className="space-y-1.5 border-b border-white/[0.08] px-3 py-2">
+                {autofillActive ? (
+                  <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-2.5 py-2" aria-live="polite">
+                    <div className="flex items-center gap-1.5 text-xs text-zinc-200">
+                      <Search size={12} className="catalog-searching shrink-0 text-indigo-400" />
+                      Опрошено {autofillProgress.done} из {autofillProgress.total}
+                    </div>
+                    <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/[0.06]">
+                      <div
+                        className="h-full rounded-full bg-indigo-400 transition-[width] duration-500"
+                        style={{ width: `${autofillProgress.total ? (autofillProgress.done / autofillProgress.total) * 100 : 0}%` }}
+                      />
+                    </div>
+                    {autofillProgress.current && (
+                      <div className="mt-1.5 truncate text-[11px] text-zinc-500">
+                        Сейчас: <span className="text-zinc-300">{autofillProgress.current}</span>
+                        {autofillProgress.step && <> — {autofillProgress.step}</>}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  isAdmin && (
+                    <button
+                      onClick={handleAutofillAll}
+                      disabled={busy === "autofill-all"}
+                      title="Опросить все источники по всем производителям по очереди: ФГИС, сайты, реестр, затем характеристики по Аршину и руководствам. Раз в сутки это происходит само."
+                      className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+                    >
+                      {busy === "autofill-all" ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                      Опросить весь каталог
+                    </button>
+                  )
+                )}
+                {autofillProgress.enriching > 0 && (
+                  <div
+                    className="flex items-center gap-1.5 px-1 text-[11px] text-zinc-500"
+                    title="Приборы и коды СИ уже заведены; характеристики из «Описаний типа» и руководств дополняются вторым проходом — он дольше, потому что читает документы"
+                  >
+                    <Loader2 size={11} className="shrink-0 animate-spin" />
+                    Характеристики дополняются: {autofillProgress.enriching}
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="flex items-center gap-1 border-b border-white/[0.08] px-3 py-2" role="radiogroup" aria-label="Порядок производителей">
+              <span className="mr-auto pl-1 text-[11px] text-zinc-500">Порядок</span>
+              {(
+                [
+                  ["share", "По доле рынка"],
+                  ["alpha", "А–Я"],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  role="radio"
+                  aria-checked={manufacturerSort === key}
+                  onClick={() => switchManufacturerSort(key)}
+                  className={`rounded-md px-2 py-1 text-[11px] transition-colors ${
+                    manufacturerSort === key ? "bg-white/[0.08] text-zinc-100" : "text-zinc-500 hover:text-zinc-300"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <div className="max-h-[70vh] overflow-y-auto py-1">
-              {/* Порядок — по доле рынка (сервер сортирует), без опубликованной доли — в конце. */}
-              {manufacturers.map((m) => (
+              {/* По доле рынка — порядок сервера, без опубликованной доли — в конце. */}
+              {sortedManufacturers.map((m) => (
                 <button
                   key={m.id}
                   onClick={() => setSelectedId(m.id)}
@@ -466,11 +676,13 @@ export function CatalogPage() {
                   }`}
                 >
                   <span className="truncate">
-                    {m.brand_name ?? m.legal_name}
+                    {manufacturerTitle(m)}
                     {m.is_mirtek && <span className="ml-1.5 text-[10px] text-emerald-400">мы</span>}
                   </span>
+                  <span className="ml-2 flex shrink-0 items-center gap-1.5">
+                  <AutofillMark status={autofill[m.id]} />
                   <span
-                    className="ml-2 shrink-0 font-mono text-[11px] tabular-nums text-zinc-500"
+                    className="font-mono text-[11px] tabular-nums text-zinc-500"
                     title={
                       m.market_share_pct != null
                         ? `Доля рынка ${m.market_share_pct} % — ${m.market_share_source ?? "источник не указан"}`
@@ -478,6 +690,7 @@ export function CatalogPage() {
                     }
                   >
                     {m.market_share_pct != null ? `${m.market_share_pct} %` : "—"}
+                  </span>
                   </span>
                 </button>
               ))}
@@ -501,6 +714,31 @@ export function CatalogPage() {
                           className="rounded p-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
                         >
                           <Pencil size={14} />
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button
+                          onClick={handleAutofillOne}
+                          disabled={busy === "autofill-one" || isAutofillActive(autofill[selected.id])}
+                          title={
+                            autofill[selected.id]
+                              ? autofillTitle(autofill[selected.id])
+                              : "Опросить все источники по этому производителю: ФГИС, сайт, Аршин, руководства"
+                          }
+                          className="flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1 text-[11px] text-zinc-400 hover:bg-white/5 hover:text-zinc-200 disabled:opacity-60"
+                        >
+                          {isAutofillActive(autofill[selected.id]) ? (
+                            <Search size={12} className={autofill[selected.id]?.status === "running" ? "catalog-searching" : ""} />
+                          ) : busy === "autofill-one" ? (
+                            <Loader2 size={12} className="animate-spin" />
+                          ) : (
+                            <RefreshCw size={12} />
+                          )}
+                          {autofill[selected.id]?.status === "running"
+                            ? "Идёт опрос"
+                            : autofill[selected.id]?.status === "queued"
+                              ? "В очереди"
+                              : "Опросить"}
                         </button>
                       )}
                     </div>
@@ -555,7 +793,7 @@ export function CatalogPage() {
                       >
                         <span
                           className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold ${
-                            active ? "bg-indigo-500 text-white" : "border border-white/15 text-zinc-500"
+                            active ? "bg-indigo-500 text-snow" : "border border-white/15 text-zinc-500"
                           }`}
                         >
                           {index + 1}
@@ -608,80 +846,13 @@ export function CatalogPage() {
                       {siTypes.length === 0 ? (
                         <p className="text-xs text-zinc-500">Кодов СИ пока нет — запустите автопоиск или загрузите CSV.</p>
                       ) : (
-                        <table className="w-full text-left text-sm">
-                          <tbody>
-                            {siTypes.map((s) => (
-                              <tr key={s.id} className="border-t border-white/[0.06] first:border-t-0">
-                                <td className="whitespace-nowrap py-2 pr-4 align-top font-mono text-zinc-100">{s.si_code}</td>
-                                <td className="py-2 pr-4 align-top">
-                                  <div className="flex flex-wrap items-center gap-1.5">
-                                    <Badge tone="zinc">{SI_SOURCE_LABELS[s.source] ?? s.source}</Badge>
-                                    {s.verified_by_user ? (
-                                      <Badge tone="green">
-                                        <BadgeCheck size={11} /> подтверждён
-                                      </Badge>
-                                    ) : (
-                                      <Badge tone="amber">требует проверки</Badge>
-                                    )}
-                                    {s.has_description_type_text && <Badge tone="green">описание типа загружено</Badge>}
-                                    {s.tested_modifications.length > 0 && (
-                                      <span title={s.tested_modifications.join("\n")}>
-                                        <Badge tone="zinc">исполнений в реестре: {s.tested_modifications.length}</Badge>
-                                      </span>
-                                    )}
-                                    {s.description_type_changed_at && (
-                                      // Новая редакция «Описания типа» — изменение, о котором заказчик
-                                      // просил узнавать; дата обязательна.
-                                      <span
-                                        title={`Редакция ${s.description_type_version ?? "—"}; характеристики разнесены из редакции ${
-                                          s.description_type_extracted_version ?? "—"
-                                        }`}
-                                      >
-                                        <Badge tone={s.description_type_extracted_version === s.description_type_version ? "zinc" : "amber"}>
-                                          описание типа изменилось {formatDate(s.description_type_changed_at)}
-                                        </Badge>
-                                      </span>
-                                    )}
-                                    {s.review_status === "needs_review" && (
-                                      // Типы вне области справочника (тепло, вода, газ) отличаем от
-                                      // настоящей неоднозначности — причина целиком в подсказке.
-                                      <span title={s.review_reason ?? undefined}>
-                                        <Badge tone="amber">
-                                          {s.review_reason?.includes("Справочник продукции ограничен")
-                                            ? "⚠ не электросчётчик"
-                                            : "⚠ требует ручной проверки"}
-                                        </Badge>
-                                      </span>
-                                    )}
-                                  </div>
-                                </td>
-                                {isAdmin && (
-                                  <td className="whitespace-nowrap py-2 text-right align-top">
-                                    <div className="flex justify-end gap-2">
-                                      {s.description_type_url && (
-                                        <button
-                                          onClick={() => handleFetchDescriptionType(s)}
-                                          disabled={busy === `fetch-${s.id}`}
-                                          className="flex items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                                        >
-                                          {busy === `fetch-${s.id}` ? <Loader2 size={11} className="animate-spin" /> : <FileDown size={11} />}
-                                          описание типа
-                                        </button>
-                                      )}
-                                      <button
-                                        onClick={() => handleVerifySiType(s)}
-                                        disabled={busy === `si-${s.id}`}
-                                        className="rounded border border-white/10 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                                      >
-                                        {s.verified_by_user ? "снять подтверждение" : "подтвердить"}
-                                      </button>
-                                    </div>
-                                  </td>
-                                )}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                        <SiTypeGroups
+                          siTypes={siTypes}
+                          isAdmin={isAdmin}
+                          busy={busy}
+                          onVerify={handleVerifySiType}
+                          onFetchDescriptionType={handleFetchDescriptionType}
+                        />
                       )}
                     </div>
                   </div>

@@ -141,8 +141,8 @@ if [ ! -d "$BACKEND_DIR/.venv" ]; then
   "$BACKEND_DIR/.venv/bin/playwright" install chromium
 fi
 
-echo "==> Применяю миграции"
-(cd "$BACKEND_DIR" && "./.venv/bin/alembic" upgrade head)
+echo "==> База: снимок данных (только в пустую базу) и миграции"
+(cd "$BACKEND_DIR" && "./.venv/bin/python" -m app.seed.snapshot prepare)
 
 echo "==> Проверяю frontend node_modules"
 if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
@@ -159,8 +159,12 @@ free_port "$FRONTEND_PORT" frontend FRONTEND_PORT
 echo "==> Запускаю backend (http://localhost:$BACKEND_PORT)"
 # `exec` обязателен: без него $! указывает на оболочку-обёртку, а не на сам Uvicorn, и
 # останавливать оказывается некого.
+# Следим только за `app/`: правка тестов, скриптов и миграций перезапускала сервер и
+# обрывала фоновые разборы (28.09.2026 — 37 перезапусков за день). Задачи после перезапуска
+# продолжаются с последнего сохранённого шага, но идущий шаг теряется; на время долгих
+# разборов сервер можно запустить без перезагрузки: RELOAD=0 ./run.sh
 if [ "$RELOAD" = "1" ]; then
-  (cd "$BACKEND_DIR" && exec "./.venv/bin/uvicorn" app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload) &
+  (cd "$BACKEND_DIR" && exec "./.venv/bin/uvicorn" app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload --reload-dir app) &
 else
   (cd "$BACKEND_DIR" && exec "./.venv/bin/uvicorn" app.main:app --host 0.0.0.0 --port "$BACKEND_PORT") &
 fi

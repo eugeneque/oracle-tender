@@ -913,14 +913,25 @@ class RusprofileSession:
     сайт считает частые входы подозрительными и включает капчу.
     """
 
-    def __init__(self, login: str, password: str, *, page_delay: float = PAGE_DELAY_SECONDS):
-        if not login or not password:
+    def __init__(
+        self,
+        login: str | None,
+        password: str | None,
+        *,
+        page_delay: float = PAGE_DELAY_SECONDS,
+        anonymous: bool = False,
+    ):
+        # Анонимная сессия — для фоновой актуализации на установке, где учётная запись ещё
+        # не заведена: открытая часть карточки (реквизиты, руководитель, первая страница
+        # закупок) доступна и без входа, скрытое сайт маскирует «░».
+        if not anonymous and (not login or not password):
             raise RusprofileAuthError(
                 "Учётная запись rusprofile не настроена: заполните логин и пароль в разделе "
                 "«Интеграции → Rusprofile»."
             )
-        self._login = login.strip()
-        self._password = password
+        self._anonymous = anonymous
+        self._login = (login or "").strip()
+        self._password = password or ""
         self._page_delay = page_delay
         self._client = _new_client(user_agent=BROWSER_USER_AGENT)
         self._authenticated = False
@@ -991,7 +1002,7 @@ class RusprofileSession:
         )
 
     def _ensure_login(self) -> None:
-        if not self._authenticated:
+        if not self._authenticated and not self._anonymous:
             self.login()
 
     # -- страницы --

@@ -25,7 +25,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from loguru import logger
 from sqlalchemy import select
@@ -42,19 +42,13 @@ from app.models.manufacturer import (
     SiType,
     SiTypeSource,
 )
-from app.services import catalog_queue_service, registry_modifications, si_type_linking
+from app.services import catalog_queue_service, registry_modifications, si_type_linking, si_type_state
 from app.services.audit import log_action
 from app.services.catalog_queue_service import TaskOutcome
 from app.services.fgis_description_ingest import mark_description_changed
 
 ADAPTER_KEY = "fgis"
 COMPONENT = "catalog_sync"
-
-# Насколько заранее предупреждать об истекающем свидетельстве об утверждении типа. Полгода —
-# не круглое число ради красоты: цикл «заметили → подали заявку в Росстандарт → получили
-# новое свидетельство» занимает месяцы, и предупреждение за неделю уже бесполезно.
-EXPIRY_WARNING_DAYS = 180
-
 
 def register() -> None:
     catalog_queue_service.register_handler(ADAPTER_KEY, handle_task)
@@ -243,10 +237,10 @@ def _revalidate(db: Session, si_type: SiType, *, adapter: FgisAdapter) -> TaskOu
         changes.append(f"актуальность {si_type.is_actual} → {result.is_actual}")
         si_type.is_actual = result.is_actual
 
+    # Срок свидетельства в `review_status` не записывается: интерфейс считает его на лету
+    # (`si_type_state`), иначе текст «осталось N дн.» застывает до следующей ревалидации.
+    # Здесь предупреждение нужно только журналу и статусу задачи в очереди.
     warning = _expiry_warning(si_type)
-    if warning:
-        si_type.review_status = ReviewStatus.NEEDS_REVIEW.value
-        si_type.review_reason = warning
 
     db.commit()
 
@@ -286,20 +280,18 @@ def _expiry_warning(si_type: SiType) -> str | None:
     """Текст предупреждения о свидетельстве об утверждении типа, если оно истекло или
     истекает. `None` — всё в порядке либо срок в реестре не указан (бессрочные типы)."""
 
-    if si_type.is_actual is False:
+    state, days_left = si_type_state.approval_state(si_type)
+    if state == si_type_state.APPROVAL_INACTIVE:
         return (
             f"Тип СИ {si_type.si_code} помечен в реестре как неактуальный — прибор нельзя "
             "предлагать в закупку до выяснения"
         )
-    if si_type.valid_to is None:
-        return None
-    days_left = (si_type.valid_to - date.today()).days
-    if days_left < 0:
+    if state == si_type_state.APPROVAL_EXPIRED:
         return (
             f"Свидетельство об утверждении типа {si_type.si_code} истекло {si_type.valid_to} — "
             "прибор нельзя предлагать в закупку"
         )
-    if days_left <= EXPIRY_WARNING_DAYS:
+    if state == si_type_state.APPROVAL_EXPIRING:
         return (
             f"Свидетельство об утверждении типа {si_type.si_code} истекает {si_type.valid_to} "
             f"(осталось {days_left} дн.)"

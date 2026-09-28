@@ -3,20 +3,14 @@ import {
   AlertTriangle,
   Ban,
   BadgeCheck,
-  Calculator,
+  ChevronDown,
   Download,
   FileText,
-  Building2,
-  ClipboardList,
-  FileSignature,
-  HelpCircle,
   History,
-  Info,
-  ListTree,
-  ScrollText,
   Loader2,
   Maximize2,
-  Scale,
+  MessageSquare,
+  MoreHorizontal,
   Sparkles,
   Star,
   Tag as TagIcon,
@@ -27,6 +21,8 @@ import { Link } from "react-router-dom";
 
 import { ApiError, api, downloadFile, postForm } from "../api/client";
 import type {
+  AiFeedback,
+  AiFeedbackCreated,
   AiProfileScore,
   BackgroundJob,
   CompanyProfile,
@@ -43,10 +39,12 @@ import type {
 } from "../api/types";
 import { STAGE_LABELS, STAGE_ORDER } from "../api/types";
 import { DecisionMark } from "./DecisionMark";
+import { DropdownMenu } from "./DropdownMenu";
 import { TenderAiScorePanel } from "./tender-detail/TenderAiScorePanel";
 import { TenderApplicationTab } from "./tender-detail/TenderApplicationTab";
 import { TenderCalculationTab } from "./tender-detail/TenderCalculationTab";
 import { TenderCardTab } from "./tender-detail/TenderCardTab";
+import { TenderCommentsDrawer } from "./tender-detail/TenderCommentsDrawer";
 import { TenderComplianceTab } from "./tender-detail/TenderComplianceTab";
 import { TenderUpperSoftwareBlock } from "./tender-detail/TenderUpperSoftwareBlock";
 import { TenderRegistryBlock } from "./tender-detail/TenderRegistryBlock";
@@ -58,7 +56,6 @@ import { TagChip } from "./tags/TagChip";
 import { TagPicker } from "./tags/TagPicker";
 import {
   percentValue,
-  relevanceLabel,
   scoreBadgeClass,
   stageHint,
 } from "../utils/format";
@@ -85,7 +82,9 @@ const JOB_POLL_MS = 2_000;
 // «review» — полный разбор одной задачей: анализ документов → матрица соответствия →
 // AI-оценка (18.09.2026). Отдельные «analyze»/«evaluate» с кнопок сняты: второй зависел от
 // первого, а третий без первого считал вслепую, и человек должен был знать порядок.
-type JobKindKey = "review" | "analyze" | "evaluate" | "ai-score";
+// «ai-feedback» — пересмотр заключения по замечанию специалиста (28.09.2026): запускается не
+// кнопкой-эндпоинтом, а ответом «Не согласен», но опрашивается так же.
+type JobKindKey = "review" | "analyze" | "evaluate" | "ai-score" | "ai-feedback";
 
 /** Вид фоновой задачи → кнопка карточки, которая её запускает. */
 const JOB_KIND_KEYS: Partial<Record<BackgroundJob["kind"], JobKindKey>> = {
@@ -93,17 +92,12 @@ const JOB_KIND_KEYS: Partial<Record<BackgroundJob["kind"], JobKindKey>> = {
   tender_analysis: "analyze",
   tender_evaluation: "evaluate",
   ai_profile_score: "ai-score",
+  ai_feedback: "ai-feedback",
 };
 
 /** Что делает «Разобрать закупку» — подсказка на кнопке и в пустых состояниях вкладок. */
 const REVIEW_HINT =
   "Анализ документов, матрица соответствия и AI-оценка по профилю одной задачей";
-
-const RELEVANCE_CLASSES: Record<string, string> = {
-  new: "border-white/10 bg-white/5 text-zinc-400",
-  confirmed: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
-  rejected: "border-red-500/30 bg-red-500/10 text-red-300",
-};
 
 function DocumentRow({
   document,
@@ -224,6 +218,11 @@ export function TenderDetailPanel({
   // сервер и так возвращает уже идущую задачу, но ходить за ней дважды незачем.
   const autoScoreRef = useRef<string | null>(null);
 
+  // Ответы специалистов на заключение ИИ (28.09.2026): нужны и самому заключению (кто уже
+  // согласился, не упал ли пересмотр), и блоку «Комментарии» за иконкой в шапке.
+  const [feedback, setFeedback] = useState<AiFeedback[] | null>(null);
+  const [isCommentsOpen, setIsCommentsOpen] = useState(false);
+
   const [extra, setExtra] = useState<TenderExtraSections | null>(null);
   const [isExtraLoading, setIsExtraLoading] = useState(false);
   const [isExtraRunning, setIsExtraRunning] = useState(false);
@@ -256,6 +255,8 @@ export function TenderDetailPanel({
     setHistory(null);
     setCard(null);
     setScore(null);
+    setFeedback(null);
+    setIsCommentsOpen(false);
     setExtra(null);
     setNiche(null);
     setError(null);
@@ -319,6 +320,18 @@ export function TenderDetailPanel({
     );
     setAnalysisJob(jobs[0] ?? null);
   }, [tender.id]);
+
+  const loadFeedback = useCallback(async () => {
+    try {
+      setFeedback(await api.get<AiFeedback[]>(`/tenders/${tender.id}/ai-score/feedback`));
+    } catch {
+      setFeedback([]);
+    }
+  }, [tender.id]);
+
+  useEffect(() => {
+    void loadFeedback();
+  }, [loadFeedback]);
 
   const loadMatrix = useCallback(async () => {
     setMatrix(await api.get<ComplianceMatrix>(`/tenders/${tender.id}/compliance`));
@@ -542,8 +555,10 @@ export function TenderDetailPanel({
       if (job.status === "error") {
         // Сбой расчёта оценки показывается в её блоке: он запускается сам при открытии, и
         // общая строка ошибок карточки над вкладками для него — сообщение «ни о чём».
-        if (job.kind === "ai_profile_score") setScoreError(job.message ?? "Расчёт не удался");
-        else setError(job.message ?? "Операция завершилась ошибкой");
+        if (job.kind === "ai_profile_score" || job.kind === "ai_feedback") {
+          setScoreError(job.message ?? "Расчёт не удался");
+          if (job.kind === "ai_feedback") await loadFeedback();
+        } else setError(job.message ?? "Операция завершилась ошибкой");
         return;
       }
       setActionMessage(job.message);
@@ -564,16 +579,35 @@ export function TenderDetailPanel({
         if (activeTab === "requirements" || activeTab === "compliance") await loadRequirements();
         if (activeTab === "compliance") await loadMatrix();
       } else if (job.kind === "tender_analysis") {
+        // Анализ сразу достраивает матрицу — прежняя в памяти карточки устарела.
+        setMatrix(null);
         await loadRequirements();
         setAnalysisJob(job);
         setActiveTab("requirements");
       } else if (job.kind === "tender_evaluation") {
         await loadMatrix();
         setActiveTab("compliance");
+      } else if (job.kind === "ai_feedback") {
+        // Пересмотр по замечанию: новое заключение и ответ модели — в ленте «Комментарии».
+        setActionMessage(null);
+        await reloadPrepared();
+        setScore(await api.get<AiProfileScore | null>(`/tenders/${tender.id}/ai-score`));
+        await loadFeedback();
       } else {
+        await reloadPrepared();
         setScore(await api.get<AiProfileScore | null>(`/tenders/${tender.id}/ai-score`));
         await loadExtra();
+        await loadFeedback();
       }
+    };
+
+    // Пересчёт оценки сам достраивает анализ и матрицу, если их не было (28.09.2026), —
+    // вкладки «Требования» и «Соответствие» перечитываются, а не показывают прежнее.
+    const reloadPrepared = async () => {
+      setRequirements(null);
+      setMatrix(null);
+      if (activeTab === "requirements" || activeTab === "compliance") await loadRequirements();
+      if (activeTab === "compliance") await loadMatrix();
     };
 
     const interval = setInterval(async () => {
@@ -605,6 +639,7 @@ export function TenderDetailPanel({
     loadRequirements,
     loadMatrix,
     loadExtra,
+    loadFeedback,
   ]);
 
   const saveChanges = async (changes: TenderUpdate) => {
@@ -660,6 +695,36 @@ export function TenderDetailPanel({
     }
   };
 
+  /** Согласие с заключением ИИ — просто запись в «Комментариях». */
+  const agreeWithScore = async () => {
+    setScoreError(null);
+    try {
+      await api.post<AiFeedbackCreated>(`/tenders/${tender.id}/ai-score/feedback`, { kind: "agree" });
+      await loadFeedback();
+    } catch (err) {
+      setScoreError(err instanceof ApiError ? err.message : "Не удалось сохранить ответ");
+    }
+  };
+
+  /** Несогласие: замечание уходит модели на пересмотр, карточка следит за задачей. */
+  const disagreeWithScore = async (text: string) => {
+    setScoreError(null);
+    try {
+      const created = await api.post<AiFeedbackCreated>(`/tenders/${tender.id}/ai-score/feedback`, {
+        kind: "disagree",
+        text,
+      });
+      setFeedback((prev) => [created.feedback, ...(prev ?? [])]);
+      if (created.job) {
+        setRunningAction("ai-feedback");
+        setJobId(created.job.id);
+      }
+    } catch (err) {
+      setScoreError(err instanceof ApiError ? err.message : "Не удалось отправить замечание");
+      throw err;
+    }
+  };
+
   const addComment = async (text: string) => {
     setError(null);
     try {
@@ -681,180 +746,223 @@ export function TenderDetailPanel({
   // представительному корпусу, до тех пор честно показывала «недостаточно данных» и только
   // занимала место в ряду. Похожие закупки при этом никуда не делись — они по-прежнему
   // перечислены в блоке «AI-оценка по профилю» как обоснование измерения History.
-  const tabs: { key: TabKey; label: string; icon: typeof Info; badge?: number }[] = [
-    { key: "overview", label: "Основное", icon: Info },
-    { key: "extra", label: "Дополнительно", icon: ListTree },
-    { key: "documents", label: "Документы", icon: FileText, badge: documents?.length },
-    { key: "calculation", label: "Расчёт", icon: Calculator },
-    { key: "compliance", label: "Конкуренция", icon: Scale },
-    { key: "application", label: "Заявка", icon: FileSignature },
-    { key: "card", label: "Карточка закупки", icon: Building2 },
+  // Вкладки делятся на основные и «Ещё» (правка 28.09.2026). Раньше в ряд выстраивалось до
+  // четырнадцати вкладок с иконками, и половина пряталась за правым краем — человек не знал,
+  // что они есть. На виду то, с чем решают об участии: сама закупка, документы, требования,
+  // конкуренция, расчёт и заявка. Служебные разрезы (карточка источника, таблицы извещения,
+  // история) — в меню, и если открыта одна из них, её имя показывается на кнопке меню.
+  //
+  // «Похожие» убрана (04.09.2026): вкладка требует посчитанных эмбеддингов по
+  // представительному корпусу, до тех пор честно показывала «недостаточно данных» и только
+  // занимала место в ряду. Похожие закупки при этом никуда не делись — они по-прежнему
+  // перечислены в блоке «AI-оценка по профилю» как обоснование измерения History.
+  const primaryTabs: { key: TabKey; label: string; badge?: number }[] = [
+    { key: "overview", label: "Основное" },
+    { key: "documents", label: "Документы", badge: documents?.length },
     {
       key: "requirements",
       label: "Требования",
-      icon: Sparkles,
       badge: requirements?.length ?? tender.requirements_count,
     },
-    ...(cardTable("lots")
-      ? [{ key: "lots" as TabKey, label: "Лоты", icon: ListTree, badge: cardTableCount("lots") }]
-      : []),
-    ...(cardTable("changes")
-      ? [
-          {
-            key: "changes" as TabKey,
-            label: "Изменения",
-            icon: ClipboardList,
-            badge: cardTableCount("changes"),
-          },
-        ]
-      : []),
-    ...(cardTable("protocols")
-      ? [
-          {
-            key: "protocols" as TabKey,
-            label: "Протоколы",
-            icon: ScrollText,
-            badge: cardTableCount("protocols"),
-          },
-        ]
-      : []),
-    ...(cardTable("contracts")
-      ? [
-          {
-            key: "contracts" as TabKey,
-            label: "Договоры",
-            icon: FileSignature,
-            badge: cardTableCount("contracts"),
-          },
-        ]
-      : []),
-    ...(cardTable("events")
-      ? [
-          {
-            key: "events" as TabKey,
-            label: "Журнал событий",
-            icon: ScrollText,
-            badge: cardTableCount("events"),
-          },
-        ]
-      : []),
-    { key: "history", label: "История", icon: History },
+    { key: "compliance", label: "Конкуренция" },
+    { key: "calculation", label: "Расчёт" },
+    { key: "application", label: "Заявка" },
   ];
+  const tableTabs: { key: TabKey; label: string }[] = [
+    { key: "lots", label: "Лоты" },
+    { key: "changes", label: "Изменения" },
+    { key: "protocols", label: "Протоколы" },
+    { key: "contracts", label: "Договоры" },
+    { key: "events", label: "Журнал событий" },
+  ];
+  const moreTabs: { key: TabKey; label: string; badge?: number }[] = [
+    { key: "extra", label: "Дополнительно" },
+    { key: "card", label: "Карточка закупки" },
+    ...tableTabs
+      .filter((tab) => cardTable(tab.key))
+      .map((tab) => ({ ...tab, badge: cardTableCount(tab.key) })),
+    { key: "history", label: "История" },
+  ];
+  const activeMoreTab = moreTabs.find((tab) => tab.key === activeTab);
 
   const overall = percentValue(tender.ai_score);
+  const iconButton =
+    "flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-white/5 hover:text-zinc-200";
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-start justify-between gap-4 border-b border-white/[0.08] px-6 py-4">
-        <div className="min-w-0">
-          <div className="mb-1.5 flex flex-wrap items-center gap-2">
-            <span className="rounded-md bg-white/5 px-2 py-0.5 text-xs text-zinc-400">
-              {tender.source.name}
-            </span>
-            <span className="text-xs text-zinc-500">№ {tender.external_id}</span>
-            <span
-              className={`rounded-md border px-2 py-0.5 text-[11px] ${scoreBadgeClass(overall)}`}
-              title="Итоговая AI-оценка по профилю (раздел 5.5.1 ТЗ)"
-            >
-              {overall === null ? "AI-оценка не считалась" : `AI-оценка ${overall}%`}
-            </span>
-            <span
-              className={`rounded-md border px-2 py-0.5 text-[11px] ${
-                RELEVANCE_CLASSES[tender.relevance_status] ?? RELEVANCE_CLASSES.new
-              }`}
-            >
-              {relevanceLabel(tender.relevance_status)}
-            </span>
+    <div className="relative flex h-full min-h-0 flex-col">
+      {isCommentsOpen && (
+        <TenderCommentsDrawer items={feedback} onClose={() => setIsCommentsOpen(false)} />
+      )}
+      {/* Поле выбора файла — вне вкладок: «Приложить файл» есть и в меню шапки. */}
+          <input
+            ref={uploadInputRef}
+            type="file"
+            multiple
+            accept=".pdf,.doc,.docx,.rtf,.xls,.xlsx,.xlsm,.txt,.zip,.7z,.rar"
+            className="hidden"
+            onChange={(e) => {
+              if (e.target.files) void uploadDocuments(e.target.files);
+              e.target.value = "";
+            }}
+          />
+      {/* Шапка карточки (переделана 28.09.2026). Было три яруса: бейджи, заголовок с
+          тегами и отдельный ряд кнопок (этап, релевантность, разбор). Теперь заголовок
+          читается первым, а действия — иконками в одну строку справа: они нужны по разу на
+          закупку, а занимали сотню пикселей высоты у каждой. */}
+      <div className="shrink-0 px-6 pt-4">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2 text-xs text-zinc-500">
+            <span className="font-medium text-zinc-400">{tender.source.name}</span>
+            <span className="text-zinc-700">·</span>
+            <span className="truncate tabular-nums">№ {tender.external_id}</span>
           </div>
-          <div className="flex items-start gap-2.5">
-            <DecisionMark decision={tender.ai_decision} size="md" className="mt-0.5" />
-            <h2 className="text-base font-semibold leading-snug text-white">{tender.title}</h2>
-          </div>
-          {/* Теги под заголовком: метки читаются вместе с названием, а кнопка добавления
-              стоит в том же ряду, чтобы пометить закупку одним движением. */}
-          <div className="relative mt-2 flex flex-wrap items-center gap-1.5">
-            {tender.tags.map((tag) => (
-              <TagChip
-                key={tag.id}
-                tag={tag}
-                onClick={() =>
-                  void setTags(tender.tags.filter((t) => t.id !== tag.id).map((t) => t.id))
+
+          <div className="flex shrink-0 items-center gap-0.5">
+            {/* Релевантность — сегментом из двух иконок: состояние видно по подсветке, и
+                отдельный бейдж «Не проверен» в заголовке больше не нужен. */}
+            <div className="mr-1 flex items-center rounded-lg border border-white/[0.08] p-0.5">
+              <button
+                onClick={() => void setRelevance("confirmed")}
+                disabled={tender.relevance_status === "confirmed"}
+                title={
+                  tender.relevance_status === "confirmed"
+                    ? "Отмечена как релевантная"
+                    : "Отметить как релевантную"
                 }
-                title={`${tag.name} — нажмите, чтобы снять`}
-              />
-            ))}
+                aria-pressed={tender.relevance_status === "confirmed"}
+                className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs transition-colors ${
+                  tender.relevance_status === "confirmed"
+                    ? "bg-emerald-500/15 text-emerald-300"
+                    : "text-zinc-500 hover:bg-white/5 hover:text-emerald-300"
+                }`}
+              >
+                <BadgeCheck size={14} />
+                {tender.relevance_status === "confirmed" && "Релевантна"}
+              </button>
+              <button
+                onClick={() => void setRelevance("rejected")}
+                disabled={tender.relevance_status === "rejected"}
+                title={
+                  tender.relevance_status === "rejected"
+                    ? "Отмечена как неактуальная"
+                    : "Отметить как неактуальную"
+                }
+                aria-pressed={tender.relevance_status === "rejected"}
+                className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs transition-colors ${
+                  tender.relevance_status === "rejected"
+                    ? "bg-red-500/15 text-red-300"
+                    : "text-zinc-500 hover:bg-white/5 hover:text-red-300"
+                }`}
+              >
+                <Ban size={14} />
+                {tender.relevance_status === "rejected" && "Неактуальна"}
+              </button>
+            </div>
+            {/* «Комментарии» — ответы специалистов на заключение ИИ (28.09.2026): не основной
+                блок, поэтому за иконкой; число — сколько ответов уже есть. */}
             <button
-              onClick={() => setIsTagPickerOpen((v) => !v)}
-              className={`inline-flex items-center gap-1 rounded-full border border-dashed px-2 py-1 text-[11px] leading-none transition-colors ${
-                isTagPickerOpen
-                  ? "border-indigo-400/50 text-indigo-300"
-                  : "border-white/15 text-zinc-500 hover:border-white/30 hover:text-zinc-300"
-              }`}
-              title="Поставить тег"
+              onClick={() => setIsCommentsOpen(true)}
+              title="Комментарии специалистов к заключению ИИ"
+              className={`relative ${iconButton}`}
             >
-              <TagIcon size={11} />
-              {tender.tags.length === 0 ? "Добавить тег" : "Тег"}
+              <MessageSquare size={15} />
+              {feedback && feedback.length > 0 && (
+                <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-indigo-500 px-1 text-[10px] font-medium tabular-nums text-snow">
+                  {feedback.length}
+                </span>
+              )}
             </button>
-            {isTagPickerOpen && (
-              <TagPicker
-                selectedIds={tender.tags.map((tag) => tag.id)}
-                onChange={(ids) => void setTags(ids)}
-                onClose={() => setIsTagPickerOpen(false)}
-                anchorClassName="left-0 top-full"
-              />
+            <button
+              onClick={toggleBookmark}
+              title={
+                tender.is_bookmarked
+                  ? "Убрать из избранного"
+                  : "В избранное — чтобы вернуться к закупке позже"
+              }
+              aria-pressed={tender.is_bookmarked}
+              className={
+                tender.is_bookmarked
+                  ? "flex h-8 w-8 items-center justify-center rounded-lg text-amber-400 transition-colors hover:bg-white/5"
+                  : iconButton
+              }
+            >
+              <Star size={16} fill={tender.is_bookmarked ? "currentColor" : "none"} />
+            </button>
+            {expandable && (
+              <Link
+                to={`/tenders/${tender.id}`}
+                title="Развернуть на отдельную страницу (средней кнопкой — в новой вкладке)"
+                className={iconButton}
+              >
+                <Maximize2 size={15} />
+              </Link>
+            )}
+            <DropdownMenu
+              title="Другие действия"
+              buttonClassName={iconButton}
+              trigger={<MoreHorizontal size={16} />}
+              items={[
+                {
+                  key: "review",
+                  label: runningAction === "review" ? "Разбор идёт…" : "Разобрать закупку заново",
+                  icon: <Sparkles size={14} />,
+                  hint: REVIEW_HINT,
+                  disabled: runningAction !== null,
+                  onSelect: () => void startJob("review"),
+                },
+                {
+                  key: "tag",
+                  label: "Поставить тег",
+                  icon: <TagIcon size={14} />,
+                  onSelect: () => setIsTagPickerOpen(true),
+                },
+                {
+                  key: "upload",
+                  label: "Приложить файл",
+                  icon: <Upload size={14} />,
+                  hint: "Проект договора, ТЗ или спецификация, присланные заказчиком",
+                  disabled: isUploading,
+                  onSelect: () => uploadInputRef.current?.click(),
+                },
+                {
+                  key: "history",
+                  label: "История и комментарии",
+                  icon: <History size={14} />,
+                  onSelect: () => setActiveTab("history"),
+                },
+              ]}
+            />
+            {onClose && (
+              <button onClick={onClose} title="Закрыть" className={iconButton}>
+                <X size={17} />
+              </button>
             )}
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
-          {expandable && (
-            <Link
-              to={`/tenders/${tender.id}`}
-              title="Развернуть на отдельную страницу (откроется в большом формате; средней кнопкой — в новой вкладке)"
-              className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-200"
-            >
-              <Maximize2 size={14} />
-              Развернуть
-            </Link>
-          )}
-          <button
-            onClick={toggleBookmark}
-            title={
-              tender.is_bookmarked
-                ? "Убрать из избранного"
-                : "В избранное — чтобы вернуться к закупке позже (раздел «Избранное» на странице тендеров)"
-            }
-            aria-pressed={tender.is_bookmarked}
-            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
-              tender.is_bookmarked
-                ? "border-amber-400/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
-                : "border-white/10 text-zinc-400 hover:bg-white/5 hover:text-zinc-200"
-            }`}
-          >
-            <Star size={14} fill={tender.is_bookmarked ? "currentColor" : "none"} />
-            {tender.is_bookmarked ? "В избранном" : "В избранное"}
-          </button>
-          {onClose && (
-            <button
-              onClick={onClose}
-              className="rounded-md p-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
-            >
-              <X size={18} />
-            </button>
-          )}
-        </div>
-      </div>
 
-      {/* Тоже одна строка с прокруткой, а не перенос: вторая строка кнопок съедала у
-          карточки полсотни пикселей, а действий здесь ровно столько же на любой закупке. */}
-      <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-white/[0.08] px-6 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        {/* Этап пайплайна — выпадающим списком, а не двумя кнопками: этапов шесть, и
-            «релевантно/неактуально» их не покрывает (раздел 5.6 ТЗ). */}
-        <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-zinc-500">
-          Этап:
+        <div className="flex items-start gap-2.5">
+          <DecisionMark decision={tender.ai_decision} size="md" className="mt-0.5" />
+          <h2 className="text-lg font-semibold leading-snug tracking-tight text-white">
+            {tender.title}
+          </h2>
+        </div>
+
+        {/* Строка свойств: оценка, этап и теги — то, что меняется по ходу работы. Этап —
+            выпадающим списком без подписи: список сам по себе читается как «этап», а что
+            значит выбранный — в подсказке. */}
+        <div className="relative mt-3 flex flex-wrap items-center gap-1.5">
+          <span
+            className={`rounded-md border px-2 py-1 text-[11px] font-medium tabular-nums ${scoreBadgeClass(overall)}`}
+            title="Итоговая AI-оценка по профилю (раздел 5.5.1 ТЗ)"
+          >
+            {overall === null ? "AI-оценка —" : `AI ${overall}%`}
+          </span>
           <select
             value={tender.stage}
             onChange={(e) => void changeStage(e.target.value as TenderStage)}
-            className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1.5 text-xs text-zinc-200 outline-none focus:border-indigo-500"
+            title={stageHint(tender.stage) ?? "Этап работы с закупкой"}
+            className="cursor-pointer rounded-md border border-white/[0.08] bg-transparent py-1 pl-2 pr-6 text-[11px] text-zinc-300 outline-none hover:border-white/20 focus:border-indigo-500"
           >
             {STAGE_ORDER.map((stage) => (
               <option key={stage} value={stage} className="bg-zinc-900">
@@ -862,77 +970,89 @@ export function TenderDetailPanel({
               </option>
             ))}
           </select>
-          {/* Что означает выбранный этап — прямо здесь: список из шести значений без
-              пояснений читается как набор синонимов, а «Заявка подана» вдобавок влияет на
-              учёт проигрышей, и об этом надо знать в момент выбора. */}
-          {stageHint(tender.stage) && (
-            <span
-              className="cursor-help text-zinc-600"
-              title={stageHint(tender.stage) ?? undefined}
-            >
-              <HelpCircle size={13} />
-            </span>
+          {tender.tags.map((tag) => (
+            <TagChip
+              key={tag.id}
+              tag={tag}
+              onClick={() =>
+                void setTags(tender.tags.filter((t) => t.id !== tag.id).map((t) => t.id))
+              }
+              title={`${tag.name} — нажмите, чтобы снять`}
+            />
+          ))}
+          <button
+            onClick={() => setIsTagPickerOpen((v) => !v)}
+            className={`inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors ${
+              isTagPickerOpen
+                ? "bg-white/10 text-indigo-300"
+                : "text-zinc-600 hover:bg-white/5 hover:text-zinc-300"
+            }`}
+            title="Поставить тег"
+          >
+            <TagIcon size={12} />
+          </button>
+          {isTagPickerOpen && (
+            <TagPicker
+              selectedIds={tender.tags.map((tag) => tag.id)}
+              onChange={(ids) => void setTags(ids)}
+              onClose={() => setIsTagPickerOpen(false)}
+              anchorClassName="left-0 top-full"
+            />
           )}
-        </label>
-        <div className="mx-1 h-5 w-px bg-white/10" />
-        <button
-          onClick={() => void setRelevance("confirmed")}
-          disabled={tender.relevance_status === "confirmed"}
-          className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40"
-        >
-          <BadgeCheck size={14} />
-          Релевантный
-        </button>
-        <button
-          onClick={() => void setRelevance("rejected")}
-          disabled={tender.relevance_status === "rejected"}
-          className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-300 hover:bg-red-500/20 disabled:opacity-40"
-        >
-          <Ban size={14} />
-          Неактуально
-        </button>
-        <div className="mx-1 h-5 w-px bg-white/10" />
-        <button
-          onClick={() => void startJob("review")}
-          disabled={runningAction !== null}
-          title={REVIEW_HINT}
-          className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-3 py-1.5 text-xs text-indigo-300 hover:bg-indigo-500/20 disabled:opacity-50"
-        >
-          {runningAction === "review" ? (
-            <Loader2 size={14} className="animate-spin" />
-          ) : (
-            <Sparkles size={14} />
-          )}
-          Разобрать закупку
-        </button>
-      </div>
+        </div>
 
-      {/* Одна строка с горизонтальной прокруткой вместо переноса на второй ряд: вкладок
-          бывает до десятка (у закупки с лотами, протоколами и договорами), и перенос
-          съедал высоту у самой карточки, а ряд «прыгал» при переключении закупок.
-          `scrollbar-none` — полоса не нужна, ряд листается колесом и свайпом. */}
-      <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/[0.08] px-6 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        {tabs.map((tab) => {
-          const Icon = tab.icon;
-          const isActive = tab.key === activeTab;
-          return (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-sm transition-colors ${
-                isActive ? "bg-white/10 text-white" : "text-zinc-400 hover:text-zinc-200"
-              }`}
-            >
-              <Icon size={14} />
-              {tab.label}
-              {tab.badge !== undefined && tab.badge > 0 && (
-                <span className="rounded-full bg-white/10 px-1.5 text-[10px] text-zinc-400">
-                  {tab.badge}
+        {/* Вкладки — подчёркиванием, без иконок и плашек: десяток иконок в ряд шумел
+            сильнее, чем сами названия. */}
+        <div className="mt-3 flex items-end gap-1 border-b border-white/[0.08]">
+          <div className="flex min-w-0 flex-1 items-end gap-5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            {primaryTabs.map((tab) => {
+              const isActive = tab.key === activeTab;
+              return (
+                <button
+                  key={tab.key}
+                  onClick={() => setActiveTab(tab.key)}
+                  className={`-mb-px flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 pb-2.5 pt-1 text-sm transition-colors ${
+                    isActive
+                      ? "border-indigo-400 text-white"
+                      : "border-transparent text-zinc-500 hover:text-zinc-200"
+                  }`}
+                >
+                  {tab.label}
+                  {tab.badge !== undefined && tab.badge > 0 && (
+                    <span className="text-[11px] tabular-nums text-zinc-500">{tab.badge}</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          <DropdownMenu
+            title="Другие разделы закупки"
+            buttonClassName={`-mb-px flex shrink-0 items-center gap-1 whitespace-nowrap border-b-2 pb-2.5 pt-1 text-sm transition-colors ${
+              activeMoreTab
+                ? "border-indigo-400 text-white"
+                : "border-transparent text-zinc-500 hover:text-zinc-200"
+            }`}
+            trigger={
+              <>
+                {activeMoreTab ? activeMoreTab.label : "Ещё"}
+                <ChevronDown size={14} />
+              </>
+            }
+            items={moreTabs.map((tab) => ({
+              key: tab.key,
+              label: (
+                <span className="flex items-center justify-between gap-3">
+                  {tab.label}
+                  {tab.badge !== undefined && tab.badge > 0 && (
+                    <span className="text-[11px] tabular-nums text-zinc-500">{tab.badge}</span>
+                  )}
                 </span>
-              )}
-            </button>
-          );
-        })}
+              ),
+              active: tab.key === activeTab,
+              onSelect: () => setActiveTab(tab.key),
+            }))}
+          />
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
@@ -945,14 +1065,18 @@ export function TenderDetailPanel({
           <div className="mb-4 flex items-center gap-2 rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-3 py-2 text-xs text-indigo-300">
             <Loader2 size={13} className="animate-spin" />
             {runningAction === "review"
-              ? `Идёт полный разбор закупки${jobProgress ? ` — ${jobProgress.replace(/…$/, "")}` : ""}.`
+              ? "Идёт полный разбор закупки"
               : runningAction === "analyze"
-                ? "Идёт анализ документов на сервере."
+                ? "Идёт анализ документов на сервере"
                 : runningAction === "evaluate"
-                  ? "Идёт расчёт соответствия на сервере."
-                  : "Идёт разбор ИИ по профилю компании."}{" "}
-            Карточку можно закрыть — работа продолжится, а ход виден в «Настройках →
-            Логирование».
+                  ? "Идёт расчёт соответствия на сервере"
+                  : runningAction === "ai-feedback"
+                    ? "ИИ пересматривает заключение по замечанию специалиста"
+                    : "Идёт разбор ИИ по профилю компании"}
+            {/* Ход задачи от сервера (28.09.2026): «Матрица соответствия: 6 из 17
+                производителей» вместо безымянного индикатора на десять минут. */}
+            {jobProgress ? ` — ${jobProgress.replace(/…$/, "")}.` : "."}
+            <span className="text-indigo-300/60">Можно перейти к другой закупке — работа продолжится.</span>
           </div>
         )}
 
@@ -968,8 +1092,13 @@ export function TenderDetailPanel({
             <TenderAiScorePanel
               score={score}
               isRunning={runningAction === "ai-score"}
+              isReviewing={runningAction === "ai-feedback"}
+              progress={runningAction === "ai-score" ? jobProgress : null}
               onRun={() => void startJob("ai-score")}
               error={scoreError}
+              feedback={feedback}
+              onAgree={agreeWithScore}
+              onDisagree={disagreeWithScore}
             />
             <TenderOverviewTab tender={tender} onSave={saveChanges} />
           </div>
@@ -1041,17 +1170,6 @@ export function TenderDetailPanel({
                 )}
                 {isUploading ? "Загружаю…" : "Добавить файл"}
               </button>
-              <input
-                ref={uploadInputRef}
-                type="file"
-                multiple
-                accept=".pdf,.doc,.docx,.rtf,.xls,.xlsx,.xlsm,.txt,.zip,.7z,.rar"
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files) void uploadDocuments(e.target.files);
-                  e.target.value = "";
-                }}
-              />
             </div>
             {documents === null && !docsError && (
               <div className="flex items-center gap-2 text-sm text-zinc-500">

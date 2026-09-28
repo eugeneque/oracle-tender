@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import date
 from dataclasses import dataclass, field
 
 from loguru import logger
@@ -54,6 +55,8 @@ class ModificationsOutcome:
     si_types_scanned: int = 0
     modifications_seen: int = 0
     products_created: int = 0
+    # Из них — базовые модели по обозначению типа, у которого в карточке нет исполнений.
+    base_models_created: int = 0
     products_linked: int = 0
     already_known: int = 0
     created_names: list[str] = field(default_factory=list)
@@ -79,6 +82,11 @@ def discover_modifications(
     for si_type in candidates:
         modifications = [m for m in (si_type.tested_modifications or []) if isinstance(m, str)]
         if not modifications:
+            # Карточка без списка исполнений (типы до 2018 года, часть новых) — иначе такой
+            # код СИ так и остался бы без единой модели, а производитель пустым (жалоба
+            # 28.09.2026, Ленэлектро: 6 кодов СИ, модели только по одному).
+            if _create_base_model(db, manufacturer, si_type, products, outcome):
+                outcome.si_types_scanned += 1
             continue
         outcome.si_types_scanned += 1
         for full in modifications:
@@ -117,6 +125,56 @@ def discover_modifications(
         )
     db.commit()
     return outcome
+
+
+def _create_base_model(
+    db: Session,
+    manufacturer: Manufacturer,
+    si_type: SiType,
+    products: list[Product],
+    outcome: ModificationsOutcome,
+) -> bool:
+    """Модель по обозначению типа («ЛЕ-2»), если у типа нет ни исполнений, ни моделей.
+
+    Тип, у которого свидетельство истекло, заводится снятым с выпуска: в расчёт
+    соответствия как действующий прибор он попасть не должен, но код СИ в тендере по-прежнему
+    узнаётся. Обозначение уже есть в каталоге — модель только привязывается к типу."""
+
+    notation = (si_type.notation or "").strip()
+    if not notation or any(p.si_type_id == si_type.id for p in products):
+        return False
+    # Совпадение только точное: у короткого обозначения («ЛЕ») префиксом совпало бы всё
+    # семейство («ЛЕ-2», «ЛЕ-3 DM»), и тип остался бы без своей модели.
+    keys = si_type_linking.designation_keys(notation)
+    existing = next(
+        (
+            p
+            for p in products
+            if keys & set().union(*(si_type_linking.designation_keys(v) for v in (p.model_code, p.article)))
+        ),
+        None,
+    )
+    if existing is not None:
+        if existing.si_type_id is None:
+            existing.si_type_id = si_type.id
+            outcome.products_linked += 1
+            si_type_linking._clear_unlinked_flag(existing)
+            return True
+        return False
+    product = _create_product(db, manufacturer, si_type, short=notation, full=notation)
+    if _expired(si_type):
+        product.status = ProductStatus.DISCONTINUED.value
+    products.append(product)
+    outcome.products_created += 1
+    outcome.base_models_created += 1
+    outcome.created_names.append(notation)
+    return True
+
+
+def _expired(si_type: SiType) -> bool:
+    if si_type.is_actual is False:
+        return True
+    return si_type.valid_to is not None and si_type.valid_to < date.today()
 
 
 def _find_product(products: list[Product], short: str) -> Product | None:

@@ -1,15 +1,13 @@
 import { useEffect, useState } from "react";
-import { Check, ExternalLink, Loader2, Pencil, Sparkles, X } from "lucide-react";
+import { Check, ExternalLink, Loader2, Pencil, X } from "lucide-react";
 
 import { api } from "../../api/client";
 import type { FederalDistrict, Region, Tender, TenderUpdate } from "../../api/types";
-import { ConfidenceBar } from "../ConfidenceBar";
 import { meterKindsSummary } from "../../utils/meterKinds";
 import {
   formatDate,
   formatDateTime,
   formatPrice,
-  percentValue,
   statusLabel,
   tenderTypeLabel,
 } from "../../utils/format";
@@ -143,7 +141,7 @@ function ClassificationForm({
         <button
           onClick={() => void submit()}
           disabled={isSaving}
-          className="flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-400 disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-1.5 text-xs font-medium text-snow hover:bg-indigo-400 disabled:opacity-50"
         >
           {isSaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
           Сохранить
@@ -235,26 +233,9 @@ export function TenderOverviewTab({
         </button>
       )}
 
-      <div className="mb-5 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
-        <div className="mb-2 text-xs text-zinc-500">
-          Оценка соответствия МИРТЕК — взвешенная по критичности требований, без учёта цены и
-          истории торгов (раздел 5.5 ТЗ)
-        </div>
-        <ConfidenceBar percent={percentValue(tender.win_percentage)} />
-      </div>
-
-      {tender.ai_comment && (
-        <div className="mb-5 rounded-xl border border-indigo-500/25 bg-indigo-500/[0.04] p-4">
-          <div className="mb-1.5 flex items-center gap-2 text-sm font-semibold text-indigo-300">
-            <Sparkles size={15} />
-            Комментарий ИИ
-          </div>
-          <p className="whitespace-pre-line text-sm leading-relaxed text-zinc-300">
-            {tender.ai_comment}
-          </p>
-        </div>
-      )}
-
+      {/* «Оценка соответствия МИРТЕК» и «Комментарий ИИ» убраны 28.09.2026: соответствие
+          прибора и вывод по закупке теперь даёт «Заключение ИИ» выше, а комментарий пересказывал
+          наименование закупки. */}
       {tender.source_url && (
         <a
           href={tender.source_url}

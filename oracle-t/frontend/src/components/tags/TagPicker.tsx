@@ -233,7 +233,7 @@ export function TagPicker({
                 >
                   <span
                     className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
-                      checked ? "border-indigo-400 bg-indigo-500 text-white" : "border-white/20"
+                      checked ? "border-indigo-400 bg-indigo-500 text-snow" : "border-white/20"
                     }`}
                   >
                     {checked && <Check size={11} />}

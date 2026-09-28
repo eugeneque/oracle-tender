@@ -75,7 +75,7 @@ export function UsersPage() {
     <AppShell>
       <div className="mx-auto max-w-5xl px-8 py-8">
         <PageHeader
-          breadcrumb={["Sova Scanner", "Пользователи"]}
+          breadcrumb={["Sova", "Пользователи"]}
           title="Пользователи"
           icon={
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
@@ -132,7 +132,7 @@ export function UsersPage() {
           <button
             type="submit"
             disabled={isCreating}
-            className="flex items-center justify-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="flex items-center justify-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-2 text-sm font-medium text-snow transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             <Plus size={16} />
             {isCreating ? "Создание…" : "Добавить"}
@@ -161,7 +161,7 @@ export function UsersPage() {
                   <tr key={user.id} className="border-t border-white/[0.06]">
                     <td className="px-5 py-3">
                       <div className="flex items-center gap-3">
-                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-xs font-semibold text-white">
+                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-xs font-semibold text-snow">
                           {initials(user.full_name)}
                         </span>
                         <div className="min-w-0">

@@ -98,7 +98,9 @@ def _filters(
     тем закупкам, которые действительно интересны.
     """
 
-    filters = TenderFilters()
+    # Внешней CRM — только стандартный канал: закупки Госплана повторяют ЕИС, и лид
+    # заводился бы дважды.
+    filters = TenderFilters(feed="standard")
     if only_relevant:
         filters.relevance_statuses = ["new", "confirmed"]
     if min_win_percentage is not None:

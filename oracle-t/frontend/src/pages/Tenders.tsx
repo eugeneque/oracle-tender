@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Building2,
-  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Clock,
   Database,
   Download,
@@ -11,6 +12,7 @@ import {
   Filter,
   KanbanSquare,
   Loader2,
+  MoreHorizontal,
   RefreshCw,
   RotateCcw,
   Search,
@@ -30,24 +32,30 @@ import type {
   TenderBoard,
   TenderPage,
   TenderStats,
+  TenderFeed,
   TenderTag,
 } from "../api/types";
 import {
   CATALOG_SOURCE_TYPES,
+  GOSPLAN_SOURCE_KEY,
+  GOSPLAN_SOURCE_TYPE,
   MANUAL_SOURCE_TYPE,
   STAGE_LABELS,
   STAGE_ORDER,
 } from "../api/types";
+import { motion } from "motion/react";
+
 import { AppShell } from "../components/AppShell";
 import { ConfidenceBar } from "../components/ConfidenceBar";
 import { DecisionMark } from "../components/DecisionMark";
+import { DropdownMenu } from "../components/DropdownMenu";
 import { NewRequestModal } from "../components/NewRequestModal";
-import { PageHeader } from "../components/PageHeader";
 import { TenderDetailModal } from "../components/TenderDetailModal";
 import { TagChip, TagRow } from "../components/tags/TagChip";
 import { TenderSplitView } from "../components/tender-views/TenderSplitView";
 import { TenderTableView } from "../components/tender-views/TenderTableView";
 import { METER_KINDS } from "../utils/meterKinds";
+import { SPRING_SNAPPY } from "../utils/motion";
 import type {
   SortDirection,
   SortKey,
@@ -61,6 +69,35 @@ import {
 } from "../utils/format";
 
 const SELECTED_SOURCES_STORAGE_KEY = "oraclet_selected_source_keys";
+const FEED_STORAGE_KEY = "oraclet_tender_feed";
+
+/** Канал сбора (28.09.2026): «Стандартные ресурсы» — площадки из «Настройки → Источники
+ * тендеров», «Госплан» — закупки, собранные через API Госплана. Каналы не смешиваются, и
+ * выбор запоминается: кто сравнивает каналы, возвращается к тому же. */
+const FEED_OPTIONS: { value: TenderFeed; label: string; hint: string }[] = [
+  {
+    value: "standard",
+    label: "Стандартные ресурсы",
+    hint: "Закупки с площадок из «Настройки → Источники тендеров»",
+  },
+  { value: "gosplan", label: "Госплан", hint: "Закупки, собранные через API Госплана" },
+];
+
+function loadFeed(): TenderFeed {
+  try {
+    return localStorage.getItem(FEED_STORAGE_KEY) === "gosplan" ? "gosplan" : "standard";
+  } catch {
+    return "standard";
+  }
+}
+
+function saveFeed(feed: TenderFeed): void {
+  try {
+    localStorage.setItem(FEED_STORAGE_KEY, feed);
+  } catch {
+    // не сохранили — канал всё равно переключился
+  }
+}
 
 /** Колонки Kanban — этапы внутреннего пайплайна (раздел 5.6 ТЗ, решение 03.09.2026).
  *
@@ -213,7 +250,7 @@ function ResourcesModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/60 px-4">
       <div className="w-full max-w-lg rounded-xl border border-white/10 bg-zinc-900 shadow-xl">
         <div className="flex items-center justify-between border-b border-white/[0.08] px-5 py-4">
           <h2 className="text-sm font-semibold text-white">
@@ -264,7 +301,7 @@ function ResourcesModal({
           </button>
           <button
             onClick={() => onSave(Array.from(selected))}
-            className="rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
+            className="rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-2 text-sm font-medium text-snow hover:opacity-90"
           >
             Сохранить
           </button>
@@ -275,6 +312,8 @@ function ResourcesModal({
 }
 
 interface TendersFilters {
+  /** Канал сбора — переключатель «Стандартные ресурсы | Госплан» в шапке страницы. */
+  feed: TenderFeed;
   search: string;
   sourceKeys: string[];
   publishFrom: string;
@@ -311,6 +350,7 @@ interface TendersFilters {
 // по ключевым словам, не только активные закупки, поэтому без этого фильтра список на 90%+
 // состоит из уже завершённых/исторических записей и создаёт впечатление, что "все просрочены".
 const DEFAULT_FILTERS: TendersFilters = {
+  feed: "standard",
   search: "",
   sourceKeys: [],
   publishFrom: "",
@@ -388,6 +428,7 @@ const BOARD_COLUMN_SIZE = 20;
  */
 function buildFilterParams(filters: TendersFilters): URLSearchParams {
   const params = new URLSearchParams();
+  params.set("feed", filters.feed);
   if (filters.search.trim()) params.set("search", filters.search.trim());
   for (const key of filters.sourceKeys) params.append("source", key);
   if (filters.publishFrom) params.set("publish_date_from", filters.publishFrom);
@@ -496,7 +537,7 @@ function ChipGroup({
 }
 
 function dateInputClass(): string {
-  return "w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white outline-none focus:border-indigo-500 [color-scheme:dark]";
+  return "w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white outline-none focus:border-indigo-500";
 }
 
 /**
@@ -796,6 +837,7 @@ function FiltersPanel({
         />
       </div>
 
+      {sources.length > 0 && (
       <div className="mt-4 flex flex-wrap items-center gap-1.5">
         <span className="mr-1 text-xs text-zinc-500">Площадки:</span>
         {sources.map((source) => {
@@ -815,6 +857,7 @@ function FiltersPanel({
           );
         })}
       </div>
+      )}
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.06] pt-3">
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
@@ -884,29 +927,35 @@ function Pagination({
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const from = total === 0 ? 0 : offset + 1;
   const to = offset + shown;
+  // Одна страница — листать нечего, строка только отнимала бы высоту.
+  if (pages <= 1) return null;
 
+  const arrow =
+    "flex h-7 w-7 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-200 disabled:pointer-events-none disabled:opacity-30";
   return (
-    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-2.5">
-      <span className="text-xs text-zinc-500">
-        Показано {from}–{to} из {total}
+    <div className="flex shrink-0 items-center justify-between gap-3 px-2 pt-2 text-xs text-zinc-500">
+      <span className="tabular-nums">
+        {from}–{to} из {total.toLocaleString("ru-RU")}
       </span>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1">
         <button
           onClick={() => onChange(Math.max(0, offset - PAGE_SIZE))}
           disabled={offset === 0}
-          className="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-40"
+          title="Предыдущая страница"
+          className={arrow}
         >
-          Назад
+          <ChevronLeft size={15} />
         </button>
-        <span className="text-xs text-zinc-500">
-          Стр. {page} из {pages}
+        <span className="tabular-nums">
+          {page} / {pages}
         </span>
         <button
           onClick={() => onChange(offset + PAGE_SIZE)}
           disabled={page >= pages}
-          className="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-40"
+          title="Следующая страница"
+          className={arrow}
         >
-          Вперёд
+          <ChevronRight size={15} />
         </button>
       </div>
     </div>
@@ -1014,7 +1063,11 @@ export function TendersPage() {
   const [selectedSourceKeys, setSelectedSourceKeys] = useState<string[] | null>(
     null,
   );
-  const [filters, setFilters] = useState<TendersFilters>(DEFAULT_FILTERS);
+  const [filters, setFilters] = useState<TendersFilters>(() => ({
+    ...DEFAULT_FILTERS,
+    feed: searchParams.get("feed") === "gosplan" ? "gosplan" : loadFeed(),
+  }));
+  const feed = filters.feed;
   // Ссылка «Все →» из меню учётной записи ведёт сразу в раздел «Избранное». Эффектом, а не
   // начальным состоянием: со страницы тендеров та же ссылка не перемонтирует компонент, и
   // параметр должен сработать и тогда. Он тут же снимается с адреса, чтобы не залипал в
@@ -1023,6 +1076,16 @@ export function TendersPage() {
     if (!searchParams.has("favourites")) return;
     setOffset(0);
     setFilters((prev) => ({ ...prev, favouritesOnly: true }));
+    setSearchParams({}, { replace: true });
+  }, [searchParams, setSearchParams]);
+  // Ссылка «Тендеры Госплана» из настроек (`?feed=gosplan`): канал уже выбран начальным
+  // состоянием, параметр только запоминается и снимается с адреса.
+  useEffect(() => {
+    const requested = searchParams.get("feed");
+    if (requested !== "gosplan" && requested !== "standard") return;
+    setOffset(0);
+    setFilters((prev) => ({ ...prev, feed: requested, sourceKeys: [] }));
+    saveFeed(requested);
     setSearchParams({}, { replace: true });
   }, [searchParams, setSearchParams]);
   /** Сколько фильтров сейчас сужают выдачу — цифра на кнопке «Фильтры».
@@ -1111,11 +1174,34 @@ export function TendersPage() {
       .then((all) => setSources(all.filter((s) => !CATALOG_SOURCE_TYPES.includes(s.type))));
     void api.get<Region[]>("/dictionaries/regions").then(setRegions);
     void api.get<TenderTag[]>("/tags").then(setTags).catch(() => setTags([]));
-    void api
-      .get<TenderStats>("/tenders/stats")
-      .then((stats) => setCollectedTotal(stats.total))
-      .catch(() => setCollectedTotal(null));
   }, []);
+
+  // «Из N собранных» — по текущему каналу: у Госплана своё число, и общий знаменатель
+  // выдавал бы строку «12 из 17 800» там, где в канале всего три сотни закупок.
+  const loadCollectedTotal = useCallback(
+    (activeFeed: TenderFeed) =>
+      api
+        .get<TenderStats>(`/tenders/stats?feed=${activeFeed}`)
+        .then((stats) => setCollectedTotal(stats.total))
+        .catch(() => setCollectedTotal(null)),
+    [],
+  );
+  useEffect(() => {
+    setCollectedTotal(null);
+    void loadCollectedTotal(feed);
+  }, [feed, loadCollectedTotal]);
+
+  // Площадки стандартного канала: Госплан — отдельный канал со своей кнопкой сбора, в
+  // фильтре «Площадки» и в «Площадках для синхронизации» ему не место.
+  const standardSources = sources.filter((s) => s.type !== GOSPLAN_SOURCE_TYPE);
+
+  const changeFeed = (next: TenderFeed) => {
+    if (next === feed) return;
+    saveFeed(next);
+    setOffset(0);
+    setSelectedTender(null);
+    setFilters((prev) => ({ ...prev, feed: next, sourceKeys: [] }));
+  };
 
   // Перезагрузка при любом изменении фильтров, сортировки или страницы, с небольшим
   // дебаунсом — чтобы ввод в поле поиска не бил по API на каждое нажатие клавиши.
@@ -1192,11 +1278,11 @@ export function TendersPage() {
     if (sources.length === 0) return;
     const saved = loadSelectedSourceKeys();
     if (saved) {
-      setSelectedSourceKeys(saved);
+      setSelectedSourceKeys(saved.filter((key) => key !== GOSPLAN_SOURCE_KEY));
       return;
     }
     const defaultKeys = sources
-      .filter((s) => s.adapter_status === "implemented")
+      .filter((s) => s.adapter_status === "implemented" && s.type !== GOSPLAN_SOURCE_TYPE)
       .map((s) => s.key);
     setSelectedSourceKeys(defaultKeys);
     saveSelectedSourceKeys(defaultKeys);
@@ -1269,7 +1355,7 @@ export function TendersPage() {
             void (activeView === "kanban"
               ? loadBoard(filters, sort)
               : loadTenders(filters, sort, offset));
-            void api.get<TenderStats>("/tenders/stats").then((stats) => setCollectedTotal(stats.total)).catch(() => undefined);
+            void loadCollectedTotal(feed);
           } else if (job.status === "error") {
             setError(`Синхронизация прервана: ${job.message ?? "неизвестная ошибка"}`);
           }
@@ -1278,7 +1364,7 @@ export function TendersPage() {
     }, 2_000);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `syncJob.message` нужен только как стартовое значение
-  }, [isSyncing, activeView, filters, sort, offset, loadBoard, loadTenders]);
+  }, [isSyncing, activeView, filters, sort, offset, loadBoard, loadTenders, loadCollectedTotal, feed]);
 
   /** Выгрузка в Excel (раздел 5.7 ТЗ) — по текущим фильтрам списка, а не по всей базе:
    * пользователь только что отобрал нужное, и отчёт должен повторять именно этот срез. */
@@ -1338,86 +1424,51 @@ export function TendersPage() {
           двухпанельном режиме приходилось сначала пролистать её, и только потом — карточку
           закупки. `min-h-0` обязателен: без него flex-потомок не сжимается и внутренний
           скролл не включается. */}
-      <div className="flex h-full flex-col px-8 pb-3 pt-4">
-        <PageHeader
-          compact
-          breadcrumb={["Sova Scanner", "Тендеры"]}
-          title="Тендеры"
-          icon={
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
-              <KanbanSquare size={16} />
-            </span>
-          }
-          actions={
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setIsNewRequestOpen(true)}
-                title="Завести закупку, которую заказчик прислал напрямую, и приложить документы"
-                className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-sm text-zinc-300 hover:bg-white/5"
-              >
-                <FilePlus2 size={15} />
-                Новая заявка
-              </button>
-              <button
-                onClick={() => setIsResourcesOpen(true)}
-                className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-sm text-zinc-300 hover:bg-white/5"
-              >
-                <Database size={15} />
-                Ресурсы
-              </button>
-              <button
-                onClick={() => void exportXlsx()}
-                disabled={isExporting}
-                title="Выгрузить отобранные тендеры в Excel"
-                className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-white/5 disabled:opacity-50"
-              >
-                <Download size={15} />
-                {isExporting ? "Формирую…" : "Excel"}
-              </button>
-              <button
-                onClick={() =>
-                  selectedSourceKeys && void syncSources(selectedSourceKeys)
-                }
-                disabled={
-                  isSyncing ||
-                  !selectedSourceKeys ||
-                  selectedSourceKeys.length === 0
-                }
-                title={
-                  !selectedSourceKeys || selectedSourceKeys.length === 0
-                    ? "Сначала выберите источники в «Ресурсы»"
-                    : undefined
-                }
-                className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
-              >
-                <RefreshCw
-                  size={15}
-                  className={isSyncing ? "animate-spin" : ""}
-                />
-                {isSyncing ? "Синхронизация…" : "Синхронизировать"}
-              </button>
-            </div>
-          }
-        />
-
-        {error && (
-          <div className="mb-5 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
-            {error}
-          </div>
-        )}
-        {notice && (
-          <div className="mb-5 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-4 py-2.5 text-sm text-emerald-400">
-            {notice}
-          </div>
-        )}
-
-        {/* Панель инструментов (переработана 17.09.2026). Два яруса вместо одной
-            набитой строки: сверху — поиск, переключатель видов и вход в фильтры; ниже —
-            строка состояния, которой отдана вся ширина. Раньше «Избранное» и «Найдено N»
-            стояли в той же строке, а пояснение о фильтрах по умолчанию ужималось между
-            ними в одну сжатую фразу. */}
+      <div className="flex h-full flex-col px-6 pb-4 pt-4">
+        {/* Шапка страницы (переделана 28.09.2026): заголовок, поиск, виды, фильтры и
+            синхронизация — одной строкой. Раньше над списком стояли три яруса — хлебные
+            крошки с заголовком и четырьмя кнопками, строка поиска, строка состояния в рамке —
+            и забирали у карточки закупки почти двести пикселей. Редкие действия (ручная
+            заявка, выбор площадок, выгрузка) переехали в меню «⋯». */}
         <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
-          <div className="relative min-w-[260px] flex-1">
+          <h1 className="mr-1 text-xl font-semibold tracking-tight text-white">Тендеры</h1>
+
+          <div
+            role="radiogroup"
+            aria-label="Источник закупок"
+            className="inline-flex h-9 items-center gap-0.5 rounded-lg border border-white/[0.08] bg-white/[0.03] p-0.5"
+          >
+            {FEED_OPTIONS.map((option) => {
+              const isActive = option.value === feed;
+              return (
+                <button
+                  key={option.value}
+                  role="radio"
+                  aria-checked={isActive}
+                  onClick={() => changeFeed(option.value)}
+                  title={option.hint}
+                  className="relative flex h-7 items-center rounded-md px-3 text-xs font-medium"
+                >
+                  {isActive && (
+                    <motion.span
+                      layoutId="tender-feed-selected"
+                      transition={SPRING_SNAPPY}
+                      className="absolute inset-0 rounded-md bg-white/10"
+                    />
+                  )}
+                  <span
+                    className={`relative transition-colors ${
+                      isActive ? "text-white" : "text-zinc-500 hover:text-zinc-200"
+                    }`}
+                  >
+                    {option.label}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="relative min-w-[220px] flex-1">
             <Search
               size={14}
               className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600"
@@ -1425,12 +1476,23 @@ export function TendersPage() {
             <input
               value={filters.search}
               onChange={(e) => updateFilters({ search: e.target.value })}
-              placeholder="Поиск по названию или заказчику…"
-              className="w-full rounded-lg border border-white/[0.08] bg-white/[0.03] py-2 pl-9 pr-3 text-sm text-white placeholder-zinc-600 outline-none focus:border-indigo-500"
+              placeholder="Поиск по названию или заказчику"
+              className="h-9 w-full rounded-lg border border-white/[0.08] bg-white/[0.03] pl-9 pr-8 text-sm text-white placeholder-zinc-600 outline-none focus:border-indigo-500"
             />
+            {filters.search && (
+              <button
+                onClick={() => updateFilters({ search: "" })}
+                title="Очистить поиск"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-zinc-500 hover:text-zinc-200"
+              >
+                <X size={14} />
+              </button>
+            )}
           </div>
 
-          <div className="inline-flex items-center gap-1 rounded-lg border border-white/[0.08] bg-white/[0.03] p-1">
+          {/* Виды — иконками с подсказкой: подписи повторялись на каждом заходе, а выбирают
+              вид раз и надолго (он запоминается). */}
+          <div className="inline-flex h-9 items-center gap-0.5 rounded-lg border border-white/[0.08] bg-white/[0.03] p-0.5">
             {VIEW_TABS.map((tab) => {
               const Icon = tab.icon;
               const isActive = tab.key === activeView;
@@ -1438,14 +1500,14 @@ export function TendersPage() {
                 <button
                   key={tab.key}
                   onClick={() => changeView(tab.key)}
-                  className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
-                    isActive
-                      ? "bg-white/10 text-white"
-                      : "text-zinc-400 hover:text-zinc-200"
+                  title={tab.label}
+                  aria-label={tab.label}
+                  aria-pressed={isActive}
+                  className={`flex h-7 w-8 items-center justify-center rounded-md transition-colors ${
+                    isActive ? "bg-white/10 text-white" : "text-zinc-500 hover:text-zinc-200"
                   }`}
                 >
                   <Icon size={15} />
-                  {tab.label}
                 </button>
               );
             })}
@@ -1456,53 +1518,120 @@ export function TendersPage() {
               setIsFiltersOpen((v) => !v);
               if (!isFiltersOpen) void api.get<TenderTag[]>("/tags").then(setTags).catch(() => undefined);
             }}
-            className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm ${
+            className={`flex h-9 items-center gap-1.5 rounded-lg border px-3 text-sm transition-colors ${
               isFiltersOpen || activeFilterCount > 0
                 ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-300"
                 : "border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:bg-white/5"
             }`}
           >
-            <Filter size={15} />
+            <Filter size={14} />
             Фильтры
             {activeFilterCount > 0 && (
               <span className="rounded-full bg-indigo-500/25 px-1.5 text-[11px] leading-4 text-indigo-200">
                 {activeFilterCount}
               </span>
             )}
-            <ChevronDown
-              size={14}
-              className={`transition-transform ${isFiltersOpen ? "rotate-180" : ""}`}
-            />
+          </button>
+
+          <DropdownMenu
+            title="Ещё действия"
+            trigger={<MoreHorizontal size={17} />}
+            items={[
+              {
+                key: "new-request",
+                label: "Новая заявка",
+                icon: <FilePlus2 size={14} />,
+                hint: "Завести закупку, которую заказчик прислал напрямую, и приложить документы",
+                onSelect: () => setIsNewRequestOpen(true),
+              },
+              ...(feed === "standard"
+                ? [
+                    {
+                      key: "resources",
+                      label: "Площадки для синхронизации",
+                      icon: <Database size={14} />,
+                      onSelect: () => setIsResourcesOpen(true),
+                    },
+                  ]
+                : []),
+              {
+                key: "export",
+                label: isExporting ? "Формирую выгрузку…" : "Выгрузить в Excel",
+                icon: <Download size={14} />,
+                hint: "Все закупки по текущим фильтрам",
+                disabled: isExporting,
+                onSelect: () => void exportXlsx(),
+              },
+            ]}
+          />
+
+          <button
+            onClick={() =>
+              feed === "gosplan"
+                ? void syncSources([GOSPLAN_SOURCE_KEY])
+                : selectedSourceKeys && void syncSources(selectedSourceKeys)
+            }
+            disabled={
+              isSyncing ||
+              (feed === "standard" && (!selectedSourceKeys || selectedSourceKeys.length === 0))
+            }
+            title={
+              feed === "gosplan"
+                ? "Собрать новые закупки через API Госплана"
+                : !selectedSourceKeys || selectedSourceKeys.length === 0
+                  ? "Сначала выберите площадки в меню «⋯»"
+                  : "Собрать новые закупки с выбранных площадок"
+            }
+            className="flex h-9 items-center gap-1.5 rounded-lg bg-indigo-500 px-3 text-sm font-medium text-snow transition-colors hover:bg-indigo-400 disabled:opacity-50"
+          >
+            <RefreshCw size={14} className={isSyncing ? "animate-spin" : ""} />
+            {isSyncing ? "Синхронизация…" : "Синхронизировать"}
           </button>
         </div>
+
+        {error && (
+          <div className="mb-2 flex shrink-0 items-start gap-2 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+            <span className="min-w-0 flex-1">{error}</span>
+            <button onClick={() => setError(null)} title="Скрыть" className="shrink-0 opacity-70 hover:opacity-100">
+              <X size={14} />
+            </button>
+          </div>
+        )}
+        {notice && (
+          <div className="mb-2 flex shrink-0 items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-400">
+            <span className="min-w-0 flex-1">{notice}</span>
+            <button onClick={() => setNotice(null)} title="Скрыть" className="shrink-0 opacity-70 hover:opacity-100">
+              <X size={14} />
+            </button>
+          </div>
+        )}
 
         {/* Строка состояния: что показано и почему. Список по умолчанию — не «все собранные
             закупки», а открытые и прошедшие профиль релевантности; без этой строки два
             включённых переключателя в свёрнутой панели выглядели как «система собрала
-            только 52 тендера» (вопрос тестировщика 16.09.2026). Ей отдана вся ширина, а
-            активные разделы — избранное, теги — стоят справа снимаемыми чипами, чтобы
-            режим списка был виден и при свёрнутых фильтрах. */}
-        <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-4 py-2">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-zinc-500">
+            только 52 тендера» (вопрос тестировщика 16.09.2026). С 28.09.2026 — просто
+            строкой текста, без рамки: это пояснение, а не отдельный блок. */}
+        <div className="mb-2 flex min-h-[24px] shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 px-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
             {isLoading ? (
-              <span className="flex items-center gap-2">
-                <Loader2 size={14} className="animate-spin text-zinc-600" />
+              <span className="flex items-center gap-1.5">
+                <Loader2 size={12} className="animate-spin text-zinc-600" />
                 Считаем…
               </span>
             ) : filters.favouritesOnly ? (
               <>
                 <span className="flex items-center gap-1.5">
-                  <Star size={14} className="text-amber-400" fill="currentColor" />
-                  <span className="font-semibold text-zinc-100">
+                  <Star size={12} className="text-amber-400" fill="currentColor" />
+                  <span className="font-medium tabular-nums text-zinc-200">
                     {shownTotal.toLocaleString("ru-RU")}
                   </span>
-                  <span>{plural(shownTotal, "закупка", "закупки", "закупок")} в избранном</span>
+                  {plural(shownTotal, "закупка", "закупки", "закупок")} в избранном
                 </span>
-                <span className="hidden text-zinc-700 sm:inline">·</span>
-                <span className="text-xs">срок подачи и профиль не учитываются</span>
+                <span className="text-zinc-700">·</span>
+                <span>срок подачи и профиль не учитываются</span>
                 <button
                   onClick={() => updateFilters({ favouritesOnly: false })}
-                  className="text-xs text-indigo-400 hover:text-indigo-300"
+                  className="text-indigo-400 hover:text-indigo-300"
                 >
                   Ко всем закупкам
                 </button>
@@ -1510,43 +1639,37 @@ export function TendersPage() {
             ) : (
               <>
                 <span>
-                  <span className="font-semibold text-zinc-100">
+                  <span className="font-medium tabular-nums text-zinc-200">
                     {shownTotal.toLocaleString("ru-RU")}
                   </span>{" "}
                   {plural(shownTotal, "закупка", "закупки", "закупок")}
                   {collectedTotal !== null && (
-                    <span className="text-zinc-500">
-                      {" "}из {collectedTotal.toLocaleString("ru-RU")} собранных
-                    </span>
+                    <> из {collectedTotal.toLocaleString("ru-RU")} собранных</>
                   )}
                 </span>
                 {(filters.hideExpired || filters.onlyRelevant) && (
                   <>
-                    <span className="hidden text-zinc-700 sm:inline">·</span>
-                    <span className="flex flex-wrap items-center gap-1.5 text-xs">
-                      {filters.hideExpired && (
-                        <span
-                          className="rounded-md bg-white/[0.05] px-1.5 py-0.5"
-                          title="Скрыты закупки с истёкшим сроком подачи, завершённые и отменённые"
-                        >
-                          только открытые
-                        </span>
-                      )}
-                      {filters.onlyRelevant && (
-                        <span
-                          className="rounded-md bg-white/[0.05] px-1.5 py-0.5"
-                          title="Только прошедшие профиль релевантности из настроек и не отклонённые моделью"
-                        >
-                          по профилю
-                        </span>
-                      )}
-                      <button
-                        onClick={() => updateFilters({ hideExpired: false, onlyRelevant: false })}
-                        className="ml-1 text-indigo-400 hover:text-indigo-300"
-                      >
-                        Показать все
-                      </button>
+                    <span className="text-zinc-700">·</span>
+                    <span
+                      title={[
+                        filters.hideExpired &&
+                          "Скрыты закупки с истёкшим сроком подачи, завершённые и отменённые",
+                        filters.onlyRelevant &&
+                          "Только прошедшие профиль релевантности из настроек и не отклонённые моделью",
+                      ]
+                        .filter(Boolean)
+                        .join(". ")}
+                    >
+                      {[filters.hideExpired && "только открытые", filters.onlyRelevant && "по профилю"]
+                        .filter(Boolean)
+                        .join(", ")}
                     </span>
+                    <button
+                      onClick={() => updateFilters({ hideExpired: false, onlyRelevant: false })}
+                      className="text-indigo-400 hover:text-indigo-300"
+                    >
+                      показать все
+                    </button>
                   </>
                 )}
               </>
@@ -1585,13 +1708,13 @@ export function TendersPage() {
         {isFiltersOpen && (
         <FiltersPanel
           filters={filters}
-          sources={sources}
+          sources={feed === "standard" ? standardSources : []}
           regions={regions}
           tags={tags}
           onChange={updateFilters}
           onReset={() => {
             setOffset(0);
-            setFilters(DEFAULT_FILTERS);
+            setFilters({ ...DEFAULT_FILTERS, feed });
           }}
         />
         )}
@@ -1674,6 +1797,14 @@ export function TendersPage() {
                 selected={selectedTender}
                 onSelect={setSelectedTender}
                 onChanged={replaceTender}
+                footer={
+                  <Pagination
+                    total={total}
+                    offset={offset}
+                    shown={tenders.length}
+                    onChange={setOffset}
+                  />
+                }
               />
             ) : (
               <div className="min-h-0 flex-1 overflow-auto">
@@ -1690,7 +1821,7 @@ export function TendersPage() {
             {/* У доски нет страниц: каждая колонка приходит своей выборкой. */}
             {/* Пагинация не участвует в растяжении: `shrink-0`, иначе при коротком списке
                 она уезжала бы к нижнему краю окна, оторвавшись от содержимого. */}
-            {!isLoading && activeView !== "kanban" && total > 0 && (
+            {!isLoading && activeView === "table" && total > 0 && (
               <Pagination
                 total={total}
                 offset={offset}
@@ -1713,7 +1844,7 @@ export function TendersPage() {
         <ResourcesModal
           // Источник ручных заявок — не площадка: синхронизировать по нему нечего, а в
           // фильтре «Площадки» он остаётся, чтобы можно было показать одни заявки.
-          sources={sources.filter((s) => s.type !== MANUAL_SOURCE_TYPE)}
+          sources={standardSources.filter((s) => s.type !== MANUAL_SOURCE_TYPE)}
           initialSelected={new Set(selectedSourceKeys ?? [])}
           onCancel={() => setIsResourcesOpen(false)}
           onSave={handleSaveResources}

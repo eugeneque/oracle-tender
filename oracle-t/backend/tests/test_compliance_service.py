@@ -462,3 +462,51 @@ def test_low_coverage_percentage_is_marked_as_unreliable(db_session, admin_user:
     assert record.percentage == Decimal("100.00")
     assert record.requirements_scored == 1
     assert "ненадёжна" in (record.reason_summary or "")
+
+
+def test_resumed_matrix_skips_manufacturers_already_counted(
+    db_session, admin_user: User, monkeypatch
+):
+    """Продолжение после перезапуска сервера (28.09.2026): матрица сохраняется после каждого
+    производителя, и повторный запуск с `skip_fresh_since` не зовёт модель по тем, чей итог
+    уже посчитан по актуальным требованиям. Без этого матрица на 55 требований (10-15 минут)
+    начиналась заново после каждого `--reload` и не доходила до конца."""
+
+    from datetime import datetime, timezone
+
+    tender = _make_tender(db_session)
+    _add_requirement(db_session, tender)
+    _make_manufacturer(db_session, with_catalog=True, is_mirtek=True)
+    monkeypatch.setattr(
+        compliance_module, "run_structured", lambda db, **kwargs: ComplianceResult(verdicts=[])
+    )
+    first = evaluate_tender(db_session, tender, actor=admin_user, use_manual_fallback=False)
+    assert first.manufacturers_processed > 0
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("посчитанного производителя не пересчитывают")
+
+    monkeypatch.setattr(compliance_module, "run_structured", _fail)
+    resumed = evaluate_tender(
+        db_session,
+        tender,
+        actor=admin_user,
+        use_manual_fallback=False,
+        skip_fresh_since=datetime.min.replace(tzinfo=timezone.utc),
+    )
+    assert resumed.manufacturers_processed == 0
+    assert resumed.manufacturers_skipped == first.manufacturers_processed
+
+    # Требования переизвлечены после расчёта — итог устарел и пересчитывается.
+    _add_requirement(db_session, tender, text="Интерфейс RS-485")
+    monkeypatch.setattr(
+        compliance_module, "run_structured", lambda db, **kwargs: ComplianceResult(verdicts=[])
+    )
+    stale = evaluate_tender(
+        db_session,
+        tender,
+        actor=admin_user,
+        use_manual_fallback=False,
+        skip_fresh_since=datetime.min.replace(tzinfo=timezone.utc),
+    )
+    assert stale.manufacturers_processed == first.manufacturers_processed

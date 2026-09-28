@@ -63,9 +63,13 @@ export const CATALOG_SOURCE_TYPES: string[] = [
  * счётчиках площадок ему не место: синхронизировать и пинговать там нечего. */
 export const MANUAL_SOURCE_TYPE = "manual";
 
-/** Сколько площадок закупок описано в разделе 4.1 ТЗ — знаменатель для плиток «источников
- * доступно». Используется только как запасное значение, пока список не загружен. */
-export const TENDER_SOURCES_TOTAL = 12;
+/** Госплан — API данных ЕИС отдельным каналом сбора (28.09.2026): на странице тендеров
+ * переключатель «Стандартные ресурсы | Госплан», в настройках — своя вкладка. */
+export const GOSPLAN_SOURCE_TYPE = "gosplan";
+export const GOSPLAN_SOURCE_KEY = "gosplan";
+
+/** Канал сбора закупок: площадки из «Источников тендеров» или API Госплана. */
+export type TenderFeed = "standard" | "gosplan";
 
 export interface Source {
   id: string;
@@ -139,11 +143,16 @@ export type ProductMounting = "split" | "din" | "panel";
 export type SiTypeSource = "auto_search" | "manual" | "import";
 
 export type ReviewStatus = "ok" | "needs_review";
+/** Свидетельство об утверждении типа: действует / истекает (≤ 180 дн.) / истекло /
+ * тип неактуален в реестре / срок в реестре не указан. */
+export type SiApprovalState = "valid" | "expiring" | "expired" | "inactive" | "unknown";
 
 export interface SiType {
   id: string;
   manufacturer_id: string;
   si_code: string;
+  notation: string | null;
+  type_name: string | null;
   description_type_url: string | null;
   has_description_type_text: boolean;
   // Исполнения, представленные на испытания, из карточки Аршина; редакция «Описания
@@ -156,10 +165,16 @@ export interface SiType {
   source: SiTypeSource;
   verified_by_user: boolean;
   // «Системе не хватило оснований решить самой»: реестр вернул несколько кандидатов или
-  // кандидата не того вида измерений, либо истекает свидетельство об утверждении типа.
-  // Не путать с `verified_by_user` — там «человек подтвердил корректность».
+  // кандидата не того вида измерений. Не путать с `verified_by_user` — там «человек
+  // подтвердил корректность».
   review_status: ReviewStatus;
   review_reason: string | null;
+  // Считаются сервером при каждом запросе: по ним коды раскладываются на группы.
+  is_electricity_meter: boolean;
+  approval_state: SiApprovalState;
+  /** Дней до окончания срока свидетельства; отрицательное — истекло, null — срок не указан. */
+  approval_days_left: number | null;
+  valid_to: string | null;
   last_checked_at: string | null;
   created_at: string;
   updated_at: string;
@@ -435,6 +450,22 @@ export interface CatalogTask {
   created_at: string;
 }
 
+// Последний сквозной опрос производителя (автозаполнение каталога, 28.09.2026).
+export interface CatalogAutofillStatus {
+  manufacturer_id: string;
+  status: "queued" | "running" | "success" | "needs_review" | "error" | string;
+  current_step: string | null;
+  failed_steps: string[];
+  // Опрос прошёл, а моделей у производителя так и нет.
+  empty: boolean;
+  // Приборы уже заведены, характеристики из «Описаний типа» и руководств ещё дополняются.
+  enriching: boolean;
+  message: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 export interface CatalogImportOutcome {
   manufacturers_matched: number;
   si_types_created: number;
@@ -456,9 +487,9 @@ export interface YandexConnectionTestResult {
   message: string;
 }
 
-/** Провайдер ИИ-модуля (18.09.2026): YandexGPT или Claude через RouterAI. Выбор — у каждого
+/** Провайдер ИИ-модуля (18.09.2026): YandexGPT, Claude или DeepSeek (28.09.2026) через RouterAI. Выбор — у каждого
  * пользователя свой; без него действует системная модель по умолчанию. */
-export type AiProviderKey = "yandex" | "claude";
+export type AiProviderKey = "yandex" | "claude" | "deepseek";
 
 /** Какая модель обслуживает запросы текущего пользователя. `source` — откуда она взялась:
  * личный выбор (`user`) или системная по умолчанию (`default`). */
@@ -477,6 +508,7 @@ export interface RouterAiSettings {
   is_configured: boolean;
   api_key_masked: string | null;
   model: string;
+  deepseek_model: string;
   base_url: string;
   updated_at: string | null;
   updated_by: string | null;
@@ -701,7 +733,8 @@ export interface BackgroundJob {
     | "tender_evaluation"
     | "ai_profile_score"
     | "tender_full_review"
-    | "sources_poll";
+    | "sources_poll"
+    | "ai_feedback";
   status: "queued" | "running" | "success" | "error";
   tender_id: string | null;
   created_at: string;
@@ -1091,6 +1124,8 @@ export interface AiProfileScore {
   /** Решение «смотреть / не смотреть» по трём измерениям; сводка решения — служебная и
    * в API не отдаётся. */
   decision: boolean | null;
+  /** Заключение (28.09.2026); `null` у оценок до него — карточка показывает прежние блоки. */
+  conclusion: AiConclusion | null;
   weak_points: WeakPoint[];
   recommended_strategy: RecommendedStrategy | null;
   similar_tender_ids: string[];
@@ -1098,6 +1133,110 @@ export interface AiProfileScore {
   participation_ids: string[];
   company_profile_snapshot: Record<string, unknown> | null;
   calculated_at: string;
+}
+
+export type ConclusionFit = "fit" | "fit_with_caveats" | "not_fit" | "unknown";
+export type ConclusionProductStatus = "fits" | "partial" | "not_fits" | "unchecked";
+
+export interface ConclusionProduct {
+  product_id: string;
+  model: string;
+  status: ConclusionProductStatus;
+  status_label: string;
+  note: string;
+}
+
+export interface ConclusionCompetitor {
+  manufacturer_id: string;
+  manufacturer: string;
+  model: string | null;
+  product_id: string | null;
+  status: "fits" | "partial" | "not_fits";
+  status_label: string;
+  matrix_verdict: WinVerdictCode | null;
+  matrix_percentage: number | null;
+  note: string;
+}
+
+export interface ConclusionRisk {
+  category: string;
+  category_label: string;
+  severity: "significant" | "moderate" | "minor";
+  text: string;
+  mitigation: string;
+}
+
+export interface ConclusionMetric {
+  key: string;
+  label: string;
+  value: string;
+  hint: string | null;
+  tone: "good" | "warn" | "bad" | "neutral";
+}
+
+/** Заключение ИИ по закупке: подходим ли мы и каким прибором, кто проходит, стратегия,
+ * риски, метрики (28.09.2026). Метрики считает код, остальное — модель, сверенная с каталогом. */
+export interface AiConclusion {
+  fit: ConclusionFit;
+  fit_label: string;
+  headline: string;
+  rationale: string;
+  our_products: ConclusionProduct[];
+  competitors: ConclusionCompetitor[];
+  matrix_built: boolean;
+  /** Требований к товару в ТЗ; нет в заключениях до 28.09.2026. */
+  product_requirements?: number;
+  feedback_response: string | null;
+  strategy: { approach: string; price: string; steps: string[] } | null;
+  risks: ConclusionRisk[];
+  metrics: ConclusionMetric[];
+}
+
+/** Снимок заключения до или после замечания специалиста. */
+export interface ConclusionSnapshot {
+  score_id: string;
+  verdict: VerdictCode | null;
+  overall_score: number | null;
+  fit: ConclusionFit | null;
+  fit_label: string | null;
+  headline: string | null;
+  rationale: string | null;
+  our_products: ConclusionProduct[];
+  competitors: ConclusionCompetitor[];
+  strategy: AiConclusion["strategy"];
+  risks: ConclusionRisk[];
+  ai_model: string | null;
+  calculated_at: string | null;
+}
+
+export interface AiFeedback {
+  id: string;
+  tender_id: string;
+  tender_title: string | null;
+  tender_external_id: string | null;
+  source_name: string | null;
+  user_id: string | null;
+  user_name: string | null;
+  kind: "agree" | "disagree";
+  text: string | null;
+  /** recorded — согласие; pending/processing — на пересмотре; applied — учтено; error. */
+  status: "recorded" | "pending" | "processing" | "applied" | "error";
+  error: string | null;
+  before: ConclusionSnapshot | null;
+  after: ConclusionSnapshot | null;
+  ai_response: string | null;
+  created_at: string;
+  processed_at: string | null;
+}
+
+export interface AiFeedbackCreated {
+  feedback: AiFeedback;
+  job: BackgroundJob | null;
+}
+
+export interface AiFeedbackPage {
+  items: AiFeedback[];
+  total: number;
 }
 
 // --- Профиль компании (раздел 7 ТЗ) ---

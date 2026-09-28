@@ -233,7 +233,7 @@ export function ProductDrawer({
   return (
     <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label={product.model_name}>
       <button aria-label="Закрыть" onClick={onClose} className="absolute inset-0 cursor-default bg-black/60" />
-      <div className="relative flex h-full w-full max-w-5xl flex-col border-l border-white/[0.08] bg-[#0b0b0f] shadow-[0_20px_60px_rgba(0,0,0,.5)]">
+      <div className="relative flex h-full w-full max-w-5xl flex-col border-l border-white/[0.08] bg-zinc-950 shadow-[0_20px_60px_rgba(0,0,0,.5)]">
         {/* Шапка */}
         <div className="border-b border-white/[0.08] px-6 py-4">
           <div className="flex items-start justify-between gap-4">

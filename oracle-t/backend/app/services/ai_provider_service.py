@@ -41,11 +41,22 @@ _SINGLETON_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
 PROVIDER_YANDEX = "yandex"
 PROVIDER_CLAUDE = "claude"
-PROVIDER_LABELS = {PROVIDER_YANDEX: "YandexGPT", PROVIDER_CLAUDE: "Claude"}
+PROVIDER_DEEPSEEK = "deepseek"
+PROVIDER_LABELS = {
+    PROVIDER_YANDEX: "YandexGPT",
+    PROVIDER_CLAUDE: "Claude",
+    PROVIDER_DEEPSEEK: "DeepSeek",
+}
+# Провайдеры, которые ходят через RouterAI (28.09.2026: к Claude добавился DeepSeek). Ключ
+# и адрес шлюза у них общие, отличается только модель.
+ROUTERAI_PROVIDERS = (PROVIDER_CLAUDE, PROVIDER_DEEPSEEK)
 
 # Значения по умолчанию для RouterAI. Модель — путь в терминах шлюза («провайдер/модель»),
 # адрес — его OpenAI-совместимый API; и то и другое можно переопределить в настройках.
 DEFAULT_ROUTERAI_MODEL = "anthropic/claude-opus-5"
+# Конкретная версия, а не алиас `~deepseek/deepseek-v4-pro-latest`: смена модели под тем же
+# именем незаметно поменяла бы результаты AI-оценки, а рядом с ней пишется имя модели.
+DEFAULT_DEEPSEEK_MODEL = "deepseek/deepseek-v4-pro-0813"
 DEFAULT_ROUTERAI_BASE_URL = "https://routerai.ru/api/v1"
 
 
@@ -108,36 +119,48 @@ def get_active_provider(db: Session) -> str:
     return resolve_provider(db, user)[0]
 
 
-def get_routerai_credentials(db: Session) -> tuple[str, str, str]:
-    """Ключ, модель и адрес API RouterAI. Без ключа — `AiNotConfiguredError`: по аналогии с
-    `get_credentials` у Yandex, текст ошибки уходит пользователю как есть."""
+def _routerai_model(settings: AiProviderSettings | None, provider: str) -> str:
+    if provider == PROVIDER_DEEPSEEK:
+        return (settings.deepseek_model if settings else None) or DEFAULT_DEEPSEEK_MODEL
+    return (settings.routerai_model if settings else None) or DEFAULT_ROUTERAI_MODEL
+
+
+def get_routerai_credentials(
+    db: Session, provider: str = PROVIDER_CLAUDE
+) -> tuple[str, str, str]:
+    """Ключ, модель и адрес API RouterAI для Claude или DeepSeek. Без ключа —
+    `AiNotConfiguredError`: по аналогии с `get_credentials` у Yandex, текст ошибки уходит
+    пользователю как есть."""
 
     settings = db.get(AiProviderSettings, _SINGLETON_ID)
     if settings is None or not settings.routerai_api_key:
         raise AiNotConfiguredError(
-            "Подключение к Claude (RouterAI) не настроено: заполните API-ключ в разделе "
-            "«Интеграции → Искусственный интеллект»."
+            f"Подключение к {PROVIDER_LABELS.get(provider, provider)} (RouterAI) не настроено: "
+            "заполните API-ключ в разделе «Интеграции → Искусственный интеллект»."
         )
     return (
         settings.routerai_api_key,
-        settings.routerai_model or DEFAULT_ROUTERAI_MODEL,
+        _routerai_model(settings, provider),
         settings.routerai_base_url or DEFAULT_ROUTERAI_BASE_URL,
     )
 
 
 def _is_configured(db: Session, provider: str) -> bool:
-    if provider == PROVIDER_CLAUDE:
+    if provider in ROUTERAI_PROVIDERS:
         settings = db.get(AiProviderSettings, _SINGLETON_ID)
         return bool(settings and settings.routerai_api_key)
     yandex = db.get(YandexAiStudioSettings, _YANDEX_SINGLETON_ID)
     return bool(yandex and yandex.api_key and yandex.folder_id)
 
 
+def is_provider_configured(db: Session, provider: str) -> bool:
+    return _is_configured(db, provider)
+
+
 def _model_name(db: Session, provider: str) -> str | None:
-    if provider != PROVIDER_CLAUDE:
+    if provider not in ROUTERAI_PROVIDERS:
         return None
-    settings = db.get(AiProviderSettings, _SINGLETON_ID)
-    return (settings.routerai_model if settings else None) or DEFAULT_ROUTERAI_MODEL
+    return _routerai_model(db.get(AiProviderSettings, _SINGLETON_ID), provider)
 
 
 def get_status(db: Session, user: User | None) -> AiProviderStatus:
@@ -224,7 +247,8 @@ def to_routerai_out(db: Session, settings: AiProviderSettings) -> RouterAiSettin
     return RouterAiSettingsOut(
         is_configured=bool(settings.routerai_api_key),
         api_key_masked=mask_api_key(settings.routerai_api_key) if settings.routerai_api_key else None,
-        model=settings.routerai_model or DEFAULT_ROUTERAI_MODEL,
+        model=_routerai_model(settings, PROVIDER_CLAUDE),
+        deepseek_model=_routerai_model(settings, PROVIDER_DEEPSEEK),
         base_url=settings.routerai_base_url or DEFAULT_ROUTERAI_BASE_URL,
         updated_at=settings.updated_at if settings.routerai_api_key else None,
         updated_by=updated_by_user.full_name if updated_by_user else None,
@@ -248,6 +272,8 @@ def update_routerai_settings(
         settings.routerai_api_key = (payload.api_key or "").strip() or None
     if "model" in fields_set:
         settings.routerai_model = (payload.model or "").strip() or None
+    if "deepseek_model" in fields_set:
+        settings.deepseek_model = (payload.deepseek_model or "").strip() or None
     if "base_url" in fields_set:
         settings.routerai_base_url = (payload.base_url or "").strip().rstrip("/") or None
     settings.updated_by_id = actor.id
@@ -274,21 +300,25 @@ def test_routerai_connection(db: Session, *, actor: User) -> YandexConnectionTes
     # Импорт внутри функции: клиент сам импортирует этот модуль ради `AiNotConfiguredError`.
     from app.services.routerai_client import ping
 
+    # Ключ общий, а модели две — проверяются обе: путь до одной может быть указан с ошибкой
+    # или модель недоступна на тарифе, и узнать об этом лучше здесь, а не из карточки тендера.
     try:
-        api_key, model, base_url = get_routerai_credentials(db)
+        get_routerai_credentials(db)
     except AiNotConfiguredError as exc:
         result = YandexConnectionTestResult(success=False, message=str(exc))
     else:
-        try:
-            answered_model = ping(api_key=api_key, model=model, base_url=base_url)
-        except Exception as exc:  # noqa: BLE001 - любая ошибка подключения - исход теста
-            result = YandexConnectionTestResult(
-                success=False, message=f"Не удалось подключиться: {exc}"
-            )
-        else:
-            result = YandexConnectionTestResult(
-                success=True, message=f"Подключение работает, отвечает {answered_model}."
-            )
+        lines: list[str] = []
+        success = True
+        for provider in ROUTERAI_PROVIDERS:
+            api_key, model, base_url = get_routerai_credentials(db, provider)
+            try:
+                answered_model = ping(api_key=api_key, model=model, base_url=base_url)
+            except Exception as exc:  # noqa: BLE001 - любая ошибка подключения - исход теста
+                success = False
+                lines.append(f"{PROVIDER_LABELS[provider]}: не удалось подключиться — {exc}")
+            else:
+                lines.append(f"{PROVIDER_LABELS[provider]}: работает, отвечает {answered_model}.")
+        result = YandexConnectionTestResult(success=success, message="\n".join(lines))
 
     log_action(
         db,

@@ -50,7 +50,7 @@ function ProgressRing({ progress, color }: { progress: number; color: string }) 
         cy="32"
         r={radius}
         fill="none"
-        stroke="rgba(255,255,255,0.07)"
+        style={{ stroke: "rgb(var(--c-white) / 0.07)" }}
         strokeWidth="6"
       />
       <circle

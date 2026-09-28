@@ -47,7 +47,7 @@ export function TenderHistoryTab({
         <button
           onClick={() => void submit()}
           disabled={isSending || !text.trim()}
-          className="flex shrink-0 items-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-400 disabled:opacity-50"
+          className="flex shrink-0 items-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-2 text-sm font-medium text-snow hover:bg-indigo-400 disabled:opacity-50"
         >
           {isSending ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
           Добавить

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 
 import pydantic
@@ -49,6 +50,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.jobs import report_progress
 from app.models.analysis import (
     ComplianceMatrixEntry,
     ComplianceSource,
@@ -222,6 +224,8 @@ class ComplianceOutcome:
     """Итог расчёта по тендеру для показа пользователю."""
 
     manufacturers_processed: int = 0
+    # Пропущены при продолжении: итог уже посчитан по актуальным требованиям.
+    manufacturers_skipped: int = 0
     entries_saved: int = 0
     requirements_total: int = 0
     manual_fallback_used: int = 0
@@ -413,8 +417,15 @@ def evaluate_tender(
     *,
     actor: User | None,
     use_manual_fallback: bool = True,
+    skip_fresh_since: datetime | None = None,
 ) -> ComplianceOutcome:
-    """Строит матрицу соответствия и считает проценты победителя по всем производителям."""
+    """Строит матрицу соответствия и считает проценты победителя по всем производителям.
+
+    `skip_fresh_since` — продолжение, а не пересчёт: производитель, чей текущий итог
+    посчитан позже этого момента и позже последнего извлечения требований, пропускается.
+    Достройка брешей передаёт время извлечения требований (считать надо только тех, кого
+    нет или кто устарел), задача «Расчёт соответствия» — момент своей постановки в очередь
+    (после перезапуска сервера не повторять уже посчитанное ею же)."""
 
     outcome = ComplianceOutcome()
     all_requirements = list(
@@ -451,18 +462,57 @@ def evaluate_tender(
         db.scalars(select(Manufacturer).order_by(Manufacturer.is_mirtek.desc(), Manufacturer.legal_name))
     )
 
-    for manufacturer in manufacturers:
+    fresh = _fresh_manufacturers(db, tender, requirements, skip_fresh_since)
+    total = len(manufacturers)
+    for position, manufacturer in enumerate(manufacturers, start=1):
+        label = manufacturer.brand_name or manufacturer.legal_name
+        if manufacturer.id in fresh:
+            outcome.manufacturers_skipped += 1
+            continue
+        report_progress(f"Матрица соответствия: {position} из {total} производителей — {label}")
         verdicts = _evaluate_manufacturer(
             db, tender, manufacturer, requirements, outcome, use_manual_fallback=use_manual_fallback
         )
         _save_entries(db, tender, manufacturer, requirements, verdicts, outcome)
         _calculate_percentage(db, tender, manufacturer, requirements, verdicts)
         outcome.manufacturers_processed += 1
+        # Коммит после каждого производителя (28.09.2026): матрица на 55 требований строится
+        # 10-15 минут, и перезапуск сервера на двенадцатом производителе раньше выбрасывал
+        # все одиннадцать готовых — задача начинала заново и снова не доходила до конца.
+        db.commit()
 
+    if outcome.manufacturers_skipped:
+        outcome.messages.append(
+            f"уже посчитаны ранее и пропущены: {outcome.manufacturers_skipped}"
+        )
     db.commit()
     _request_missing_catalog_data(db, manufacturers, actor=actor)
     _log(db, tender, outcome, actor)
     return outcome
+
+
+def _fresh_manufacturers(
+    db: Session,
+    tender: Tender,
+    requirements: list[Requirement],
+    since: datetime | None,
+) -> set[uuid.UUID]:
+    """Производители с текущим итогом матрицы новее `since` и новее самих требований."""
+
+    if since is None:
+        return set()
+    newest_requirement = max((item.created_at for item in requirements if item.created_at), default=None)
+    threshold = max(since, newest_requirement) if newest_requirement else since
+    return set(
+        db.scalars(
+            select(WinPercentage.manufacturer_id).where(
+                WinPercentage.tender_id == tender.id,
+                WinPercentage.is_current.is_(True),
+                WinPercentage.calculated_at >= threshold,
+                WinPercentage.requirements_total == len(requirements),
+            )
+        )
+    )
 
 
 def _request_missing_catalog_data(

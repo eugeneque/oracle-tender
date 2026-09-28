@@ -392,6 +392,8 @@ class AiProfileScoreOut(BaseModel):
     verdict: str | None
     verdict_label: str | None
     decision: bool | None = None
+    # Заключение (28.09.2026) — см. `ai_conclusion_service`; `null` у оценок до него.
+    conclusion: dict | None = None
     weak_points: list[WeakPointOut]
     recommended_strategy: RecommendedStrategyOut | None
     similar_tender_ids: list[uuid.UUID]
@@ -550,3 +552,42 @@ class TenderBookmarkOut(BaseModel):
     tender_id: uuid.UUID
     note: str | None
     created_at: datetime
+
+
+class AiFeedbackCreate(BaseModel):
+    """Ответ специалиста на заключение ИИ: «согласен» или «не согласен» с причиной."""
+
+    kind: str
+    text: str | None = None
+
+
+class AiFeedbackOut(BaseModel):
+    id: uuid.UUID
+    tender_id: uuid.UUID
+    tender_title: str | None = None
+    tender_external_id: str | None = None
+    source_name: str | None = None
+    user_id: uuid.UUID | None
+    user_name: str | None
+    kind: str
+    text: str | None
+    # recorded — согласие записано; pending/processing — замечание на пересмотре;
+    # applied — заключение пересчитано с замечанием; error — пересмотр не удался.
+    status: str
+    error: str | None
+    before: dict | None
+    after: dict | None
+    ai_response: str | None
+    created_at: datetime
+    processed_at: datetime | None
+
+
+class AiFeedbackCreated(BaseModel):
+    feedback: AiFeedbackOut
+    # Задача пересмотра — только у несогласия.
+    job: BackgroundJobOut | None = None
+
+
+class AiFeedbackPage(BaseModel):
+    items: list[AiFeedbackOut]
+    total: int

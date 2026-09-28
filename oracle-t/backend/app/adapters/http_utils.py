@@ -80,6 +80,18 @@ def resolve_verify(url: str) -> str | bool | ssl.SSLContext:
     return True
 
 
+# Пауза перед повтором после HTTP 429, если сайт не назвал свою (Retry-After), и её потолок.
+TOO_MANY_REQUESTS_PAUSE = 10.0
+MAX_RETRY_AFTER_SECONDS = 60.0
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    value = (response.headers.get("Retry-After") or "").strip()
+    if not value.isdigit():
+        return None
+    return min(float(value), MAX_RETRY_AFTER_SECONDS)
+
+
 def fetch_with_retry(
     client: httpx.Client,
     method: str,
@@ -110,6 +122,11 @@ def fetch_with_retry(
             last_exc = exc
             if attempt < attempts:
                 delay = base * (2 ** (attempt - 1))
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+                    # «Слишком часто»: повтор через 2-4 с упирается в тот же лимит (waviot.ru,
+                    # 28.09.2026 — все три попытки каждой карточки получили 429). Ждём, сколько
+                    # просит сайт, иначе — не меньше 10 с.
+                    delay = max(delay, _retry_after_seconds(exc.response) or TOO_MANY_REQUESTS_PAUSE)
                 logger.warning(
                     f"Попытка {attempt}/{attempts} загрузки {url} не удалась ({exc}); "
                     f"повтор через {delay:.1f}с"

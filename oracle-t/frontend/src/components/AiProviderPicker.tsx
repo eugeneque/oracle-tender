@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { ApiError } from "../api/client";
 import type { AiProviderKey, AiProviderStatus } from "../api/types";
 import { chooseMyAiProvider } from "../hooks/useAiProvider";
-import { AI_PROVIDERS } from "../utils/aiProviders";
+import { AI_PROVIDER_ACCENT, AI_PROVIDERS } from "../utils/aiProviders";
 import { AiProviderIcon } from "./AiProviderIcon";
 
 /**
@@ -62,7 +62,6 @@ export function AiProviderPicker({ status }: { status: AiProviderStatus }) {
     };
   }, [isOpen]);
 
-  const isClaude = status.active_provider === "claude";
 
   const choose = async (provider: AiProviderKey | null) => {
     setError(null);
@@ -89,9 +88,7 @@ export function AiProviderPicker({ status }: { status: AiProviderStatus }) {
           status.source === "default" ? " — системная по умолчанию" : ""
         }. Нажмите, чтобы сменить`}
         className={`flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-medium transition-colors ${
-          isClaude
-            ? "border-orange-400/30 bg-orange-500/10 text-orange-200 hover:bg-orange-500/20"
-            : "border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10"
+          AI_PROVIDER_ACCENT[status.active_provider].badge
         }`}
       >
         <AiProviderIcon provider={status.active_provider} size={13} />

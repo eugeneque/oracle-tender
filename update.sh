@@ -242,6 +242,13 @@ do_check() {
     ok "установлена последняя версия: $(describe HEAD)"
     return 1
   fi
+  # Здесь версия новее GitHub (коммиты сделаны на этой машине и не отправлены) — это не
+  # обновление: «установить» его значило бы откатиться назад.
+  if [ -n "$LOCAL_SHA" ] && git_ merge-base --is-ancestor "$REMOTE_SHA" "$LOCAL_SHA" 2>/dev/null; then
+    ok "установленная версия новее GitHub: $(describe HEAD)"
+    info "не отправлено на GitHub коммитов: $(git_ rev-list --count "$REMOTE_SHA..$LOCAL_SHA") — сервер их не получит, пока их нет в origin/$BRANCH"
+    return 1
+  fi
   if [ -n "$LOCAL_SHA" ]; then
     info "установлена: $(describe HEAD)"
   else

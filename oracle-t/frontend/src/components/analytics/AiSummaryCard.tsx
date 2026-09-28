@@ -69,7 +69,7 @@ export function AiSummaryCard({
         <button
           onClick={onGenerate}
           disabled={isLoading}
-          className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-2 text-sm font-medium text-snow transition-opacity hover:opacity-90 disabled:opacity-50"
         >
           <RefreshCw size={15} className={isLoading ? "animate-spin" : ""} />
           {isLoading ? "Анализирую…" : summary ? "Обновить сводку" : "Сформировать сводку"}

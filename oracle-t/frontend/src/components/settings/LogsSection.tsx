@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, Pause, Play, ScrollText } from "lucide-react";
+import { Download, Pause, Play } from "lucide-react";
 
-import { ApiError, api } from "../../api/client";
+import { ApiError, api, downloadFile } from "../../api/client";
 import type { LogEntry, LogFacets, LogPage } from "../../api/types";
 
 const REFRESH_MS = 5_000;
@@ -21,6 +21,14 @@ const PERIODS: { label: string; hours: number | null }[] = [
   { label: "всё время", hours: null },
 ];
 
+const EXPORT_PERIODS: { label: string; hours: number }[] = [
+  { label: "За час", hours: 1 },
+  { label: "За сутки", hours: 24 },
+  { label: "За неделю", hours: 24 * 7 },
+];
+
+type ExportFormat = "txt" | "md";
+
 function formatTime(value: string): string {
   const date = new Date(value);
   // Формат терминала: дата — только в подсказке, в строке важны часы-минуты-секунды.
@@ -28,18 +36,20 @@ function formatTime(value: string): string {
 }
 
 /**
- * Раздел «Логирование» (раздел 5.9 ТЗ) — журнал операций в виде, близком к терминалу.
+ * Журнал операций (раздел 5.9 ТЗ) в виде, близком к терминалу, и его выгрузка в файл.
  *
- * Свёрнут по умолчанию: это диагностический инструмент, а не то, ради чего открывают
- * настройки, и постоянный поток строк на экране мешал бы остальным разделам. Пока раздел
- * свёрнут, автообновление не идёт — незачем опрашивать сервер каждые пять секунд ради
- * блока, который никто не видит.
+ * С 28.09.2026 живёт на отдельной странице «Логирование» (до этого — свёрнутым блоком в
+ * «Настройках»), поэтому раскрыт всегда, а автообновление идёт, пока страница открыта.
+ *
+ * Выгрузка — за час, сутки или неделю, классическим текстом (`.txt`, одна запись — одна
+ * строка) или Markdown-таблицей (`.md`). Уровень, компонент и поиск из фильтра экрана
+ * применяются и к файлу: выгружается то, что человек сейчас разглядывает, только целиком,
+ * а не последние 200 строк.
  *
  * Доступен всем пользователям: по журналу человек понимает, почему у тендера нет требований
  * или почему площадка не опрашивалась.
  */
 export function LogsSection() {
-  const [isExpanded, setIsExpanded] = useState(false);
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [facets, setFacets] = useState<LogFacets | null>(null);
@@ -52,13 +62,22 @@ export function LogsSection() {
   const [hours, setHours] = useState<number | null>(24);
   const [isLive, setIsLive] = useState(true);
 
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("txt");
+  const [exportingHours, setExportingHours] = useState<number | null>(null);
+  const [exportResult, setExportResult] = useState<string | null>(null);
+
   const consoleRef = useRef<HTMLDivElement>(null);
 
-  const load = useCallback(async () => {
+  const filterParams = useCallback(() => {
     const params = new URLSearchParams();
     levels.forEach((level) => params.append("level", level));
     if (component) params.set("component", component);
     if (search.trim()) params.set("search", search.trim());
+    return params;
+  }, [levels, component, search]);
+
+  const load = useCallback(async () => {
+    const params = filterParams();
     if (hours !== null) params.set("hours", String(hours));
     params.set("limit", String(PAGE_SIZE));
 
@@ -74,29 +93,27 @@ export function LogsSection() {
     } finally {
       setIsLoading(false);
     }
-  }, [levels, component, search, hours]);
+  }, [filterParams, hours]);
 
   useEffect(() => {
-    if (!isExpanded) return;
     setIsLoading(true);
     void load();
-  }, [isExpanded, load]);
+  }, [load]);
 
-  // Список компонентов подгружается один раз при первом раскрытии: он меняется только с
-  // выходом новых версий системы, тянуть его вместе с каждым обновлением журнала незачем.
+  // Список компонентов подгружается один раз: он меняется только с выходом новых версий
+  // системы, тянуть его вместе с каждым обновлением журнала незачем.
   useEffect(() => {
-    if (!isExpanded || facets) return;
     api
       .get<LogFacets>("/logs/facets")
       .then(setFacets)
       .catch(() => setFacets({ components: [], levels: [] }));
-  }, [isExpanded, facets]);
+  }, []);
 
   useEffect(() => {
-    if (!isExpanded || !isLive) return;
+    if (!isLive) return;
     const interval = setInterval(() => void load(), REFRESH_MS);
     return () => clearInterval(interval);
-  }, [isExpanded, isLive, load]);
+  }, [isLive, load]);
 
   // Автопрокрутка к последней строке — но только в режиме слежения: если человек
   // отлистал вверх и поставил паузу, дёргать его скролл нельзя.
@@ -111,130 +128,189 @@ export function LogsSection() {
     );
   };
 
+  const handleExport = async (exportHours: number) => {
+    setError(null);
+    setExportResult(null);
+    setExportingHours(exportHours);
+    const params = filterParams();
+    params.set("hours", String(exportHours));
+    params.set("format", exportFormat);
+    try {
+      const { fileName, rows } = await downloadFile(
+        `/logs/export?${params.toString()}`,
+        `sova-log.${exportFormat}`,
+      );
+      setExportResult(`Скачан ${fileName}${rows !== null ? ` — записей: ${rows}` : ""}`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось выгрузить журнал");
+    } finally {
+      setExportingHours(null);
+    }
+  };
+
+  const hasFilters = levels.length > 0 || component !== "" || search.trim() !== "";
+
   return (
-    <div className="mt-6 overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.03]">
-      <button
-        onClick={() => setIsExpanded((v) => !v)}
-        className="flex w-full items-center justify-between px-5 py-4 text-left"
-      >
-        <div>
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
-            <ScrollText size={15} className="text-indigo-400" />
-            Логирование
-          </h2>
-          <p className="mt-0.5 text-xs text-zinc-500">
-            Журнал операций системы (раздел 5.9 ТЗ): опрос источников, разбор документов,
-            ИИ-анализ, действия пользователей. Обновляется автоматически, пока раздел открыт.
-          </p>
-        </div>
-        <ChevronDown
-          size={18}
-          className={`shrink-0 text-zinc-500 transition-transform ${isExpanded ? "rotate-180" : ""}`}
-        />
-      </button>
+    <div className="space-y-6">
+      <div className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-5 py-4">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+          <Download size={15} className="text-indigo-400" />
+          Выгрузка журнала
+        </h2>
+        <p className="mt-0.5 text-xs text-zinc-500">
+          Файл со всеми записями за период, от старых к новым, время московское.
+          {hasFilters
+            ? " Применяются фильтры журнала ниже: уровень, компонент и поиск."
+            : " Фильтры журнала ниже (уровень, компонент, поиск) тоже применяются к файлу."}
+        </p>
 
-      {isExpanded && (
-        <div className="border-t border-white/[0.08] px-5 py-4">
-          {error && (
-            <div className="mb-3 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
-              {error}
-            </div>
-          )}
-
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            {(["INFO", "WARNING", "ERROR", "CRITICAL"] as const).map((level) => (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <div
+            role="radiogroup"
+            aria-label="Формат файла"
+            className="inline-flex rounded-lg border border-white/10 bg-black/20 p-0.5"
+          >
+            {(
+              [
+                { key: "txt", label: "TXT", hint: "классический лог" },
+                { key: "md", label: "MD", hint: "таблица Markdown" },
+              ] as const
+            ).map((item) => (
               <button
-                key={level}
-                onClick={() => toggleLevel(level)}
-                className={`rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
-                  levels.includes(level)
-                    ? "border-indigo-500/40 bg-indigo-500/15 text-indigo-300"
-                    : "border-white/10 text-zinc-400 hover:bg-white/5"
+                key={item.key}
+                type="button"
+                role="radio"
+                aria-checked={exportFormat === item.key}
+                title={item.hint}
+                onClick={() => setExportFormat(item.key)}
+                className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
+                  exportFormat === item.key
+                    ? "bg-indigo-500/20 text-indigo-100"
+                    : "text-zinc-400 hover:text-zinc-200"
                 }`}
               >
-                {level}
+                {item.label}
               </button>
             ))}
+          </div>
 
-            <select
-              value={component}
-              onChange={(e) => setComponent(e.target.value)}
-              className="rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs text-zinc-300 focus:border-indigo-500/50 focus:outline-none"
-            >
-              <option value="">все компоненты</option>
-              {facets?.components.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={hours === null ? "" : String(hours)}
-              onChange={(e) => setHours(e.target.value === "" ? null : Number(e.target.value))}
-              className="rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs text-zinc-300 focus:border-indigo-500/50 focus:outline-none"
-            >
-              {PERIODS.map((period) => (
-                <option key={period.label} value={period.hours === null ? "" : String(period.hours)}>
-                  {period.label}
-                </option>
-              ))}
-            </select>
-
-            <input
-              type="search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="поиск по действию и деталям…"
-              className="min-w-[200px] flex-1 rounded-lg border border-white/10 bg-black/20 px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none"
-            />
-
+          {EXPORT_PERIODS.map((period) => (
             <button
-              onClick={() => setIsLive((v) => !v)}
-              title={isLive ? "Остановить автообновление" : "Возобновить автообновление"}
-              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs ${
-                isLive
-                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+              key={period.hours}
+              type="button"
+              onClick={() => void handleExport(period.hours)}
+              disabled={exportingHours !== null}
+              className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+            >
+              <Download size={12} />
+              {exportingHours === period.hours ? "Готовлю файл…" : period.label}
+            </button>
+          ))}
+        </div>
+
+        {exportResult && <p className="mt-2 text-xs text-emerald-400">{exportResult}</p>}
+      </div>
+
+      <div className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-5 py-4">
+        {error && (
+          <div className="mb-3 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
+            {error}
+          </div>
+        )}
+
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          {(["INFO", "WARNING", "ERROR", "CRITICAL"] as const).map((level) => (
+            <button
+              key={level}
+              onClick={() => toggleLevel(level)}
+              className={`rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+                levels.includes(level)
+                  ? "border-indigo-500/40 bg-indigo-500/15 text-indigo-300"
                   : "border-white/10 text-zinc-400 hover:bg-white/5"
               }`}
             >
-              {isLive ? <Pause size={12} /> : <Play size={12} />}
-              {isLive ? "слежение" : "пауза"}
+              {level}
             </button>
-          </div>
+          ))}
 
-          <div
-            ref={consoleRef}
-            className="h-80 overflow-y-auto rounded-lg border border-white/[0.06] bg-black/40 p-3 font-mono text-xs leading-relaxed"
+          <select
+            value={component}
+            onChange={(e) => setComponent(e.target.value)}
+            className="rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs text-zinc-300 focus:border-indigo-500/50 focus:outline-none"
           >
-            {isLoading && entries.length === 0 ? (
-              <div className="text-zinc-600">Загружаю журнал…</div>
-            ) : entries.length === 0 ? (
-              <div className="text-zinc-600">Записей по этим условиям нет.</div>
-            ) : (
-              entries.map((entry) => (
-                <div key={entry.id} className="whitespace-pre-wrap break-words text-zinc-400">
-                  <span className="text-zinc-600" title={new Date(entry.timestamp).toLocaleString("ru-RU")}>
-                    {formatTime(entry.timestamp)}
-                  </span>{" "}
-                  <span className={LEVEL_STYLES[entry.level]}>{entry.level.padEnd(8)}</span>
-                  <span className="text-zinc-500">| {entry.component} | </span>
-                  <span className="text-zinc-300">{entry.action}</span>
-                  <span className="text-zinc-500"> → {entry.result}</span>
-                  {entry.details && <span className="text-zinc-500"> — {entry.details}</span>}
-                  {entry.user_name && <span className="text-indigo-400/70"> [{entry.user_name}]</span>}
-                </div>
-              ))
-            )}
-          </div>
+            <option value="">все компоненты</option>
+            {facets?.components.map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
 
-          <p className="mt-2 text-xs text-zinc-500">
-            Показано {entries.length} из {total} записей по текущему фильтру
-            {entries.length < total ? " (сначала самые свежие)" : ""} · хранение журнала — 6 месяцев
-          </p>
+          <select
+            value={hours === null ? "" : String(hours)}
+            onChange={(e) => setHours(e.target.value === "" ? null : Number(e.target.value))}
+            className="rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs text-zinc-300 focus:border-indigo-500/50 focus:outline-none"
+          >
+            {PERIODS.map((period) => (
+              <option key={period.label} value={period.hours === null ? "" : String(period.hours)}>
+                {period.label}
+              </option>
+            ))}
+          </select>
+
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="поиск по действию и деталям…"
+            className="min-w-[200px] flex-1 rounded-lg border border-white/10 bg-black/20 px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none"
+          />
+
+          <button
+            onClick={() => setIsLive((v) => !v)}
+            title={isLive ? "Остановить автообновление" : "Возобновить автообновление"}
+            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs ${
+              isLive
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                : "border-white/10 text-zinc-400 hover:bg-white/5"
+            }`}
+          >
+            {isLive ? <Pause size={12} /> : <Play size={12} />}
+            {isLive ? "слежение" : "пауза"}
+          </button>
         </div>
-      )}
+
+        <div
+          ref={consoleRef}
+          className="h-[60vh] min-h-80 overflow-y-auto rounded-lg border border-white/[0.06] bg-black/40 p-3 font-mono text-xs leading-relaxed"
+        >
+          {isLoading && entries.length === 0 ? (
+            <div className="text-zinc-600">Загружаю журнал…</div>
+          ) : entries.length === 0 ? (
+            <div className="text-zinc-600">Записей по этим условиям нет.</div>
+          ) : (
+            entries.map((entry) => (
+              <div key={entry.id} className="whitespace-pre-wrap break-words text-zinc-400">
+                <span className="text-zinc-600" title={new Date(entry.timestamp).toLocaleString("ru-RU")}>
+                  {formatTime(entry.timestamp)}
+                </span>{" "}
+                <span className={LEVEL_STYLES[entry.level]}>{entry.level.padEnd(8)}</span>
+                <span className="text-zinc-500">| {entry.component} | </span>
+                <span className="text-zinc-300">{entry.action}</span>
+                <span className="text-zinc-500"> → {entry.result}</span>
+                {entry.details && <span className="text-zinc-500"> — {entry.details}</span>}
+                {entry.user_name && <span className="text-indigo-400/70"> [{entry.user_name}]</span>}
+              </div>
+            ))
+          )}
+        </div>
+
+        <p className="mt-2 text-xs text-zinc-500">
+          Показано {entries.length} из {total} записей по текущему фильтру
+          {entries.length < total ? " (сначала самые свежие; целиком — выгрузкой выше)" : ""} ·
+          хранение журнала — 6 месяцев
+        </p>
+      </div>
     </div>
   );
 }
-

@@ -48,7 +48,7 @@ export function CompanyPage() {
     <AppShell>
       <div className="mx-auto max-w-7xl px-8 py-8">
         <PageHeader
-          breadcrumb={["Sova Scanner", "Моя компания"]}
+          breadcrumb={["Sova", "Моя компания"]}
           title="Моя компания"
           icon={
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">

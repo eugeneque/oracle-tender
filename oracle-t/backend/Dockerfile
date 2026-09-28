@@ -26,4 +26,6 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+# Вместо голого «alembic upgrade head»: в пустую базу сначала ложится снимок данных
+# (каталог, компании, закупки с матрицами — app/seed/snapshot.py), затем миграции.
+CMD ["sh", "-c", "python -m app.seed.snapshot prepare && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

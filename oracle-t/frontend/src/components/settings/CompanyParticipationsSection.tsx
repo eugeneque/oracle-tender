@@ -246,7 +246,7 @@ function ManualForm({ onSaved }: { onSaved: () => void }) {
       <button
         onClick={() => void save()}
         disabled={isSaving}
-        className="mt-3 flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+        className="mt-3 flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-xs font-medium text-snow hover:opacity-90 disabled:opacity-50"
       >
         {isSaving && <Loader2 size={12} className="animate-spin" />}
         Добавить запись
@@ -345,7 +345,7 @@ export function CompanyParticipationsPanel({
             onClick={() => void sync()}
             disabled={isSyncing || !hasInn}
             title={hasInn ? "Победы — из реестра контрактов по ИНН, проигрыши — по закупкам с поданной заявкой" : "Сначала укажите ИНН на вкладке «Профиль компании»"}
-            className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-xs font-medium text-white hover:opacity-90 disabled:opacity-40"
+            className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-xs font-medium text-snow hover:opacity-90 disabled:opacity-40"
           >
             {isSyncing ? (
               <Loader2 size={13} className="animate-spin" />

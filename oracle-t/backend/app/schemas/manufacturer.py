@@ -65,11 +65,17 @@ class SiTypeOut(BaseModel):
     matched_by: str | None = None
     source: str
     verified_by_user: bool
-    # «Требует ручной проверки»: реестр вернул несколько кандидатов, кандидат оказался не
-    # того вида измерений, либо истекает свидетельство об утверждении типа. Отличается от
-    # `verified_by_user` («человек подтвердил») — здесь «системе не хватило оснований».
+    # «Требует ручной проверки»: реестр вернул несколько кандидатов либо кандидата не того
+    # вида измерений. Отличается от `verified_by_user` («человек подтвердил») — здесь
+    # «системе не хватило оснований».
     review_status: str = "ok"
     review_reason: str | None = None
+    # Вычисляются при каждом запросе (`app/services/si_type_state.py`), по ним интерфейс
+    # раскладывает коды на группы: электросчётчик ли это и действует ли свидетельство
+    # (`valid` / `expiring` / `expired` / `inactive` / `unknown`, дни — до окончания срока).
+    is_electricity_meter: bool = True
+    approval_state: str = "unknown"
+    approval_days_left: int | None = None
     last_checked_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -246,6 +252,23 @@ class CatalogTaskOut(BaseModel):
     # Рассмотренные кандидаты реестра при неоднозначности — чтобы человек видел, из чего
     # выбирала система, не повторяя поиск руками.
     details: dict = {}
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class CatalogAutofillStatusOut(BaseModel):
+    """Последний сквозной опрос производителя — для значка в списке каталога."""
+
+    manufacturer_id: uuid.UUID
+    status: str
+    current_step: str | None
+    failed_steps: list[str] = []
+    # Опрос прошёл, а моделей у производителя так и нет — не «готово».
+    empty: bool = False
+    # Быстрый проход закончен, дополнение характеристик (обучение) ещё впереди или идёт.
+    enriching: bool = False
+    message: str | None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None

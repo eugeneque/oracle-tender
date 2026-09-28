@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -18,6 +19,8 @@ from app.models.source import AvailabilityStatus, Source, SourceType
 from app.services.audit import log_action
 
 PING_TIMEOUT_SECONDS = 10.0
+PING_ATTEMPTS = 2
+PING_RETRY_PAUSE_SECONDS = 3.0
 
 
 def _describe_error(exc: Exception) -> str:
@@ -32,6 +35,20 @@ def _describe_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def _ping_once(source: Source) -> int:
+    with httpx.Client(
+        headers={"User-Agent": DEFAULT_USER_AGENT},
+        timeout=PING_TIMEOUT_SECONDS,
+        verify=resolve_verify(source.url),
+        follow_redirects=True,
+    ) as client:
+        # `stream` вместо обычного GET: нужен только код ответа, тело страницы не читаем —
+        # часть площадок отдаёт под мегабайт HTML на одну загрузку, а пинг идёт раз в минуту
+        # по 12 источникам сразу.
+        with client.stream("GET", source.url) as response:
+            return response.status_code
+
+
 def ping_source(db: Session, source: Source) -> None:
     """Проверяет один источник. Не поднимает исключение наружу — сбой пинга одной площадки
     не должен прерывать проверку остальных (тот же принцип изоляции, что и при опросе тендеров,
@@ -39,28 +56,30 @@ def ping_source(db: Session, source: Source) -> None:
 
     was_available = source.availability_status == AvailabilityStatus.AVAILABLE.value
 
-    try:
-        with httpx.Client(
-            headers={"User-Agent": DEFAULT_USER_AGENT},
-            timeout=PING_TIMEOUT_SECONDS,
-            verify=resolve_verify(source.url),
-            follow_redirects=True,
-        ) as client:
-            # `stream` вместо обычного GET: нужен только код ответа, тело страницы не читаем —
-            # часть площадок отдаёт под мегабайт HTML на одну загрузку, а пинг идёт раз в минуту
-            # по 12 источникам сразу.
-            with client.stream("GET", source.url) as response:
-                status_code = response.status_code
+    # Две попытки с паузой: одиночный таймаут — не недоступность. Госплан за 26–28.09.2026
+    # «пропадал» и «возвращался» 27 раз — каждая разовая заминка сети становилась событием
+    # в журнале и красной точкой в «Настройках».
+    status_code: int | None = None
+    error: str | None = None
+    for attempt in range(1, PING_ATTEMPTS + 1):
+        try:
+            status_code = _ping_once(source)
+            error = None
+            if status_code < 500:
+                break
+        except Exception as exc:  # noqa: BLE001 - см. докстринг функции
+            error = _describe_error(exc)
+        if attempt < PING_ATTEMPTS:
+            time.sleep(PING_RETRY_PAUSE_SECONDS)
 
-        if status_code < 400:
-            source.availability_status = AvailabilityStatus.AVAILABLE.value
-            source.availability_error = None
-        else:
-            source.availability_status = AvailabilityStatus.UNAVAILABLE.value
-            source.availability_error = f"HTTP {status_code}"
-    except Exception as exc:  # noqa: BLE001 - см. докстринг функции
+    if error is None and status_code is not None and (status_code < 400 or status_code == 429):
+        # 429 — сайт отвечает, просто просит реже: для пинга это «доступен» (waviot.ru
+        # отдаёт 429 на частые запросы с ботовым User-Agent, и пинг раз в минуту его ловил).
+        source.availability_status = AvailabilityStatus.AVAILABLE.value
+        source.availability_error = None
+    else:
         source.availability_status = AvailabilityStatus.UNAVAILABLE.value
-        source.availability_error = _describe_error(exc)
+        source.availability_error = error or f"HTTP {status_code}"
 
     source.availability_checked_at = datetime.now(timezone.utc)
     db.add(source)

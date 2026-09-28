@@ -7,16 +7,31 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.jobs import register_handler, register_job_handler
-from app.models.analysis import Requirement, RequirementKind
-from app.models.job import BackgroundJob, JobKind
+from app.core.jobs import (
+    current_job_created_at,
+    enqueue,
+    register_handler,
+    register_job_handler,
+    report_progress,
+)
+from app.models.analysis import Requirement, RequirementKind, WinPercentage
+from app.models.ai_profile import AiProfileScore
+from app.models.job import BackgroundJob, JobKind, JobStatus
+from app.models.manufacturer import Manufacturer
 from app.models.tender import Tender
 from app.models.user import User
-from app.services import notification_service, tender_card_service, tender_insights
+from app.services import (
+    ai_feedback_service,
+    notification_service,
+    tender_card_service,
+    tender_insights,
+)
 from app.services.ai_profile_service import compute_profile_score
 from app.services.ai_provider_service import PROVIDER_LABELS, get_active_provider
 from app.services.compliance_service import evaluate_tender
@@ -70,8 +85,14 @@ def _run_analysis(db: Session, tender: Tender, actor: User | None) -> str:
     return "; ".join(parts)
 
 
-def _run_evaluation(db: Session, tender: Tender, actor: User | None) -> str:
-    outcome = evaluate_tender(db, tender, actor=actor)
+# «Достроить, а не пересчитать»: пропускаются производители, чей итог новее требований.
+_GAP_ONLY = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _run_evaluation(
+    db: Session, tender: Tender, actor: User | None, *, since: datetime | None = None
+) -> str:
+    outcome = evaluate_tender(db, tender, actor=actor, skip_fresh_since=since)
 
     parts = [
         f"производителей обработано: {outcome.manufacturers_processed}",
@@ -86,6 +107,119 @@ def _run_evaluation(db: Session, tender: Tender, actor: User | None) -> str:
     return "; ".join(parts)
 
 
+
+def matrix_gap(db: Session, tender: Tender) -> str | None:
+    """Почему матрицу соответствия нужно (пере)строить — или `None`, если она актуальна.
+
+    Бреши, которые закрывает (28.09.2026): матрицы нет вовсе, хотя требования к товару
+    извлечены (полный разбор оборвался на втором шаге); в ней не все производители
+    (справочник пополнился после расчёта); требования переизвлечены после расчёта — ячейки
+    матрицы ссылаются на прежний список. Закупка без требований к товару матрицы не требует.
+    """
+
+    product = db.execute(
+        select(func.count(), func.max(Requirement.created_at)).where(
+            Requirement.tender_id == tender.id,
+            Requirement.kind == RequirementKind.PRODUCT.value,
+        )
+    ).one()
+    if not product[0]:
+        return None
+    wins = db.execute(
+        select(func.count(), func.min(WinPercentage.calculated_at)).where(
+            WinPercentage.tender_id == tender.id, WinPercentage.is_current.is_(True)
+        )
+    ).one()
+    if not wins[0]:
+        return "матрица соответствия не построена"
+    manufacturers = db.scalar(select(func.count()).select_from(Manufacturer)) or 0
+    if wins[0] < manufacturers:
+        return f"в матрице {wins[0]} производителей из {manufacturers}"
+    if product[1] is not None and wins[1] is not None and wins[1] < product[1]:
+        return "требования обновлены после расчёта матрицы"
+    return None
+
+
+def prepare_tender(db: Session, tender: Tender, actor: User | None) -> list[str]:
+    """Достраивает то, без чего заключение ИИ выходит с дырой: анализ документации (если
+    требований нет ни одного) и матрицу соответствия (см. `matrix_gap`).
+
+    Вызывается перед каждым пересчётом оценки — по кнопке, по замечанию специалиста и в
+    полном разборе. Разбор от этого дольше, зато «Наши приборы» и «Кто проходит» не
+    остаются «не проверен по ТЗ» только потому, что какой-то шаг когда-то не дошёл до
+    конца. Сбой шага не отменяет оценку — он называется в итоге задачи."""
+
+    messages: list[str] = []
+    has_requirements = db.scalar(
+        select(func.count()).select_from(Requirement).where(Requirement.tender_id == tender.id)
+    )
+    if not has_requirements:
+        try:
+            messages.append(f"анализ документов: {_run_analysis(db, tender, actor)}")
+        except Exception as exc:  # noqa: BLE001 - оценка посчитается и без требований
+            db.rollback()
+            messages.append(f"анализ документов не выполнен ({exc})")
+
+    reason = matrix_gap(db, tender)
+    if reason:
+        try:
+            messages.append(
+                f"матрица достроена ({reason}): "
+                f"{_run_evaluation(db, tender, actor, since=_GAP_ONLY)}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            messages.append(f"матрица не построена ({reason}): {exc}")
+    return messages
+
+
+def enqueue_gap_repairs(db: Session, *, limit: int = 30) -> int:
+    """Ночной обход брешей: открытые закупки с заключением ИИ, у которых матрица не
+    построена или устарела (`matrix_gap`), встают на пересчёт оценки — а он сначала
+    достраивает матрицу (`prepare_tender`). Закупки, по которым идёт или стоит в очереди
+    любая задача, не трогаются."""
+
+    busy = select(BackgroundJob.tender_id).where(
+        BackgroundJob.tender_id.is_not(None),
+        BackgroundJob.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+    )
+    tenders = db.scalars(
+        select(Tender)
+        .join(AiProfileScore, AiProfileScore.tender_id == Tender.id)
+        .where(
+            AiProfileScore.is_current.is_(True),
+            (Tender.application_end.is_(None))
+            | (Tender.application_end > datetime.now(timezone.utc)),
+            Tender.id.not_in(busy),
+        )
+        .order_by(Tender.application_end.asc().nulls_last())
+    )
+    queued = 0
+    for tender in tenders:
+        if queued >= limit:
+            break
+        if matrix_gap(db, tender) is None:
+            continue
+        enqueue(db, kind=JobKind.AI_PROFILE_SCORE, tender=tender, actor=None)
+        queued += 1
+    return queued
+
+
+def _run_analysis_job(db: Session, tender: Tender, actor: User | None) -> str:
+    """Задача «Анализ документов»: после извлечения требований сразу строится матрица —
+    иначе новые требования остаются непроверенными до отдельного расчёта."""
+
+    message = _run_analysis(db, tender, actor)
+    reason = matrix_gap(db, tender)
+    if reason:
+        try:
+            message += f"; матрица: {_run_evaluation(db, tender, actor, since=_GAP_ONLY)}"
+        except Exception as exc:  # noqa: BLE001 - требования уже сохранены
+            db.rollback()
+            message += f"; матрица не построена: {exc}"
+    return message
+
+
 def _run_profile_score(db: Session, tender: Tender, actor: User | None) -> str:
     """AI-оценка по профилю (раздел 5.5.1 ТЗ).
 
@@ -98,7 +232,9 @@ def _run_profile_score(db: Session, tender: Tender, actor: User | None) -> str:
     # Имя модели — в сообщение задачи: провайдер переключается в настройках, и по журналу
     # задач иначе не понять, чьи это цифры, когда результаты до и после переключения различаются.
     messages: list[str] = [f"модель: {PROVIDER_LABELS[get_active_provider(db)]}"]
+    messages.extend(prepare_tender(db, tender, actor))
     try:
+        report_progress("Разделы «Дополнительно»: условия, сроки, требования к участнику…")
         card = tender_card_service.sync_card(db, tender, actor=actor)
         sections = tender_insights.build_extra_sections(db, tender, card, actor=actor)
         if sections:
@@ -110,6 +246,8 @@ def _run_profile_score(db: Session, tender: Tender, actor: User | None) -> str:
         messages.append(f"разделы «Дополнительно» не обновлены ({exc})")
 
     outcome = compute_profile_score(db, tender, actor=actor)
+    # Пересчёт учёл все замечания специалистов — висящие «на пересмотре» закрываются им же.
+    ai_feedback_service.resolve_pending(db, tender)
     score = outcome.score
     if score is not None and score.overall_score is not None:
         messages.insert(0, f"итоговая оценка: {float(score.overall_score):.0f}%")
@@ -119,6 +257,36 @@ def _run_profile_score(db: Session, tender: Tender, actor: User | None) -> str:
 
     notification_service.notify_high_ai_score(db, tender)
     return "; ".join(messages)
+
+
+def _run_feedback(db: Session, tender: Tender, actor: User | None) -> str:
+    """Пересмотр заключения ИИ по замечаниям тендерного специалиста (28.09.2026).
+
+    Разделы «Дополнительно» не перечитываются: специалист ждёт ответа на своё замечание, а
+    документация с прошлого разбора не менялась."""
+
+    prepared = prepare_tender(db, tender, actor)
+    message = ai_feedback_service.process_pending(db, tender, actor)
+    if prepared:
+        message = "; ".join([message, *prepared])
+    notification_service.notify_high_ai_score(db, tender)
+    return message
+
+
+def _progressed(job: BackgroundJob, results: dict[str, str]) -> dict:
+    """`payload` после пройденного шага: итоги шагов, без счётчика перезапусков — задача
+    продвинулась, значит, не она роняет сервер (см. `jobs.recover_interrupted_jobs`)."""
+
+    payload = {**(job.payload or {}), **results}
+    payload.pop("restarts", None)
+    return payload
+
+
+def _run_evaluation_job(db: Session, tender: Tender, actor: User | None) -> str:
+    """Задача «Расчёт соответствия» — полный пересчёт. После перезапуска сервера
+    производители, посчитанные этой же задачей до обрыва, не пересчитываются."""
+
+    return _run_evaluation(db, tender, actor, since=current_job_created_at())
 
 
 def _run_full_review(db: Session, job: BackgroundJob, actor: User | None) -> str:
@@ -136,43 +304,64 @@ def _run_full_review(db: Session, job: BackgroundJob, actor: User | None) -> str
     if tender is None:
         raise RuntimeError("Тендер удалён")
 
-    results: dict[str, str] = {}
+    # Итоги шагов, пройденных до перезапуска сервера (см. `jobs.recover_interrupted_jobs`):
+    # задача продолжает с оборванного шага, а не повторяет анализ документации заново.
+    done = {
+        key: value
+        for key, value in (job.payload or {}).items()
+        if key in {"analysis", "evaluation"} and isinstance(value, str)
+    }
+    results: dict[str, str] = dict(done)
     failures = 0
 
     def step(number: int, title: str) -> None:
         job.message = f"Шаг {number} из 3: {title}…"
         db.commit()
 
-    step(1, "анализ документов")
-    try:
-        results["analysis"] = _run_analysis(db, tender, actor)
-    except Exception as exc:  # noqa: BLE001 - шаг изолирован, цепочка идёт дальше
-        db.rollback()
-        logger.warning(f"Полный разбор {tender.external_id}: анализ не выполнен: {exc}")
-        results["analysis"] = f"не выполнен: {exc}"
-        failures += 1
-    job.payload = {**(job.payload or {}), **results}
-    db.commit()
-
-    product_requirements = db.scalar(
-        select(func.count())
-        .select_from(Requirement)
-        .where(
-            Requirement.tender_id == tender.id,
-            Requirement.kind == RequirementKind.PRODUCT.value,
-        )
-    )
-    if product_requirements:
-        step(2, "расчёт соответствия")
+    if "analysis" not in done or done["analysis"].startswith("не выполнен"):
+        step(1, "анализ документов")
         try:
-            results["evaluation"] = _run_evaluation(db, tender, actor)
-        except Exception as exc:  # noqa: BLE001
+            results["analysis"] = _run_analysis(db, tender, actor)
+        except Exception as exc:  # noqa: BLE001 - шаг изолирован, цепочка идёт дальше
             db.rollback()
-            logger.warning(f"Полный разбор {tender.external_id}: матрица не построена: {exc}")
-            results["evaluation"] = f"не выполнен: {exc}"
-    else:
-        results["evaluation"] = "пропущен — требований к товару нет (закупка на услуги или работы)"
-    job.payload = {**(job.payload or {}), **results}
+            logger.warning(f"Полный разбор {tender.external_id}: анализ не выполнен: {exc}")
+            results["analysis"] = f"не выполнен: {exc}"
+            failures += 1
+        job.payload = _progressed(job, results)
+        db.commit()
+
+    # Матрица строится по `matrix_gap`, а не по «есть ли требования к товару»: после
+    # перезапуска она могла успеть достроиться, а после переанализа — устареть.
+    reason = matrix_gap(db, tender)
+    if reason:
+        step(2, "расчёт соответствия")
+        # Две попытки: без матрицы заключение называет наши приборы «не проверен по ТЗ».
+        for attempt in (1, 2):
+            try:
+                results["evaluation"] = _run_evaluation(db, tender, actor, since=_GAP_ONLY)
+                break
+            except Exception as exc:  # noqa: BLE001
+                db.rollback()
+                logger.warning(
+                    f"Полный разбор {tender.external_id}: матрица не построена "
+                    f"(попытка {attempt}): {exc}"
+                )
+                results["evaluation"] = f"не выполнен: {exc}"
+    elif "evaluation" not in results:
+        product_requirements = db.scalar(
+            select(func.count())
+            .select_from(Requirement)
+            .where(
+                Requirement.tender_id == tender.id,
+                Requirement.kind == RequirementKind.PRODUCT.value,
+            )
+        )
+        results["evaluation"] = (
+            "матрица актуальна"
+            if product_requirements
+            else "пропущен — требований к товару нет (закупка на услуги или работы)"
+        )
+    job.payload = _progressed(job, results)
     db.commit()
 
     step(3, "AI-оценка по профилю")
@@ -183,7 +372,7 @@ def _run_full_review(db: Session, job: BackgroundJob, actor: User | None) -> str
         logger.warning(f"Полный разбор {tender.external_id}: оценка не посчитана: {exc}")
         results["score"] = f"не посчитана: {exc}"
         failures += 1
-    job.payload = {**(job.payload or {}), **results}
+    job.payload = _progressed(job, results)
     db.commit()
 
     summary = (
@@ -254,8 +443,9 @@ def _run_sources_poll(db: Session, job: BackgroundJob, actor: User | None) -> st
     return summary
 
 
-register_handler(JobKind.TENDER_ANALYSIS, _run_analysis)
+register_handler(JobKind.TENDER_ANALYSIS, _run_analysis_job)
 register_job_handler(JobKind.SOURCES_POLL, _run_sources_poll)
 register_handler(JobKind.AI_PROFILE_SCORE, _run_profile_score)
-register_handler(JobKind.TENDER_EVALUATION, _run_evaluation)
+register_handler(JobKind.AI_FEEDBACK, _run_feedback)
+register_handler(JobKind.TENDER_EVALUATION, _run_evaluation_job)
 register_job_handler(JobKind.TENDER_FULL_REVIEW, _run_full_review)
