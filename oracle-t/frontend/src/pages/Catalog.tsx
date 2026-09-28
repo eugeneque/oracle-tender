@@ -28,6 +28,7 @@ import type {
   ManualIngestOutcome,
   Manufacturer,
   ManualExtractionOutcome,
+  MeterParameter,
   Product,
   ProductDocumentation,
   ProductSupport,
@@ -39,6 +40,7 @@ import { RegistryLearningSection } from "../components/catalog/RegistryLearningS
 import { UpperSoftwareSection } from "../components/catalog/UpperSoftwareSection";
 import { ProductRegistrySection } from "../components/catalog/ProductRegistrySection";
 import { ProductMatrix } from "../components/catalog/ProductMatrix";
+import { MeterParametersTable } from "../components/catalog/MeterParametersTable";
 import { formatDate } from "../utils/format";
 import { PageHeader } from "../components/PageHeader";
 import { useAuth } from "../context/useAuth";
@@ -92,6 +94,16 @@ export function CatalogPage() {
   // 16.09.2026). Рядом с характеристиками, потому что на вопрос «интегрирован ли прибор
   // в Пирамиду» отвечают именно здесь, а не в блоке площадок.
   const [productSupport, setProductSupport] = useState<ProductSupport[]>([]);
+  // Та же карточка по 39 параметрам файла «Параметры для ПУ» (28.09.2026) — тендерный
+  // отдел сверяет ТЗ по своей таблице. Вид запоминается у пользователя в браузере.
+  const [meterParameters, setMeterParameters] = useState<MeterParameter[]>([]);
+  const [characteristicsView, setCharacteristicsView] = useState<"parameters" | "appendix">(() => {
+    try {
+      return localStorage.getItem("catalog.characteristicsView") === "appendix" ? "appendix" : "parameters";
+    } catch {
+      return "parameters";
+    }
+  });
 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -183,6 +195,35 @@ export function CatalogPage() {
       setProductSupport(support);
     });
   }, [selectedProductId]);
+
+  // Параметры собираются из характеристик, поэтому перечитываются после каждой их правки.
+  useEffect(() => {
+    if (!selectedProductId) {
+      setMeterParameters([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .get<MeterParameter[]>(`/products/${selectedProductId}/meter-parameters`)
+      .then((rows) => {
+        if (!cancelled) setMeterParameters(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setMeterParameters([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProductId, characteristics]);
+
+  const switchCharacteristicsView = (view: "parameters" | "appendix") => {
+    setCharacteristicsView(view);
+    try {
+      localStorage.setItem("catalog.characteristicsView", view);
+    } catch {
+      // без сохранения — вид просто не запомнится
+    }
+  };
 
   // Одна площадка может покрывать модель несколькими записями (у Пирамиды семейство и
   // исполнение с СПОДЭС стоят отдельными строками) — в подписи каждая площадка один раз.
@@ -384,6 +425,22 @@ export function CatalogPage() {
       });
       setCharacteristics((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
     });
+
+  // Правка из вида по параметрам: поле может быть ещё пустым — тогда значение заводится.
+  const handleSetField = (groupName: string, fieldName: string, current: Characteristic | null) => {
+    const next = window.prompt(`${groupName} → ${fieldName}`, current?.value ?? "");
+    if (next === null || next === (current?.value ?? "")) return;
+    void run(`set-${groupName}/${fieldName}`, async () => {
+      const updated = await api.put<Characteristic>(`/products/${selectedProductId}/characteristics`, {
+        group_name: groupName,
+        field_name: fieldName,
+        value: next,
+      });
+      setCharacteristics((prev) =>
+        prev.some((c) => c.id === updated.id) ? prev.map((c) => (c.id === updated.id ? updated : c)) : [...prev, updated]
+      );
+    });
+  };
 
   const handleEditValue = (characteristic: Characteristic) => {
     const next = window.prompt(
@@ -782,7 +839,10 @@ export function CatalogPage() {
                       Характеристики · {selectedProduct.model_name}
                     </h2>
                     <p className="mt-0.5 text-xs text-zinc-500">
-                      Приложение C ТЗ. Извлечённое ИИ отмечено как требующее проверки, ручной ввод имеет приоритет.
+                      {characteristicsView === "parameters"
+                        ? "39 параметров файла тендерного отдела «Параметры для ПУ»."
+                        : "Приложение C ТЗ."}{" "}
+                      Извлечённое ИИ отмечено как требующее проверки, ручной ввод имеет приоритет.
                     </p>
                     {selectedProduct.registry_modification && (
                       <p className="mt-0.5 font-mono text-[11px] text-sky-400/80" title="Полное условное обозначение исполнения из реестра ФГИС">
@@ -855,7 +915,38 @@ export function CatalogPage() {
                 </div>
 
                 <div className="px-5 py-3">
-                  {characteristics.length === 0 ? (
+                  <div className="mb-3 inline-flex rounded-lg border border-white/10 p-0.5 text-xs">
+                    {(
+                      [
+                        [
+                          "parameters",
+                          `Параметры для ПУ${meterParameters.length ? ` · ${meterParameters.filter((p) => p.filled).length} из ${meterParameters.length}` : ""}`,
+                        ],
+                        ["appendix", `Приложение C · ${characteristics.length}`],
+                      ] as const
+                    ).map(([view, label]) => (
+                      <button
+                        key={view}
+                        onClick={() => switchCharacteristicsView(view)}
+                        className={`rounded-md px-2.5 py-1 ${
+                          characteristicsView === view ? "bg-white/10 text-zinc-100" : "text-zinc-400 hover:text-zinc-200"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {characteristicsView === "parameters" ? (
+                    <MeterParametersTable
+                      parameters={meterParameters}
+                      sourceLabels={SOURCE_LABELS}
+                      isAdmin={isAdmin}
+                      busyKey={busy}
+                      onEdit={handleSetField}
+                      onVerify={(c) => void handleVerifyCharacteristic(c)}
+                    />
+                  ) : characteristics.length === 0 ? (
                     <p className="text-xs text-zinc-500">
                       Характеристик пока нет — запустите извлечение или добавьте значения вручную.
                     </p>

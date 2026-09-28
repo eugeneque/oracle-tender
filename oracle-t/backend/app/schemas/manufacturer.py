@@ -155,6 +155,39 @@ class CharacteristicOut(BaseModel):
     updated_at: datetime
 
 
+class MeterParameterFieldOut(BaseModel):
+    """Поле справочника, где у модели лежит ответ на параметр; `characteristic` пуст, если
+    значение ещё не заведено."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    group_name: str
+    field_name: str
+    characteristic: CharacteristicOut | None
+
+
+class MeterParameterFactOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    text: str
+    tone: str
+    url: str | None
+
+
+class MeterParameterOut(BaseModel):
+    """Параметр файла «Параметры для ПУ» в карточке модели (28.09.2026)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    no: int
+    name: str
+    note: str
+    rule: str
+    filled: bool
+    fields: list[MeterParameterFieldOut]
+    facts: list[MeterParameterFactOut]
+
+
 class CharacteristicUpsert(BaseModel):
     """Ручной ввод/правка значения (раздел 5.3 ТЗ, источник 3 — «ручной ввод/импорт через
     админ-панель для любых полей, включая корректировку автоматически извлечённых данных»).

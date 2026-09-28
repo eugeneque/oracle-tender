@@ -217,6 +217,29 @@ export interface Characteristic {
   updated_at: string;
 }
 
+// Параметр файла тендерного отдела «Параметры для ПУ» в карточке модели (28.09.2026).
+export interface MeterParameterField {
+  group_name: string;
+  field_name: string;
+  characteristic: Characteristic | null;
+}
+
+export interface MeterParameterFact {
+  text: string;
+  tone: "ok" | "bad" | "warn" | "muted";
+  url: string | null;
+}
+
+export interface MeterParameter {
+  no: number;
+  name: string;
+  note: string;
+  rule: string;
+  filled: boolean;
+  fields: MeterParameterField[];
+  facts: MeterParameterFact[];
+}
+
 export interface ExtractionOutcome {
   saved: number;
   skipped_unknown_field: number;

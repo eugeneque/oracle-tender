@@ -23,6 +23,7 @@ from app.schemas.manufacturer import (
     ManufacturerCreate,
     ManufacturerOut,
     ManufacturerUpdate,
+    MeterParameterOut,
     CatalogSiteOut,
     CatalogSyncOutcomeOut,
     DescriptionIngestOutcomeOut,
@@ -45,6 +46,7 @@ from app.services import (
     document_registry_service,
     fgis_catalog_sync,
     fgis_description_ingest,
+    meter_parameter_card,
     product_manual_ingest,
     catalog_site_sync,
     product_catalog_service,
@@ -223,6 +225,18 @@ def get_characteristics(
 ):
     _get_product_or_404(db, product_id)
     return characteristic_extraction.list_characteristics(db, product_id)
+
+
+@router.get("/products/{product_id}/meter-parameters", response_model=list[MeterParameterOut])
+def get_meter_parameters(
+    product_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """39 параметров файла «Параметры для ПУ» по модели — в порядке файла тендерного отдела."""
+
+    product = _get_product_or_404(db, product_id)
+    return meter_parameter_card.product_parameters(db, product)
 
 
 @router.put("/products/{product_id}/characteristics", response_model=CharacteristicOut)
