@@ -35,7 +35,7 @@ from app.models.manufacturer import (
     SiType,
     SiTypeSource,
 )
-from app.services import catalog_queue_service, catalog_site_sync, fgis_catalog_sync
+from app.services import catalog_queue_service, catalog_site_sync, fgis_catalog_sync, product_catalog_service
 
 
 @pytest.fixture(autouse=True)
@@ -431,9 +431,11 @@ class TestFgisDisambiguation:
 
 
 class TestRevalidation:
-    def test_expired_certificate_raises_review_flag(self, db_session, manufacturer):
+    def test_expired_certificate_is_computed_not_stored(self, db_session, manufacturer):
         """Истёкшее свидетельство об утверждении типа — повод остановить человека до подачи
-        заявки, а не после."""
+        заявки, а не после. Но в `review_status` оно не пишется: состояние считается из
+        `valid_to` при каждом запросе, иначе текст «осталось N дн.» застывает, а три разных
+        случая сливаются в одну пометку «требует ручной проверки»."""
 
         si_type = SiType(
             manufacturer_id=manufacturer.id,
@@ -449,8 +451,34 @@ class TestRevalidation:
         db_session.refresh(si_type)
 
         assert outcome.needs_review is True
-        assert si_type.review_status == ReviewStatus.NEEDS_REVIEW.value
-        assert "истекло" in (si_type.review_reason or "")
+        assert "истекло" in outcome.message
+        assert si_type.review_status == ReviewStatus.OK.value
+        out = product_catalog_service.si_type_to_out(si_type)
+        assert out.approval_state == "expired"
+        assert out.approval_days_left == -1
+
+    def test_confirmation_does_not_revive_expired_type(self, db_session, manufacturer, admin_user):
+        """Подтверждение — «код правильно сопоставлен», а не «свидетельство действует»."""
+
+        si_type = SiType(
+            manufacturer_id=manufacturer.id,
+            si_code=f"61892-{uuid.uuid4().hex[:2]}",
+            type_name="Счетчики электрической энергии однофазные",
+            source=SiTypeSource.AUTO_SEARCH.value,
+            valid_to=date.today() - timedelta(days=30),
+            review_status=ReviewStatus.NEEDS_REVIEW.value,
+            review_reason="Кандидатов несколько",
+        )
+        db_session.add(si_type)
+        db_session.commit()
+
+        product_catalog_service.update_si_type(
+            db_session, si_type, si_code=None, verified_by_user=True, actor=admin_user
+        )
+        out = product_catalog_service.si_type_to_out(si_type)
+
+        assert si_type.review_status == ReviewStatus.OK.value
+        assert out.approval_state == "expired"
 
     def test_new_description_version_drops_stale_text(self, db_session, manufacturer):
         """Новая редакция «Описания типа» означает, что ранее извлечённый текст устарел:

@@ -153,7 +153,7 @@ export function RusprofileSection() {
             <button
               onClick={handleSave}
               disabled={isSaving}
-              className="rounded-lg bg-indigo-500 px-3.5 py-2 text-xs font-medium text-white hover:bg-indigo-400 disabled:opacity-50"
+              className="rounded-lg bg-indigo-500 px-3.5 py-2 text-xs font-medium text-snow hover:bg-indigo-400 disabled:opacity-50"
             >
               {isSaving ? "Сохраняю…" : "Сохранить"}
             </button>

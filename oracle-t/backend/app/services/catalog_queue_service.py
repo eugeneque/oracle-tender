@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
@@ -160,12 +160,20 @@ def enqueue(
     return task
 
 
-def pending_tasks(db: Session, *, adapter_key: str | None = None, limit: int = DEFAULT_BATCH_SIZE) -> list[CatalogLookupTask]:
+def pending_tasks(
+    db: Session,
+    *,
+    adapter_key: str | None = None,
+    limit: int = DEFAULT_BATCH_SIZE,
+    exclude_keys: tuple[str, ...] = (),
+) -> list[CatalogLookupTask]:
     query = select(CatalogLookupTask).where(
         CatalogLookupTask.status == CatalogQueueStatus.QUEUED.value
     )
     if adapter_key is not None:
         query = query.where(CatalogLookupTask.adapter_key == adapter_key)
+    if exclude_keys:
+        query = query.where(CatalogLookupTask.adapter_key.not_in(exclude_keys))
     return list(db.scalars(query.order_by(CatalogLookupTask.created_at).limit(limit)))
 
 
@@ -188,7 +196,11 @@ def list_tasks(
 
 
 def process_queue(
-    db: Session, *, adapter_key: str | None = None, limit: int = DEFAULT_BATCH_SIZE
+    db: Session,
+    *,
+    adapter_key: str | None = None,
+    limit: int = DEFAULT_BATCH_SIZE,
+    exclude_keys: tuple[str, ...] = (),
 ) -> dict[str, int]:
     """Обрабатывает пачку задач. Возвращает счётчики по исходам.
 
@@ -198,7 +210,9 @@ def process_queue(
     """
 
     counters = {"success": 0, "needs_review": 0, "error": 0}
-    for task in pending_tasks(db, adapter_key=adapter_key, limit=limit):
+    for task in pending_tasks(db, adapter_key=adapter_key, limit=limit, exclude_keys=exclude_keys):
+        if not _claim(db, task):
+            continue  # задачу уже взял другой поток (планировщик и фоновый пул работают параллельно)
         status = run_task(db, task)
         if status is CatalogQueueStatus.SUCCESS:
             counters["success"] += 1
@@ -209,15 +223,44 @@ def process_queue(
     return counters
 
 
+def _claim(db: Session, task: CatalogLookupTask) -> bool:
+    """Атомарно переводит задачу из «в очереди» в «выполняется».
+
+    Пачка задач читается разом, а выполняется минутами (опрос производителя — десятки
+    минут). Без захвата подбор «зависших» задач по расписанию брал бы ту же задачу, что уже
+    ждёт своей очереди в фоновом пуле, и один источник опрашивался бы дважды параллельно."""
+
+    claimed = db.execute(
+        update(CatalogLookupTask)
+        .where(
+            CatalogLookupTask.id == task.id,
+            CatalogLookupTask.status == CatalogQueueStatus.QUEUED.value,
+        )
+        .values(status=CatalogQueueStatus.RUNNING.value)
+    ).rowcount
+    db.commit()
+    return bool(claimed)
+
+
+def submit(fn: Callable[[], None]) -> None:
+    """Выполнить функцию в потоке очереди — после того, что уже в нём стоит."""
+
+    _executor.submit(fn)
+
+
 def process_queue_in_background() -> None:
     """Тело фоновой обработки: своя сессия БД, все ошибки гасятся здесь же.
 
     Отдельная сессия обязательна — задача выполняется в другом потоке, а сессия HTTP-запроса
     к этому моменту уже закрыта (та же причина, что и в `app/core/jobs.py`)."""
 
+    process_pending(exclude_keys=())
+
+
+def process_pending(*, exclude_keys: tuple[str, ...]) -> None:
     db = SessionLocal()
     try:
-        counters = process_queue(db)
+        counters = process_queue(db, exclude_keys=exclude_keys)
         if any(counters.values()):
             logger.info(f"Очередь справочника продукции обработана: {counters}")
     except Exception as exc:  # noqa: BLE001 - необработанное исключение в потоке пула не долетит никуда

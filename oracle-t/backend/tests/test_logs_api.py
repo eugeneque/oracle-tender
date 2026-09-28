@@ -125,6 +125,86 @@ def test_logs_endpoint_available_to_regular_user(client, admin_token):
     assert "INFO" in facets.json()["levels"]
 
 
+def _timed_entries(db, marker: str) -> None:
+    """Три записи с явным временем: в одной транзакции `now()` у всех одинаков, и порядок
+    строк в файле без этого не проверить."""
+
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    for minutes_ago, action, level, details in (
+        (30, "старое", LogLevel.INFO, "первая | с чертой"),
+        (10, "сбой", LogLevel.ERROR, "строка 1\nстрока 2"),
+        (60 * 30, "позавчерашнее", LogLevel.INFO, None),
+    ):
+        entry = _entry(db, component=f"c_{marker}", action=action, level=level, details=details)
+        entry.timestamp = now - timedelta(minutes=minutes_ago)
+    db.flush()
+
+
+def test_export_txt_is_classic_log_in_chronological_order(db_session, admin_user):
+    """Выгрузка за час (28.09.2026): только записи периода, от старых к новым, одна запись —
+    одна строка с полями через « | », шапка с периодом и счётчиками по уровням."""
+
+    marker = uuid.uuid4().hex[:8]
+    _timed_entries(db_session, marker)
+
+    content, file_name, rows = log_service.export_logs(
+        db_session, hours=1, fmt="txt", actor=admin_user, component=f"c_{marker}"
+    )
+    text = content.decode("utf-8")
+
+    assert rows == 2
+    assert file_name.endswith("_1h.txt")
+    assert "последний час" in text
+    assert f"компонент: c_{marker}" in text
+    assert "INFO 1, WARNING 0, ERROR 1, CRITICAL 0" in text
+    assert "позавчерашнее" not in text
+    assert text.index("старое") < text.index("сбой")
+    assert "| ERROR    |" in text
+    # Многострочные детали — с отступом, чтобы продолжение не выглядело новой записью.
+    assert "строка 1\n    строка 2" in text
+
+
+def test_export_md_is_a_table_that_survives_pipes_and_newlines(db_session, admin_user):
+    marker = uuid.uuid4().hex[:8]
+    _timed_entries(db_session, marker)
+
+    content, file_name, rows = log_service.export_logs(
+        db_session, hours=24 * 7, fmt="md", actor=admin_user, component=f"c_{marker}"
+    )
+    text = content.decode("utf-8")
+
+    assert rows == 3
+    assert file_name.endswith("_168h.md")
+    assert text.startswith("# Журнал операций")
+    assert "последняя неделя" in text
+    assert "| Время (МСК) | Уровень |" in text
+    assert "первая \\| с чертой" in text
+    assert "строка 1<br>строка 2" in text
+    assert "| **ERROR** |" in text
+    # Каждая строка таблицы — ровно 8 неэкранированных черт (7 колонок).
+    table_rows = [line for line in text.splitlines() if line.startswith("| ") and "c_" in line]
+    assert len(table_rows) == 3
+    assert all(line.replace("\\|", "").count("|") == 8 for line in table_rows)
+
+
+def test_export_endpoint_returns_file_with_name(client, admin_token):
+    response = client.get(
+        "/logs/export?hours=1&format=md", headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/markdown")
+    assert ".md" in response.headers["content-disposition"]
+    assert int(response.headers["x-exported-rows"]) >= 0
+
+    assert client.get("/logs/export?hours=1").status_code == 401
+    bad = client.get(
+        "/logs/export?hours=1&format=pdf", headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    assert bad.status_code == 422
+
+
 def test_purge_removes_only_entries_older_than_retention(db_session):
     """Хранение журнала — 6 месяцев (раздел 5.9 ТЗ). Свежие записи уборка трогать не должна:
     ошибка в границе стоила бы всей истории работы системы."""

@@ -6,6 +6,7 @@ import {
   Star,
   Users as UsersIcon,
 } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link, useNavigate } from "react-router-dom";
@@ -14,6 +15,7 @@ import { api } from "../api/client";
 import type { Tender, TenderPage } from "../api/types";
 import { useAuth } from "../context/useAuth";
 import { daysLeft, percentValue, scoreBadgeClass } from "../utils/format";
+import { dropdownVariants, scrimVariants } from "../utils/motion";
 import { DecisionMark } from "./DecisionMark";
 import { UserAvatar } from "./UserAvatar";
 
@@ -103,18 +105,26 @@ export function AccountMenu() {
         <UserAvatar user={user} size="sm" />
       </button>
 
-      {isOpen &&
-        createPortal(
-          <>
+      {createPortal(
+        <AnimatePresence>
+          {isOpen && (
+            <motion.div key="scrim" variants={scrimVariants} initial="initial" animate="animate" exit="exit">
             {/* затемняет и блюрит всё, что находится позади меню — на уровне всего документа */}
             <div
-              className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm"
+              className="fixed inset-0 z-40 bg-scrim/50 backdrop-blur-sm"
               onClick={() => setIsOpen(false)}
             />
-
-            <div
+            </motion.div>
+          )}
+          {isOpen && (
+            <motion.div
+              key="menu"
+              variants={dropdownVariants}
+              initial="initial"
+              animate="animate"
+              exit="exit"
               className="fixed z-50 w-[360px]"
-              style={{ top: position.top, right: position.right }}
+              style={{ top: position.top, right: position.right, transformOrigin: "top right" }}
             >
               {/* свечение по краям карточки */}
               <div className="absolute -inset-1 rounded-[20px] bg-gradient-to-br from-indigo-500/60 via-violet-500/25 to-transparent opacity-80 blur-lg" />
@@ -234,10 +244,11 @@ export function AccountMenu() {
                   </button>
                 </div>
               </div>
-            </div>
-          </>,
-          document.body,
-        )}
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body,
+      )}
     </>
   );
 }

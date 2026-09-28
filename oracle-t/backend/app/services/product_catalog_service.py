@@ -24,11 +24,12 @@ from app.models.manufacturer import (
 from app.models.user import User
 from app.schemas.manufacturer import ProductOut, SiTypeOut
 from app.seed.characteristics_data import is_known_field
-from app.services import meter_kind, product_form_factor, si_type_linking
+from app.services import meter_kind, product_form_factor, si_type_linking, si_type_state
 from app.services.audit import log_action
 
 
 def si_type_to_out(si_type: SiType) -> SiTypeOut:
+    approval, days_left = si_type_state.approval_state(si_type)
     return SiTypeOut(
         id=si_type.id,
         manufacturer_id=si_type.manufacturer_id,
@@ -50,6 +51,9 @@ def si_type_to_out(si_type: SiType) -> SiTypeOut:
         verified_by_user=si_type.verified_by_user,
         review_status=si_type.review_status,
         review_reason=si_type.review_reason,
+        is_electricity_meter=si_type_state.is_electricity_meter(si_type),
+        approval_state=approval,
+        approval_days_left=days_left,
         last_checked_at=si_type.last_checked_at,
         created_at=si_type.created_at,
         updated_at=si_type.updated_at,
@@ -293,6 +297,12 @@ def update_si_type(db: Session, si_type: SiType, *, si_code: str | None, verifie
     if verified_by_user is not None and verified_by_user != si_type.verified_by_user:
         si_type.verified_by_user = verified_by_user
         changed.append("verified_by_user")
+        if verified_by_user and si_type.review_status == ReviewStatus.NEEDS_REVIEW.value:
+            # Человек подтвердил сопоставление — неоднозначность снята. Срок свидетельства
+            # подтверждение не меняет: он считается из `valid_to` (`si_type_state`).
+            si_type.review_status = ReviewStatus.OK.value
+            si_type.review_reason = None
+            changed.append("review_status")
 
     if changed:
         log_action(

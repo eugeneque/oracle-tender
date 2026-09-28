@@ -62,9 +62,11 @@ from app.models.market import SimilarTender
 from app.models.tender import Tender
 from app.models.tender_card import TenderCard
 from app.models.user import User
-from app.services import company_profile_service
+from app.services import ai_conclusion_service, company_profile_service
 from app.services.audit import log_action
 from app.services.ai_client import active_model, run_structured
+from app.services.yandex_ai_client import drain_fallback_notes
+from app.core.jobs import report_progress
 
 # Сколько требований уходит в промпт. Больше — не помещается вместе с профилем и рвёт ответ
 # по лимиту токенов; требования при этом отбираются не подряд, а по критичности (см.
@@ -892,15 +894,7 @@ def _history_dimension(
     компанию.
     """
 
-    similar_ids = [
-        row[0]
-        for row in db.execute(
-            select(SimilarTender.similar_tender_id)
-            .where(SimilarTender.tender_id == tender.id)
-            .order_by(SimilarTender.similarity_score.desc())
-            .limit(20)
-        ).all()
-    ]
+    similar_ids = _similar_ids(db, tender)
 
     participations, reasons = _relevant_participations(db, tender, similar_ids)
     decided = [
@@ -1109,89 +1103,27 @@ def _verdict(decision: bool | None, overall: Decimal | None) -> str:
     return Verdict.NO_GO.value
 
 
-def compute_profile_score(
-    db: Session, tender: Tender, *, actor: User | None = None
-) -> ProfileScoreOutcome:
-    """Считает AI-оценку по профилю и сохраняет её новой текущей версией."""
+def _legacy_resume(
+    db: Session,
+    tender: Tender,
+    outcome: ProfileScoreOutcome,
+    *,
+    base_context: str,
+    history: tuple,
+    task: tuple,
+    competencies: tuple,
+    overall: Decimal | None,
+) -> tuple[bool | None, str | None, str | None, str, list[dict], dict | None]:
+    """Решение и «Резюме» прежним путём (до 28.09.2026) — когда заключение не составилось."""
 
-    outcome = ProfileScoreOutcome()
-    profile = company_profile_service.require_filled(db)
-    requirements = _select_requirements(db, tender)
-    if not requirements:
-        outcome.messages.append(
-            "Требования из документации не извлечены — оценка считается только по карточке "
-            "закупки, точность ниже"
-        )
-
-    # Модель фиксируется до первого вызова: выбор персональный, и пересчёт должен показать,
-    # какая модель его сделала (25.09.2026).
-    model = active_model(db)
-    tender_block = _tender_block(db, tender)
-    requirements_block = _requirements_block(requirements)
-    profile_block = company_profile_service.profile_block(profile)
-    matrix_hint = _matrix_hint(db, tender)
-
-    base_context = (
-        f"ЗАКУПКА:\n{tender_block}\n\n"
-        f"ТРЕБОВАНИЯ:\n{requirements_block}\n\n"
-        f"ПРОФИЛЬ КОМПАНИИ:\n{profile_block}"
-    )
-    task_context = base_context + (f"\n\nДОПОЛНИТЕЛЬНО:\n{matrix_hint}" if matrix_hint else "")
-
-    task_score: Decimal | None = None
-    task_comment: str | None = None
-    task_evidence: list[dict] = []
-    task_checklist: list[dict] | None = None
-    try:
-        task_answer = run_structured(
-            db,
-            system_prompt=_TASK_PROMPT,
-            user_text=task_context,
-            response_model=TaskAnswer,
-            temperature=0.0,
-        )
-        task_score, task_checklist, task_evidence = _score_task(task_answer, requirements, profile)
-        task_comment = task_answer.comment.strip()
-    except Exception as exc:  # noqa: BLE001 - сбой одного измерения не отменяет остальные
-        logger.warning(f"Измерение Task для {tender.external_id} не посчитано: {exc}")
-        outcome.messages.append(f"Измерение «Задача» не посчитано: {exc}")
-
-    competencies_score: Decimal | None = None
-    competencies_comment: str | None = None
-    competencies_evidence: list[dict] = []
-    competencies_checklist: list[dict] | None = None
-    try:
-        competencies_answer = run_structured(
-            db,
-            system_prompt=_COMPETENCIES_PROMPT,
-            user_text=base_context,
-            response_model=CompetenciesAnswer,
-            temperature=0.0,
-        )
-        competencies_score, competencies_checklist, competencies_evidence = _score_competencies(
-            competencies_answer, requirements, profile
-        )
-        competencies_comment = competencies_answer.comment.strip()
-        if not competencies_checklist:
-            competencies_comment = (
-                "Формальных требований к участнику (допуски, лицензии, стаж, опыт) в закупке "
-                "не найдено — измерение не применимо и исключено из итоговой оценки."
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Измерение Competencies для {tender.external_id} не посчитано: {exc}")
-        outcome.messages.append(f"Измерение «Компетенции» не посчитано: {exc}")
-
-    # Ни одно модельное измерение не посчитано (нет денег на счёте, модель недоступна) —
-    # новую версию не сохраняем. Иначе итог сложился бы из одной «Истории», и сбой модели
-    # вытеснил бы прежнюю нормальную оценку записью «80%, ИДТИ» (найдено 25.09.2026 на
-    # RouterAI с нулевым балансом).
-    if task_checklist is None and competencies_checklist is None:
-        raise AiProfileError(
-            "Оценка не посчитана, прежняя оставлена без изменений: " + "; ".join(outcome.messages)
-        )
-
-    history_score, history_comment, history_evidence = _history_dimension(db, tender)
-    overall = _overall(history_score, task_score, competencies_score)
+    history_score, history_comment, history_evidence = history
+    task_score, task_comment, task_evidence, task_checklist = task
+    (
+        competencies_score,
+        competencies_comment,
+        competencies_evidence,
+        competencies_checklist,
+    ) = competencies
 
     # Решение «смотреть / не смотреть» (замечание 17.09.2026) — отдельным вызовом по трём
     # измерениям, а не порогом по проценту: процент усредняет, а решение должно ломаться об
@@ -1259,6 +1191,219 @@ def compute_profile_score(
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Резюме по тендеру {tender.external_id} не составлено: {exc}")
         outcome.messages.append(f"Блок «Резюме» не составлен: {exc}")
+    return decision, decision_summary, summary, verdict, weak_points, strategy
+
+
+def _verdict_from_conclusion(conclusion: dict, decision: bool | None) -> str:
+    """Вердикт из заключения: «не подходим» и отказ от участия — НЕ ИДТИ, «подходим» — ИДТИ,
+    остальное — С ОГОВОРКАМИ. Процент профиля больше не решает: он отвечает на вопрос «похожа
+    ли закупка на нас», а не «проходит ли наш прибор»."""
+
+    fit = conclusion.get("fit")
+    if decision is False or fit == "not_fit":
+        return Verdict.NO_GO.value
+    if fit == "fit":
+        return Verdict.GO.value
+    return Verdict.GO_WITH_RESERVATIONS.value
+
+
+def _similar_ids(db: Session, tender: Tender) -> list[uuid.UUID]:
+    return [
+        row[0]
+        for row in db.execute(
+            select(SimilarTender.similar_tender_id)
+            .where(SimilarTender.tender_id == tender.id)
+            .order_by(SimilarTender.similarity_score.desc())
+            .limit(20)
+        ).all()
+    ]
+
+
+def compute_profile_score(
+    db: Session, tender: Tender, *, actor: User | None = None
+) -> ProfileScoreOutcome:
+    """Считает AI-оценку по профилю и сохраняет её новой текущей версией."""
+
+    outcome = ProfileScoreOutcome()
+    # Заметки о запасных путях (отказ YandexGPT по фильтру) — только этого расчёта.
+    drain_fallback_notes()
+    profile = company_profile_service.require_filled(db)
+    requirements = _select_requirements(db, tender)
+    if not requirements:
+        outcome.messages.append(
+            "Требования из документации не извлечены — оценка считается только по карточке "
+            "закупки, точность ниже"
+        )
+
+    # Модель фиксируется до первого вызова: выбор персональный, и пересчёт должен показать,
+    # какая модель его сделала (25.09.2026).
+    model = active_model(db)
+    tender_block = _tender_block(db, tender)
+    requirements_block = _requirements_block(requirements)
+    profile_block = company_profile_service.profile_block(profile)
+    matrix_hint = _matrix_hint(db, tender)
+
+    # Замечания специалистов (28.09.2026) идут во все вызовы, а не только в заключение:
+    # «в закупке есть требование о допуске СРО» меняет «Компетенции», а не только вывод.
+    feedback_text = ai_conclusion_service.feedback_block(db, tender)
+
+    base_context = (
+        f"ЗАКУПКА:\n{tender_block}\n\n"
+        f"ТРЕБОВАНИЯ:\n{requirements_block}\n\n"
+        f"ПРОФИЛЬ КОМПАНИИ:\n{profile_block}"
+        + (
+            f"\n\n{feedback_text}\nЭто знание человека, читавшего документацию: учитывай "
+            "его, если оно не опровергается фактами выше."
+            if feedback_text
+            else ""
+        )
+    )
+    task_context = base_context + (f"\n\nДОПОЛНИТЕЛЬНО:\n{matrix_hint}" if matrix_hint else "")
+
+    task_score: Decimal | None = None
+    task_comment: str | None = None
+    task_evidence: list[dict] = []
+    task_checklist: list[dict] | None = None
+    report_progress("AI-оценка: измерения «Задача» и «Компетенции»…")
+    try:
+        task_answer = run_structured(
+            db,
+            system_prompt=_TASK_PROMPT,
+            user_text=task_context,
+            response_model=TaskAnswer,
+            temperature=0.0,
+        )
+        task_score, task_checklist, task_evidence = _score_task(task_answer, requirements, profile)
+        task_comment = task_answer.comment.strip()
+    except Exception as exc:  # noqa: BLE001 - сбой одного измерения не отменяет остальные
+        logger.warning(f"Измерение Task для {tender.external_id} не посчитано: {exc}")
+        outcome.messages.append(f"Измерение «Задача» не посчитано: {exc}")
+
+    competencies_score: Decimal | None = None
+    competencies_comment: str | None = None
+    competencies_evidence: list[dict] = []
+    competencies_checklist: list[dict] | None = None
+    try:
+        competencies_answer = run_structured(
+            db,
+            system_prompt=_COMPETENCIES_PROMPT,
+            user_text=base_context,
+            response_model=CompetenciesAnswer,
+            temperature=0.0,
+        )
+        competencies_score, competencies_checklist, competencies_evidence = _score_competencies(
+            competencies_answer, requirements, profile
+        )
+        competencies_comment = competencies_answer.comment.strip()
+        if not competencies_checklist:
+            competencies_comment = (
+                "Формальных требований к участнику (допуски, лицензии, стаж, опыт) в закупке "
+                "не найдено — измерение не применимо и исключено из итоговой оценки."
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Измерение Competencies для {tender.external_id} не посчитано: {exc}")
+        outcome.messages.append(f"Измерение «Компетенции» не посчитано: {exc}")
+
+    # Ни одно модельное измерение не посчитано (нет денег на счёте, модель недоступна) —
+    # новую версию не сохраняем. Иначе итог сложился бы из одной «Истории», и сбой модели
+    # вытеснил бы прежнюю нормальную оценку записью «80%, ИДТИ» (найдено 25.09.2026 на
+    # RouterAI с нулевым балансом).
+    if task_checklist is None and competencies_checklist is None:
+        raise AiProfileError(
+            "Оценка не посчитана, прежняя оставлена без изменений: " + "; ".join(outcome.messages)
+        )
+
+    history_score, history_comment, history_evidence = _history_dimension(db, tender)
+    overall = _overall(history_score, task_score, competencies_score)
+
+    # Заключение (28.09.2026): подходим ли мы и каким прибором, кто проходит, стратегия,
+    # риски, метрики. Оно же выносит решение «смотреть / не смотреть» и задаёт вердикт.
+    # Прежние вызовы «Решение» и «Резюме» остались запасным путём — если заключение не
+    # составилось, карточка получит хотя бы их.
+    similar_ids = _similar_ids(db, tender)
+    participations, _ = _relevant_participations(db, tender, similar_ids)
+    facts = ai_conclusion_service.collect_facts(db, tender)
+    metrics = ai_conclusion_service.build_metrics(
+        db,
+        tender,
+        facts,
+        participations,
+        history=history_score,
+        task=task_score,
+        competencies=competencies_score,
+        competencies_applicable=bool(competencies_checklist),
+        overall=overall,
+    )
+    dimensions_text = _decision_context(
+        tender,
+        history=(history_score, history_comment, history_evidence),
+        task=(task_score, task_comment, task_evidence, task_checklist),
+        competencies=(
+            competencies_score,
+            competencies_comment,
+            competencies_evidence,
+            competencies_checklist,
+        ),
+    )
+
+    conclusion: dict | None = None
+    decision: bool | None = None
+    decision_summary: str | None = None
+    summary: str | None = None
+    weak_points: list[dict] = []
+    strategy: dict | None = None
+    report_progress("Заключение ИИ: подходим ли мы, каким прибором, кто проходит…")
+    try:
+        result = ai_conclusion_service.compute_conclusion(
+            db,
+            tender,
+            base_context=base_context,
+            dimensions_text=dimensions_text,
+            facts=facts,
+            market_text=ai_conclusion_service.market_block(db, tender, participations),
+            feedback_text=feedback_text,
+            metrics=metrics,
+        )
+        conclusion = result.conclusion
+        decision = result.participate
+        outcome.messages.extend(result.messages)
+    except Exception as exc:  # noqa: BLE001 - запасной путь ниже
+        logger.warning(f"Заключение по тендеру {tender.external_id} не составлено: {exc}")
+        outcome.messages.append(f"Заключение не составлено: {exc}")
+
+    if conclusion is not None:
+        verdict = _verdict_from_conclusion(conclusion, decision)
+        summary = " ".join(
+            part for part in (conclusion.get("headline"), conclusion.get("rationale")) if part
+        ) or None
+        # Прежние поля заполняются из заключения: их читают список, уведомления и Bitrix.
+        weak_points = [
+            {"severity": risk["severity"], "text": risk["text"]}
+            for risk in conclusion.get("risks") or []
+        ]
+        plan = conclusion.get("strategy") or {}
+        if plan:
+            strategy = {
+                "verdict": conclusion.get("headline") or "",
+                "price": plan.get("price") or "",
+                "first_step": (plan.get("steps") or [""])[0],
+            }
+    else:
+        decision, decision_summary, summary, verdict, weak_points, strategy = _legacy_resume(
+            db,
+            tender,
+            outcome,
+            base_context=base_context,
+            history=(history_score, history_comment, history_evidence),
+            task=(task_score, task_comment, task_evidence, task_checklist),
+            competencies=(
+                competencies_score,
+                competencies_comment,
+                competencies_evidence,
+                competencies_checklist,
+            ),
+            overall=overall,
+        )
 
     record = _store(
         db,
@@ -1275,8 +1420,10 @@ def compute_profile_score(
         strategy=strategy,
         profile=profile,
         decision=(decision, decision_summary),
+        conclusion=conclusion,
     )
     outcome.score = record
+    outcome.messages.extend(drain_fallback_notes())
 
     log_action(
         db,
@@ -1313,6 +1460,7 @@ def _store(
     strategy: dict | None,
     profile: CompanyProfile,
     decision: tuple[bool | None, str | None] = (None, None),
+    conclusion: dict | None = None,
 ) -> AiProfileScore:
     """Сохраняет новую текущую оценку, погасив предыдущую.
 
@@ -1351,6 +1499,7 @@ def _store(
         recommended_strategy=strategy,
         decision=decision[0],
         decision_summary=decision[1],
+        conclusion=conclusion,
         company_profile_snapshot=company_profile_service.snapshot(profile),
         is_current=True,
     )
@@ -1441,6 +1590,7 @@ def serialize(db: Session, score: AiProfileScore) -> dict:
         "verdict_label": VERDICT_LABELS.get(score.verdict or ""),
         # Сводка решения (`decision_summary`) наружу не отдаётся — она служебная.
         "decision": score.decision,
+        "conclusion": score.conclusion,
         "weak_points": weak_points,
         "recommended_strategy": score.recommended_strategy,
         "similar_tender_ids": similar_ids,

@@ -779,14 +779,21 @@ step_python_env() {
 #  Шаг: миграции
 # ──────────────────────────────────────────────────────────────────────────────
 
-run_migrations() { cd "$BACKEND_DIR" && run_as "$VENV/bin/alembic" upgrade head; }
+# Не голый «alembic upgrade head»: в пустую базу сначала ложится снимок данных из
+# репозитория (каталог продукции, производители, «Моя компания», закупки с разбором и
+# матрицами соответствия — backend/app/seed/snapshot.py), затем миграции. В базу с данными
+# снимок не загружается никогда, поэтому шаг безопасен и при обновлении.
+run_migrations() { cd "$BACKEND_DIR" && run_as "$VENV/bin/python" -m app.seed.snapshot prepare; }
 
 step_migrations() {
-  step "Схема базы данных"
-  task "накат миграций (alembic upgrade head)" run_migrations
+  step "База данных: наполнение и схема"
+  task "снимок данных в пустую базу, накат миграций" run_migrations
   if [ "$DRY_RUN" != 1 ]; then
-    local rev; rev="$(cd "$BACKEND_DIR" && run_as "$VENV/bin/alembic" current 2>/dev/null | tail -1 || true)"
+    local rev counts
+    rev="$(cd "$BACKEND_DIR" && run_as "$VENV/bin/alembic" current 2>/dev/null | tail -1 || true)"
     [ -n "$rev" ] && note "текущая ревизия: $rev"
+    counts="$(cd "$BACKEND_DIR" && run_as "$VENV/bin/python" -m app.seed.snapshot status 2>/dev/null | tail -1 || true)"
+    [ -n "$counts" ] && ok "в базе: $counts"
   fi
   step_end
 }
@@ -1191,8 +1198,12 @@ summary() {
     printf '    из существующего oracle-t/.env (BOOTSTRAP_ADMIN_USERNAME / BOOTSTRAP_ADMIN_PASSWORD)\n\n'
   fi
 
+  printf '  %sДанные%s\n' "$C_B" "$C_OFF"
+  printf '    каталог продукции, компании, закупки с матрицами — из снимка, сразу\n'
+  printf '    %sпосле запуска backend в фоне опрашивает каталог и обновляет «Мою компанию» с rusprofile%s\n\n' "$C_DIM" "$C_OFF"
+
   printf '  %sЧто настроить в интерфейсе%s\n' "$C_B" "$C_OFF"
-  printf '    Настройки → Интеграции  %s— ключ и Folder ID Yandex AI Studio%s\n' "$C_DIM" "$C_OFF"
+  printf '    Настройки → Интеграции  %s— ключи Yandex AI Studio / RouterAI; логин rusprofile для полной синхронизации%s\n' "$C_DIM" "$C_OFF"
   printf '    Настройки → Уведомления %s— SMTP-ящик и получатели писем%s\n' "$C_DIM" "$C_OFF"
   printf '    Настройки → Площадки    %s— учётные данные личных кабинетов ЭТП%s\n\n' "$C_DIM" "$C_OFF"
 

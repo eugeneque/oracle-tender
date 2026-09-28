@@ -160,21 +160,49 @@ def test_second_attempt_can_succeed(
     assert job.attempts == 2
 
 
-def test_interrupted_jobs_are_recovered_on_startup(
+def test_interrupted_jobs_are_resumed_on_startup(
     db_session, admin_user, monkeypatch, no_background_execution
 ):
-    """После перезапуска сервера пул пуст, а в базе остались «выполняется» — карточка
-    тендера показывала бы вечный индикатор, если их не закрыть."""
+    """После перезапуска сервера оборванная задача встаёт в очередь снова, а не
+    помечается ошибкой «запустите заново» (28.09.2026: оборванный полный разбор оставлял
+    закупку без матрицы соответствия)."""
 
     tender = _tender(db_session)
     job = jobs.enqueue(db_session, kind=JobKind.TENDER_ANALYSIS, tender=tender, actor=admin_user)
     job.status = JobStatus.RUNNING.value
     db_session.commit()
 
+    submitted: list = []
+    monkeypatch.setattr(jobs._executor, "submit", lambda fn, job_id: submitted.append(job_id))
+    monkeypatch.setitem(jobs._HANDLERS, JobKind.TENDER_ANALYSIS.value, lambda db, t, actor: "")
     monkeypatch.setattr(jobs, "SessionLocal", lambda: db_session)
     monkeypatch.setattr(db_session, "close", lambda: None)
 
-    jobs.recover_interrupted_jobs()
+    jobs.recover_interrupted_jobs(resume=True)
+
+    db_session.refresh(job)
+    assert job.status == JobStatus.QUEUED.value
+    assert job.payload["restarts"] == 1
+    assert submitted == [job.id]
+
+
+def test_job_restarted_too_often_is_marked_interrupted(
+    db_session, admin_user, monkeypatch, no_background_execution
+):
+    """Задача, пережившая `MAX_RESTARTS` перезапусков, не крутится по кругу: возможно,
+    именно она и роняет процесс."""
+
+    tender = _tender(db_session)
+    job = jobs.enqueue(db_session, kind=JobKind.TENDER_ANALYSIS, tender=tender, actor=admin_user)
+    job.status = JobStatus.RUNNING.value
+    job.payload = {"restarts": jobs.MAX_RESTARTS}
+    db_session.commit()
+
+    monkeypatch.setitem(jobs._HANDLERS, JobKind.TENDER_ANALYSIS.value, lambda db, t, actor: "")
+    monkeypatch.setattr(jobs, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(db_session, "close", lambda: None)
+
+    jobs.recover_interrupted_jobs(resume=True)
 
     db_session.refresh(job)
     assert job.status == JobStatus.ERROR.value

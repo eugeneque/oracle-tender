@@ -21,7 +21,7 @@ export function UserAvatar({
   className?: string;
 }) {
   const url = useAvatarUrl(user);
-  const base = `flex shrink-0 items-center justify-center overflow-hidden rounded-full font-semibold text-white ${SIZE_CLASSES[size]} ${className}`;
+  const base = `flex shrink-0 items-center justify-center overflow-hidden rounded-full font-semibold text-snow ${SIZE_CLASSES[size]} ${className}`;
   if (url) {
     return (
       <span className={`${base} bg-zinc-800`}>

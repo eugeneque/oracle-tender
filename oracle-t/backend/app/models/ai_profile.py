@@ -145,6 +145,10 @@ class AiProfileScore(Base):
     # модель не ответила; интерфейс показывает это серым знаком, а не как «нет».
     decision: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     decision_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Заключение (28.09.2026): подходим ли мы и каким прибором, кто проходит вместо нас,
+    # стратегия входа, риски и метрики — см. `ai_conclusion_service`. `null` — оценка
+    # посчитана до заключения, карточка показывает прежние блоки.
+    conclusion: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     # Копия профиля компании на момент расчёта: без неё старые оценки нельзя ни объяснить,
     # ни проверить по `*_evidence` после того, как профиль поправили.
     company_profile_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

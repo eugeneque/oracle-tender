@@ -20,7 +20,7 @@ export function ProtectedRoute({
     return <Navigate to="/login" replace />;
   }
   if (requireRole && user.role !== requireRole) {
-    return <Navigate to="/" replace />;
+    return <Navigate to="/tenders" replace />;
   }
   return <>{children}</>;
 }

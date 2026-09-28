@@ -1,8 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, Loader2, UserCog } from "lucide-react";
+import { Loader2, UserCog } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
 import type { Region, RegionResponsible } from "../../api/types";
+import {
+  SettingCard,
+  SettingsGroup,
+  SettingsNotice,
+  SettingsPanel,
+  primaryButtonClass,
+  settingsInputClass,
+} from "./ui";
 
 /**
  * Справочник «регион → ответственный / руководитель» (раздел 5.6 ТЗ).
@@ -15,11 +23,9 @@ import type { Region, RegionResponsible } from "../../api/types";
  * справочника: 89 строк, из которых заняты единицы, — это не таблица, а шум.
  */
 
-const inputClass =
-  "mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none";
+const inputClass = settingsInputClass;
 
 export function RegionResponsiblesSection() {
-  const [isExpanded, setIsExpanded] = useState(false);
   const [rows, setRows] = useState<RegionResponsible[]>([]);
   const [regions, setRegions] = useState<Region[]>([]);
   const [regionCode, setRegionCode] = useState("");
@@ -44,8 +50,8 @@ export function RegionResponsiblesSection() {
   };
 
   useEffect(() => {
-    if (isExpanded) void load();
-  }, [isExpanded]);
+    void load();
+  }, []);
 
   const assigned = useMemo(
     () => new Map(rows.map((row) => [row.region_code, row])),
@@ -79,33 +85,19 @@ export function RegionResponsiblesSection() {
   };
 
   return (
-    <div className="mt-6 overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.03]">
-      <button
-        onClick={() => setIsExpanded((v) => !v)}
-        className="flex w-full items-center justify-between px-5 py-4 text-left"
-      >
-        <div>
-          <h2 className="text-sm font-semibold text-zinc-100">Ответственные по регионам</h2>
-          <p className="mt-0.5 text-xs text-zinc-500">
-            ФИО ответственного и его руководителя для каждого региона. Эти два поля
-            попадают в Excel-выгрузку (Приложение D ТЗ) — больше их взять неоткуда.
-          </p>
-        </div>
-        <ChevronDown
-          size={18}
-          className={`shrink-0 text-zinc-500 transition-transform ${isExpanded ? "rotate-180" : ""}`}
-        />
-      </button>
+    <SettingsPanel
+      title="Ответственные по регионам"
+      description="ФИО ответственного и его руководителя для каждого региона. Эти два поля попадают в Excel-выгрузку (Приложение D ТЗ) — в тендерных данных их нет, и взять их больше неоткуда."
+    >
+      {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
 
-      {isExpanded && (
-        <div className="border-t border-white/[0.08] px-5 py-4">
-          {error && (
-            <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
-              {error}
-            </div>
-          )}
-
-          <div className="mb-5 grid max-w-4xl gap-4 sm:grid-cols-3">
+      <SettingsGroup id="regions-assign" label="Назначение">
+        <SettingCard
+          icon={<UserCog size={18} />}
+          title="Назначить или изменить"
+          description="Выбор региона подставляет уже назначенных людей — так правка существующей строки не затрёт вторую фамилию."
+        >
+          <div className="grid gap-4 sm:grid-cols-3">
             <label className="block text-xs text-zinc-400">
               Регион
               <select
@@ -139,51 +131,51 @@ export function RegionResponsiblesSection() {
               />
             </label>
           </div>
-
           <button
             onClick={() => void save()}
             disabled={isSaving || !regionCode}
-            className="mb-5 flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            className={`mt-4 ${primaryButtonClass}`}
           >
             {isSaving ? <Loader2 size={15} className="animate-spin" /> : <UserCog size={15} />}
             {isSaving ? "Сохраняю…" : "Сохранить назначение"}
           </button>
+        </SettingCard>
+      </SettingsGroup>
 
-          {rows.length === 0 ? (
-            <p className="text-sm text-zinc-600">
-              Назначений пока нет — соответствующие столбцы выгрузки останутся пустыми.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[600px] text-sm">
-                <thead>
-                  <tr className="border-b border-white/[0.08] text-xs text-zinc-500">
-                    <th className="pb-2 text-left font-medium">Регион</th>
-                    <th className="pb-2 text-left font-medium">Ответственный</th>
-                    <th className="pb-2 text-left font-medium">Руководитель</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((row) => (
-                    <tr
-                      key={row.region_code}
-                      onClick={() => selectRegion(row.region_code)}
-                      className="cursor-pointer border-b border-white/[0.04] last:border-0 hover:bg-white/[0.03]"
-                    >
-                      <td className="py-2.5 text-zinc-300">
-                        <span className="mr-2 text-zinc-600">{row.region_code}</span>
-                        {row.region_name}
-                      </td>
-                      <td className="py-2.5 text-zinc-400">{row.responsible_name ?? "—"}</td>
-                      <td className="py-2.5 text-zinc-400">{row.manager_name ?? "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+      <SettingsGroup id="regions-list" label={`Назначено · ${rows.length}`}>
+        {rows.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-zinc-500">
+            Назначений пока нет — соответствующие столбцы выгрузки останутся пустыми.
+          </div>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {rows.map((row) => (
+              <button
+                key={row.region_code}
+                onClick={() => selectRegion(row.region_code)}
+                className={`rounded-2xl border px-5 py-4 text-left transition-colors ${
+                  row.region_code === regionCode
+                    ? "border-indigo-500/25 bg-indigo-500/[0.08]"
+                    : "border-white/[0.08] bg-white/[0.03] hover:border-white/[0.12]"
+                }`}
+              >
+                <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+                  <span className="rounded-md bg-white/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-zinc-400">
+                    {row.region_code}
+                  </span>
+                  {row.region_name}
+                </div>
+                <div className="mt-1.5 text-xs text-zinc-500">
+                  Ответственный: <span className="text-zinc-300">{row.responsible_name ?? "—"}</span>
+                </div>
+                <div className="text-xs text-zinc-500">
+                  Руководитель: <span className="text-zinc-300">{row.manager_name ?? "—"}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </SettingsGroup>
+    </SettingsPanel>
   );
 }

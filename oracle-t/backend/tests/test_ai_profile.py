@@ -280,7 +280,7 @@ def test_compute_profile_score_saves_traceable_current_version(
     assert len(score.task_checklist) == 4
     assert score.competencies_checklist[0]["mandatory"] is True
     # Модель, посчитавшая оценку, записана рядом с ней (25.09.2026).
-    assert score.ai_provider in {"yandex", "claude"}
+    assert score.ai_provider in {"yandex", "claude", "deepseek"}
     assert score.recommended_strategy["first_step"].startswith("Запросить")
     assert any(
         item["ref_id"] == str(requirement.id) for item in score.task_evidence
@@ -298,7 +298,7 @@ def test_compute_profile_score_saves_traceable_current_version(
     assert serialized["decision"] is True
     assert "decision_summary" not in serialized
     assert serialized["task_checklist"][0]["status_label"] == "выполнено"
-    assert serialized["ai_provider_label"] in {"YandexGPT", "Claude"}
+    assert serialized["ai_provider_label"] in {"YandexGPT", "Claude", "DeepSeek"}
 
 
 def test_verdict_follows_decision_and_threshold():

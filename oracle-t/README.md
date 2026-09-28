@@ -387,7 +387,7 @@ brew services start postgresql@15
 cd backend
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
-alembic upgrade head
+python -m app.seed.snapshot prepare   # снимок данных в пустую базу + alembic upgrade head
 uvicorn app.main:app --reload &
 
 # frontend (в отдельном терминале)

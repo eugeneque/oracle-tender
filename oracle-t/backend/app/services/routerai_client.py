@@ -1,4 +1,4 @@
-"""Клиент Claude через RouterAI — OpenAI-совместимый шлюз (`/chat/completions`).
+"""Клиент Claude и DeepSeek через RouterAI — OpenAI-совместимый шлюз (`/chat/completions`).
 
 Второй провайдер ИИ-модуля (18.09.2026). Как и `yandex_ai_client`, модуль не знает, *что*
 извлекается, только *как* вызвать модель и получить JSON по схеме; выбор между двумя
@@ -25,7 +25,12 @@ import pydantic
 from loguru import logger
 from sqlalchemy.orm import Session
 
-from app.services.ai_provider_service import AiQuotaExceededError, get_routerai_credentials
+from app.services.ai_provider_service import (
+    PROVIDER_CLAUDE,
+    PROVIDER_LABELS,
+    AiQuotaExceededError,
+    get_routerai_credentials,
+)
 
 DEFAULT_TIMEOUT_SECONDS = 180.0
 # Потолок длины ответа. Самые длинные ответы — списки требований из документации (десятки
@@ -170,11 +175,14 @@ def run_structured(
     user_text: str,
     response_model: type[ResponseT],
     temperature: float = 0.0,
+    provider: str = PROVIDER_CLAUDE,
 ) -> ResponseT:
-    """Запрос к Claude через RouterAI со structured output — контракт тот же, что у
-    `yandex_ai_client.run_structured`: те же аргументы, тот же тип результата, те же повторы."""
+    """Запрос к модели через RouterAI со structured output — контракт тот же, что у
+    `yandex_ai_client.run_structured`: те же аргументы, тот же тип результата, те же повторы.
+    `provider` выбирает модель (Claude или DeepSeek, 28.09.2026) — ключ и шлюз у них общие."""
 
-    api_key, model, base_url = get_routerai_credentials(db)
+    api_key, model, base_url = get_routerai_credentials(db, provider)
+    name = f"{PROVIDER_LABELS.get(provider, provider)} (RouterAI)"
 
     schema = _strict_schema(response_model.model_json_schema())
     response_format = {
@@ -210,21 +218,21 @@ def run_structured(
         except (pydantic.ValidationError, ValueError) as exc:
             last_error = exc
             logger.warning(
-                f"Claude (RouterAI) вернул ответ, не соответствующий схеме "
+                f"{name} вернул ответ, не соответствующий схеме "
                 f"{response_model.__name__} (попытка {attempt} из {RETRY_ATTEMPTS}): {exc}; "
                 f"начало ответа: {raw_text[:300]!r}"
             )
         except Exception as exc:  # noqa: BLE001 - сетевые сбои и лимиты тоже лечатся повтором
             last_error = exc
             logger.warning(
-                f"Обращение к Claude (RouterAI) не удалось (попытка {attempt} из "
+                f"Обращение к {name} не удалось (попытка {attempt} из "
                 f"{RETRY_ATTEMPTS}): {exc}"
             )
 
         if attempt < RETRY_ATTEMPTS:
             time.sleep(RETRY_BACKOFF_SECONDS * attempt)
 
-    raise last_error if last_error else RuntimeError("Обращение к Claude (RouterAI) не выполнено")
+    raise last_error if last_error else RuntimeError(f"Обращение к {name} не выполнено")
 
 
 def ping(*, api_key: str, model: str, base_url: str) -> str:

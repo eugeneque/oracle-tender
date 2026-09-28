@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, ExternalLink, Loader2, MonitorCheck, RefreshCw } from "lucide-react";
+import { ChevronRight, ExternalLink, Loader2, MonitorCheck, RefreshCw } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
 import type { CatalogTask, PlatformSupport, UpperSoftwarePlatform } from "../../api/types";
@@ -43,7 +43,6 @@ export function UpperSoftwareSection({
   manufacturerId: string | null;
   isAdmin: boolean;
 }) {
-  const [open, setOpen] = useState(true);
   const [platforms, setPlatforms] = useState<UpperSoftwarePlatform[]>([]);
   const [support, setSupport] = useState<PlatformSupport[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -100,14 +99,9 @@ export function UpperSoftwareSection({
 
   return (
     <div className="rounded-xl border border-white/[0.08] bg-white/[0.03]">
-      <div
-        className={`flex flex-wrap items-center justify-between gap-2 px-5 py-3 ${
-          open ? "border-b border-white/[0.08]" : ""
-        }`}
-      >
-        <button onClick={() => setOpen((v) => !v)} className="flex items-start gap-2 text-left" aria-expanded={open}>
-          <span className="mt-0.5 text-zinc-500">{open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
-          <span>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] px-5 py-3">
+        <div>
+          <div>
             <h2 className="text-sm font-semibold text-zinc-100">
               ПО верхнего уровня
               {manufacturerId && support.length > 0 && (
@@ -120,8 +114,8 @@ export function UpperSoftwareSection({
               Списки поддерживаемого оборудования на сайтах разработчиков АСКУЭ. По ним проверяется
               требование «интеграция в ПО верхнего уровня»: отсутствие в списке — ответ, а не пробел.
             </p>
-          </span>
-        </button>
+          </div>
+        </div>
         <button
           onClick={handleReload}
           disabled={busy !== null}
@@ -149,7 +143,7 @@ export function UpperSoftwareSection({
         </div>
       )}
 
-      <div className="px-5 py-3" hidden={!open}>
+      <div className="px-5 py-3">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
             <thead>

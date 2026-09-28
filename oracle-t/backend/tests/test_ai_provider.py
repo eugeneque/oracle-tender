@@ -1,4 +1,4 @@
-"""Переключатель ИИ-провайдера (18.09.2026): YandexGPT ↔ Claude через RouterAI.
+"""Переключатель ИИ-провайдера (18.09.2026): YandexGPT ↔ Claude / DeepSeek через RouterAI.
 
 Живой шлюз в тестах не зовём — проверяется логика вокруг: кто вправе переключать, что
 нельзя включить ненастроенного провайдера, что ключ не утекает наружу, и что диспетчер
@@ -32,7 +32,7 @@ def _create_regular_user_token(client, admin_token) -> str:
 def _reset(client, headers) -> None:
     # Обе таблицы — синглтоны, тестовая БД между запусками не пересоздаётся.
     client.patch("/integrations/yandex-ai-studio", json={"api_key": "", "folder_id": ""}, headers=headers)
-    client.patch("/integrations/routerai", json={"api_key": "", "model": "", "base_url": ""}, headers=headers)
+    client.patch("/integrations/routerai", json={"api_key": "", "model": "", "deepseek_model": "", "base_url": ""}, headers=headers)
 
 
 def test_status_visible_to_any_user_but_switch_is_admin_only(client, admin_token):
@@ -42,7 +42,7 @@ def test_status_visible_to_any_user_but_switch_is_admin_only(client, admin_token
     assert client.get("/integrations/ai-provider").status_code == 401
     status = client.get("/integrations/ai-provider", headers=user_headers)
     assert status.status_code == 200, status.text
-    assert status.json()["active_provider"] in {"yandex", "claude"}
+    assert status.json()["active_provider"] in {"yandex", "claude", "deepseek"}
     assert "api_key" not in status.text
 
     assert (
@@ -99,7 +99,8 @@ def test_switch_and_routerai_settings_roundtrip(client, admin_token):
     assert body["is_configured"] is True
     assert body["source"] == "default"
     assert body["default_provider"] == "claude"
-    assert body["configured_providers"] == ["claude"]
+    # Ключ RouterAI открывает сразу обе модели шлюза.
+    assert body["configured_providers"] == ["claude", "deepseek"]
 
     # Обратно на Yandex — только когда его данные заполнены.
     back = client.put("/integrations/ai-provider", json={"active_provider": "yandex"}, headers=headers)
@@ -309,7 +310,7 @@ def test_spending_limit_is_not_retried_and_says_what_to_do(monkeypatch):
         )
 
     monkeypatch.setattr(routerai_client.httpx, "post", fake_post)
-    monkeypatch.setattr(routerai_client, "get_routerai_credentials", lambda db: ("k", "m", "https://x"))
+    monkeypatch.setattr(routerai_client, "get_routerai_credentials", lambda db, provider="claude": ("k", "m", "https://x"))
     monkeypatch.setattr(routerai_client.time, "sleep", lambda seconds: None)
 
     class Answer(pydantic.BaseModel):
@@ -341,7 +342,7 @@ def test_plain_rate_limit_is_still_retried(monkeypatch):
         return httpx.Response(429, json={"error": {"message": "Too many requests"}})
 
     monkeypatch.setattr(routerai_client.httpx, "post", fake_post)
-    monkeypatch.setattr(routerai_client, "get_routerai_credentials", lambda db: ("k", "m", "https://x"))
+    monkeypatch.setattr(routerai_client, "get_routerai_credentials", lambda db, provider="claude": ("k", "m", "https://x"))
     monkeypatch.setattr(routerai_client.time, "sleep", lambda seconds: None)
 
     class Answer(pydantic.BaseModel):
@@ -355,3 +356,40 @@ def test_plain_rate_limit_is_still_retried(monkeypatch):
         pass
 
     assert len(calls) == routerai_client.RETRY_ATTEMPTS
+
+
+def test_deepseek_shares_routerai_key_but_has_own_model(client, admin_token, db_session, monkeypatch):
+    """DeepSeek (28.09.2026) ходит через тот же RouterAI: ключ общий с Claude, модель своя и
+    настраивается отдельно; диспетчер отдаёт его тому же клиенту с другой моделью."""
+
+    headers = _auth_headers(admin_token)
+    _reset(client, headers)
+    client.patch("/integrations/routerai", json={"api_key": "sk-secret-abcd"}, headers=headers)
+    settings = client.patch(
+        "/integrations/routerai", json={"deepseek_model": "deepseek/other"}, headers=headers
+    ).json()
+    assert settings["deepseek_model"] == "deepseek/other"
+    assert settings["model"] == ai_provider_service.DEFAULT_ROUTERAI_MODEL
+    reset = client.patch("/integrations/routerai", json={"deepseek_model": ""}, headers=headers).json()
+    assert reset["deepseek_model"] == ai_provider_service.DEFAULT_DEEPSEEK_MODEL
+
+    switched = client.put(
+        "/integrations/ai-provider", json={"active_provider": "deepseek"}, headers=headers
+    )
+    assert switched.status_code == 200, switched.text
+    body = switched.json()
+    assert body["active_provider"] == "deepseek"
+    assert body["label"] == "DeepSeek"
+    assert body["model"] == ai_provider_service.DEFAULT_DEEPSEEK_MODEL
+
+    seen: list[tuple[str, str]] = []
+
+    def fake_routerai(db, **kwargs):
+        seen.append((kwargs["provider"], ai_provider_service.get_routerai_credentials(db, kwargs["provider"])[1]))
+        return _Answer(text="ok")
+
+    monkeypatch.setattr(ai_client.routerai_client, "run_structured", fake_routerai)
+    monkeypatch.setattr(ai_client, "get_active_provider", lambda db: "deepseek")
+    ai_client.run_structured(db_session, system_prompt="s", user_text="u", response_model=_Answer)
+    assert seen == [("deepseek", ai_provider_service.DEFAULT_DEEPSEEK_MODEL)]
+    assert ai_client.active_model(db_session) == ("deepseek", ai_provider_service.DEFAULT_DEEPSEEK_MODEL)

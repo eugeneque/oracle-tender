@@ -239,6 +239,13 @@ def _mirror_url(filename: str | None) -> str | None:
 
 
 class FgisAdapter:
+    def __init__(self) -> None:
+        # Сбои запросов за время жизни адаптера. Поиск по-прежнему не бросает исключений
+        # (см. `search_by_manufacturer`), но вызывающий код должен отличать «в реестре
+        # ничего нет» от «реестр не ответил» — иначе недоступный ФГИС выглядит как
+        # производитель без единого типа СИ.
+        self.errors: list[str] = []
+
     def search_by_manufacturer(
         self, legal_name: str, *, brand_name: str | None = None, fetch_cards: bool = True
     ) -> list[SiSearchResult]:
@@ -491,6 +498,7 @@ class FgisAdapter:
                 response = fetch_with_retry(client, "GET", url, params=params)
         except Exception as exc:  # noqa: BLE001 - недоступность ФГИС не прерывает заполнение каталога
             logger.warning(f"ФГИС: запрос «{what}» не выполнен: {exc}")
+            self.errors.append(f"{what}: {exc}")
             return None
 
         try:

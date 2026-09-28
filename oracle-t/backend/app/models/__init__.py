@@ -1,3 +1,4 @@
+from app.models.ai_feedback import AiScoreFeedback, FeedbackKind, FeedbackStatus
 from app.models.ai_profile import (
     AiProfileScore,
     EvidenceType,
@@ -79,6 +80,9 @@ from app.models.upper_software import UpperSoftwareDevice, UpperSoftwareProductL
 from app.models.user import User
 
 __all__ = [
+    "AiScoreFeedback",
+    "FeedbackKind",
+    "FeedbackStatus",
     "User",
     "Region",
     "AdmissionRegistry",

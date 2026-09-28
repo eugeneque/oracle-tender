@@ -162,7 +162,7 @@ def build_lead(db: Session, tender: Tender) -> dict[str, Any]:
         "OPPORTUNITY": _format_amount(tender.price),
         "CURRENCY_ID": tender.currency or "RUB",
         "SOURCE_ID": "OTHER",
-        "SOURCE_DESCRIPTION": f"Sova Scanner / {platform}" if platform else "Sova Scanner",
+        "SOURCE_DESCRIPTION": f"Sova / {platform}" if platform else "Sova",
         "ASSIGNED_BY_NAME": responsible,
         "STATUS_ID": _STATUS_TO_LEAD_STAGE.get(tender.relevance_status, "NEW"),
         "COMMENTS": _build_comment(tender, requirements_total, win_percentage),

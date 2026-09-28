@@ -8,6 +8,7 @@ from app.db.session import get_db
 from app.models.manufacturer import CharacteristicSource, Product, ProductCharacteristic, SiType
 from app.models.user import User
 from app.schemas.manufacturer import (
+    CatalogAutofillStatusOut,
     CatalogDocumentOut,
     CatalogDocumentsSummaryOut,
     CatalogLookupRequest,
@@ -23,6 +24,7 @@ from app.schemas.manufacturer import (
     ManufacturerCreate,
     ManufacturerOut,
     ManufacturerUpdate,
+    MeterParameterOut,
     CatalogSiteOut,
     CatalogSyncOutcomeOut,
     DescriptionIngestOutcomeOut,
@@ -37,6 +39,7 @@ from app.schemas.manufacturer import (
     SiTypeUpdate,
 )
 from app.services import (
+    catalog_autofill,
     catalog_import,
     catalog_learning,
     catalog_queue_service,
@@ -45,6 +48,7 @@ from app.services import (
     document_registry_service,
     fgis_catalog_sync,
     fgis_description_ingest,
+    meter_parameter_card,
     product_manual_ingest,
     catalog_site_sync,
     product_catalog_service,
@@ -223,6 +227,18 @@ def get_characteristics(
 ):
     _get_product_or_404(db, product_id)
     return characteristic_extraction.list_characteristics(db, product_id)
+
+
+@router.get("/products/{product_id}/meter-parameters", response_model=list[MeterParameterOut])
+def get_meter_parameters(
+    product_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """39 параметров файла «Параметры для ПУ» по модели — в порядке файла тендерного отдела."""
+
+    product = _get_product_or_404(db, product_id)
+    return meter_parameter_card.product_parameters(db, product)
 
 
 @router.put("/products/{product_id}/characteristics", response_model=CharacteristicOut)
@@ -660,6 +676,52 @@ def post_learn_all(
     queued = catalog_learning.enqueue_all(db, actor_id=admin.id)
     catalog_queue_service.process_queue_in_background()
     return {"queued": queued}
+
+
+# --- Автозаполнение каталога (замечание заказчика 28.09.2026) ---
+
+
+@router.get("/catalog/autofill/status", response_model=list[CatalogAutofillStatusOut])
+def get_catalog_autofill_status(
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Последний сквозной опрос по каждому производителю: в очереди, идёт (и на каком
+    шаге), закончен. Интерфейс опрашивает этот список, пока есть незавершённые."""
+
+    return catalog_autofill.status_by_manufacturer(db)
+
+
+@router.post("/catalog/autofill", status_code=status.HTTP_202_ACCEPTED)
+def post_catalog_autofill(
+    _db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> dict:
+    """Опрос всего каталога одной кнопкой — то же, что планировщик делает раз в сутки."""
+
+    return {"queued": catalog_autofill.run_all_in_background(actor_id=admin.id)}
+
+
+@router.post(
+    "/manufacturers/{manufacturer_id}/autofill",
+    response_model=CatalogTaskOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def post_manufacturer_autofill(
+    manufacturer_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Сквозной опрос одного производителя в фоне (встаёт в общую очередь)."""
+
+    manufacturer = _get_manufacturer_or_404(db, manufacturer_id)
+    task = catalog_autofill.enqueue_one(db, manufacturer, actor_id=admin.id)
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Исполнитель автозаполнения не зарегистрирован — обратитесь к администратору",
+        )
+    return task
 
 
 @router.post(

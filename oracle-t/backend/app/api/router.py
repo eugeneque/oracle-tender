@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.endpoints import (
+    ai_feedback,
     analytics,
     auth,
     company_participations,
@@ -29,6 +30,7 @@ api_router.include_router(auth.router)
 api_router.include_router(users.router)
 api_router.include_router(sources.router)
 api_router.include_router(tenders.router)
+api_router.include_router(ai_feedback.router)
 api_router.include_router(tags.router)
 api_router.include_router(integrations.router)
 api_router.include_router(manufacturers.router)

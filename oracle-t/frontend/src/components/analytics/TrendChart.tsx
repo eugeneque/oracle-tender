@@ -192,7 +192,7 @@ export function TrendChart({ points }: { points: MonthPoint[] }) {
                   y1={y}
                   x2={VIEW_WIDTH - PADDING.right}
                   y2={y}
-                  stroke="rgba(255,255,255,0.05)"
+                  style={{ stroke: "rgb(var(--c-white) / 0.05)" }}
                   strokeWidth="1"
                 />
               );
@@ -216,7 +216,7 @@ export function TrendChart({ points }: { points: MonthPoint[] }) {
                   y1={PADDING.top}
                   x2={shownCoordinate.x}
                   y2={PADDING.top + geometry.height}
-                  stroke="rgba(255,255,255,0.25)"
+                  style={{ stroke: "rgb(var(--c-white) / 0.25)" }}
                   strokeWidth="1"
                 />
                 <circle
@@ -224,7 +224,7 @@ export function TrendChart({ points }: { points: MonthPoint[] }) {
                   cy={shownCoordinate.y}
                   r="6"
                   fill={active.color}
-                  stroke="#09090b"
+                  style={{ stroke: "rgb(var(--c-zinc-950))" }}
                   strokeWidth="3"
                 />
               </>

@@ -16,7 +16,7 @@ export function LoginPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (user) {
-    return <Navigate to="/" replace />;
+    return <Navigate to="/tenders" replace />;
   }
 
   const handleSubmit = async (event: FormEvent) => {
@@ -25,7 +25,7 @@ export function LoginPage() {
     setIsSubmitting(true);
     try {
       await login(username, password);
-      navigate("/");
+      navigate("/tenders");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Не удалось войти");
     } finally {
@@ -89,7 +89,7 @@ export function LoginPage() {
         <button
           type="submit"
           disabled={isSubmitting}
-          className="w-full rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-2.5 text-sm font-medium text-white shadow-lg shadow-indigo-500/20 transition-opacity hover:opacity-90 disabled:opacity-50"
+          className="w-full rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-2.5 text-sm font-medium text-snow shadow-lg shadow-indigo-500/20 transition-opacity hover:opacity-90 disabled:opacity-50"
         >
           {isSubmitting ? "Вход…" : "Войти"}
         </button>

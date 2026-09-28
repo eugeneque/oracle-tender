@@ -1,9 +1,11 @@
 import { useRef, useState } from "react";
 import type { DragEvent, FormEvent } from "react";
 import { FilePlus2, FileText, Loader2, Upload, X } from "lucide-react";
+import { motion } from "motion/react";
 
 import { ApiError, postForm } from "../api/client";
 import type { ManualRequestOut } from "../api/types";
+import { dialogVariants, scrimVariants } from "../utils/motion";
 
 /** Форматы, которые бэкенд умеет разбирать до текста (`app/services/document_extraction.py`).
  * Остальные файлы тоже сохранятся, но в ИИ-анализ уйдут пустыми. */
@@ -96,11 +98,15 @@ export function NewRequestModal({
     "w-full rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-sm text-white placeholder-zinc-600 outline-none focus:border-indigo-500";
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 py-8"
+    <motion.div
+      variants={scrimVariants}
+      initial="initial"
+      animate="animate"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/60 px-4 py-8"
       onClick={onCancel}
     >
-      <form
+      <motion.form
+        variants={dialogVariants}
         onSubmit={(e) => void handleSubmit(e)}
         onClick={(e) => e.stopPropagation()}
         className="flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-white/10 bg-zinc-900 shadow-xl"
@@ -168,7 +174,7 @@ export function NewRequestModal({
                 type="date"
                 value={deadline}
                 onChange={(e) => setDeadline(e.target.value)}
-                className={`${inputClass} [color-scheme:dark]`}
+                className={`${inputClass}`}
               />
             </label>
           </div>
@@ -290,7 +296,7 @@ export function NewRequestModal({
           <button
             type="submit"
             disabled={isSubmitting}
-            className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-2 text-sm font-medium text-snow hover:opacity-90 disabled:opacity-50"
           >
             {isSubmitting ? (
               <>
@@ -302,7 +308,7 @@ export function NewRequestModal({
             )}
           </button>
         </div>
-      </form>
-    </div>
+      </motion.form>
+    </motion.div>
   );
 }

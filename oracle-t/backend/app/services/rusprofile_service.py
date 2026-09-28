@@ -22,6 +22,11 @@
 4. История участий синхронизируется только у основной компании: таблица
    `company_participations` привязана к «нашему» производителю, и История считается по ней.
    Для дополнительных компаний обновляются профиль, допуски и проекты.
+5. **Без учётной записи — только дополнение** (фоновая актуализация при старте, 28.09.2026,
+   `app/services/startup_refresh.py`). Анонимно сайт показывает открытую часть карточки и
+   первую страницу закупок, поэтому такая синхронизация ничего не удаляет: досье
+   дополняется непустыми значениями, лицензии и проекты с сайта — по номеру, без замены
+   списка целиком.
 """
 
 from __future__ import annotations
@@ -213,9 +218,12 @@ class _Fetched:
     licenses: list[LicenseRecord]
 
 
-def _fetch(db: Session, profile: CompanyProfile) -> _Fetched:
-    login, password = get_credentials(db)
-    with RusprofileSession(login, password) as session:
+def _fetch(db: Session, profile: CompanyProfile, *, anonymous: bool = False) -> _Fetched:
+    if anonymous:
+        login = password = None
+    else:
+        login, password = get_credentials(db)
+    with RusprofileSession(login, password, anonymous=anonymous) as session:
         card_id = session.resolve_card_id(
             inn=profile.inn, card_hint=profile.rusprofile_card_id
         )
@@ -314,11 +322,38 @@ def _apply_profile_fields(profile: CompanyProfile, dossier: RusprofileDossier) -
     return updated
 
 
-def _merge_by_source(existing: list | None, fresh: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Ручные записи (без `source: rusprofile`) остаются, записи сайта заменяются целиком."""
+def _merge_by_source(
+    existing: list | None, fresh: list[dict[str, Any]], *, key: str | None = None
+) -> list[dict[str, Any]]:
+    """Ручные записи (без `source: rusprofile`) остаются, записи сайта заменяются целиком.
 
+    С `key` — дополнение для анонимной синхронизации: записи сайта с тем же значением
+    ключа заменяются свежими, остальные прежние записи сайта остаются.
+    """
+
+    if key is not None:
+        fresh_keys = {item.get(key) for item in fresh if item.get(key)}
+        kept = [
+            item
+            for item in (existing or [])
+            if (item or {}).get("source") != SOURCE_RUSPROFILE
+            or not item.get(key)
+            or item.get(key) not in fresh_keys
+        ]
+        return kept + fresh
     manual = [item for item in (existing or []) if (item or {}).get("source") != SOURCE_RUSPROFILE]
     return manual + fresh
+
+
+def _merge_dossier(previous: dict[str, Any] | None, fresh: dict[str, Any]) -> dict[str, Any]:
+    """Досье без входа: непустые значения обновляются, скрытые не затирают прежние."""
+
+    merged = dict(previous or {})
+    for name, value in fresh.items():
+        if value not in (None, "", [], {}):
+            merged[name] = value
+    merged["data_hidden"] = fresh.get("data_hidden", False)
+    return merged
 
 
 def _sync_participations(
@@ -386,13 +421,25 @@ def _sync_participations(
     return created, updated
 
 
-def sync_profile(db: Session, profile: CompanyProfile, *, actor: User) -> RusprofileSyncResult:
-    """Кнопка «Обновить из rusprofile»: одна авторизация, все разделы, одна транзакция."""
+def sync_profile(
+    db: Session,
+    profile: CompanyProfile,
+    *,
+    actor: User | None,
+    allow_anonymous: bool = False,
+) -> RusprofileSyncResult:
+    """Кнопка «Обновить из rusprofile»: одна авторизация, все разделы, одна транзакция.
+
+    `allow_anonymous` — для фоновой актуализации: без учётной записи читается открытая
+    часть карточки и данные только дополняются (правило 5 в шапке модуля).
+    """
 
     settings = _get_or_create(db)
     now = datetime.now(timezone.utc)
+    actor_id = actor.id if actor is not None else None
+    anonymous = allow_anonymous and not is_configured(db)
     try:
-        fetched = _fetch(db, profile)
+        fetched = _fetch(db, profile, anonymous=True) if anonymous else _fetch(db, profile)
     except RusprofileError as exc:
         settings.last_sync_at = now
         settings.last_sync_status = "error"
@@ -404,7 +451,7 @@ def sync_profile(db: Session, profile: CompanyProfile, *, actor: User) -> Ruspro
             result="error",
             level=LogLevel.ERROR,
             details=str(exc),
-            user_id=actor.id,
+            user_id=actor_id,
         )
         db.commit()
         raise
@@ -420,7 +467,7 @@ def sync_profile(db: Session, profile: CompanyProfile, *, actor: User) -> Ruspro
             result="error",
             level=LogLevel.ERROR,
             details=str(exc),
-            user_id=actor.id,
+            user_id=actor_id,
         )
         db.commit()
         raise RusprofileError(f"Не удалось получить данные с rusprofile.ru: {exc}") from exc
@@ -429,13 +476,17 @@ def sync_profile(db: Session, profile: CompanyProfile, *, actor: User) -> Ruspro
     updated_fields = _apply_profile_fields(profile, dossier)
 
     profile.licenses = _merge_by_source(
-        profile.licenses, [_license_item(item) for item in fetched.licenses]
+        profile.licenses,
+        [_license_item(item) for item in fetched.licenses],
+        key="number" if anonymous else None,
     )
     wins = [item for item in fetched.purchases if item.won is True]
     losses = [item for item in fetched.purchases if item.won is False]
     wins.sort(key=lambda item: item.contract_date or item.date or date.min, reverse=True)
     profile.past_projects = _merge_by_source(
-        profile.past_projects, [_project_item(item) for item in wins]
+        profile.past_projects,
+        [_project_item(item) for item in wins],
+        key="description" if anonymous else None,
     )
 
     data = dossier.to_dict()
@@ -447,6 +498,8 @@ def sync_profile(db: Session, profile: CompanyProfile, *, actor: User) -> Ruspro
         "losses": len(losses),
         "undecided": len(fetched.purchases) - len(wins) - len(losses),
     }
+    if anonymous:
+        data = _merge_dossier(profile.rusprofile_data, data)
     profile.rusprofile_card_id = fetched.card_id
     profile.rusprofile_data = data
     profile.rusprofile_synced_at = now
@@ -465,7 +518,12 @@ def sync_profile(db: Session, profile: CompanyProfile, *, actor: User) -> Ruspro
         f"реквизитов обновлено {len(updated_fields)}, история участий: создано {created}, "
         f"обновлено {updated}."
     )
-    if hidden:
+    if anonymous:
+        summary += (
+            " Без учётной записи: прочитана открытая часть карточки, прежние данные только"
+            " дополнены. Для полной синхронизации заполните «Интеграции → Rusprofile»."
+        )
+    elif hidden:
         summary += (
             " Часть данных на сайте скрыта — проверьте, действует ли подписка учётной записи."
         )
@@ -478,7 +536,7 @@ def sync_profile(db: Session, profile: CompanyProfile, *, actor: User) -> Ruspro
         action="sync_company",
         result="ok",
         details=summary,
-        user_id=actor.id,
+        user_id=actor_id,
     )
     db.commit()
     db.refresh(profile)

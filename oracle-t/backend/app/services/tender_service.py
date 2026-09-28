@@ -31,7 +31,14 @@ from sqlalchemy.orm import Session
 from app.adapters.base import PollError, TenderSummary
 from app.adapters.registry import get_adapter
 from app.models.log import LogLevel
-from app.models.source import POLL_EXCLUDED_SOURCE_TYPES, Source, SourceStatus
+from app.models.source import (
+    FEED_GOSPLAN,
+    FEED_STANDARD,
+    POLL_EXCLUDED_SOURCE_TYPES,
+    SEPARATE_FEED_SOURCE_TYPES,
+    Source,
+    SourceStatus,
+)
 from app.models.tender import Tender, TenderStatus
 from app.services import notification_service
 from app.services import ai_relevance_service, relevance_service
@@ -69,10 +76,12 @@ def list_sources(db: Session) -> list[Source]:
     return list(db.scalars(select(Source).order_by(Source.name)))
 
 
-# Реестровый номер закупки в ЕИС — 19 цифр. Часть площадок публикует закупку под этим же
-# номером, не выделяя его отдельным полем: тогда номер выводится из `external_id`, а не
-# требуется от каждого адаптера отдельно.
-_REGISTRY_NUMBER_RE = re.compile(r"^\d{19}$")
+# Реестровый номер закупки в ЕИС: 19 цифр по 44-ФЗ, 11 цифр с тройкой впереди по 223-ФЗ.
+# Часть площадок публикует закупку под этим же номером, не выделяя его отдельным полем:
+# тогда номер выводится из `external_id`, а не требуется от каждого адаптера отдельно.
+# До 28.09.2026 узнавался только 19-значный — и закупки 223-ФЗ с Росэлторга, ГПБ, ТЭК-Торга
+# ложились в список второй строкой рядом с той же закупкой из ЕИС (72 номера с дублями).
+_REGISTRY_NUMBER_RE = re.compile(r"^(\d{19}|3\d{10})$")
 
 
 def _registry_number(summary: TenderSummary) -> str | None:
@@ -97,6 +106,27 @@ def _fill_missing(existing: Tender, summary: TenderSummary) -> bool:
             setattr(existing, field_name, new_value)
             changed = True
     return changed
+
+
+def _same_feed_condition(source: Source):
+    if source.type in SEPARATE_FEED_SOURCE_TYPES:
+        return Source.type == source.type
+    return Source.type.notin_(SEPARATE_FEED_SOURCE_TYPES)
+
+
+def _apply_structured_fields(db: Session, tender: Tender, summary: TenderSummary) -> None:
+    """ОКПД2 и регион, если источник отдал их готовыми (API Госплана). HTML-площадки их не
+    знают — там эти поля заполняют разбор карточки и ИИ-анализ."""
+
+    if summary.okpd2_code:
+        tender.okpd2_code = summary.okpd2_code[:20]
+    if summary.region_code:
+        from app.models.region import Region
+
+        region = db.get(Region, summary.region_code)
+        if region is not None:
+            tender.region_organizer_code = region.code
+            tender.federal_district_code = region.federal_district_code
 
 
 def _upsert_tender(
@@ -129,10 +159,19 @@ def _upsert_tender(
         # Вторая ступень дедупликации: та же закупка могла прийти с другой площадки под
         # своим идентификатором. Пустой `registry_number` под условие не подставляем — иначе
         # все записи без номера схлопнулись бы в одну.
+        #
+        # Дубли ищутся только внутри своего канала: Госплан — отдельный канал сбора
+        # (переключатель «Стандартные ресурсы | Госплан»), и закупка, которую ЕИС уже
+        # принесла, в канале Госплана обязана появиться своей строкой — иначе он был бы
+        # пуст ровно на тех закупках, по которым каналы и сравнивают.
         if registry_number is not None:
             twin = db.scalar(
-                select(Tender).where(
-                    Tender.registry_number == registry_number, Tender.source_id != source.id
+                select(Tender)
+                .join(Source, Source.id == Tender.source_id)
+                .where(
+                    Tender.registry_number == registry_number,
+                    Tender.source_id != source.id,
+                    _same_feed_condition(source),
                 )
             )
             if twin is not None:
@@ -150,6 +189,7 @@ def _upsert_tender(
             registry_number=registry_number,
             **{field: getattr(summary, field) for field in _UPDATABLE_FIELDS},
         )
+        _apply_structured_fields(db, tender, summary)
         db.add(tender)
         # Тип конкурса по наименованию — чтобы фильтр по типу работал с момента сбора;
         # ИИ-анализ, когда его запустят, поставит свой вердикт по ТЗ.
@@ -233,6 +273,13 @@ def poll_source(
     adapter = get_adapter(
         source.adapter_key, search_keywords=relevance_service.search_queries(db)
     )
+    # Ключ платного тарифа и прочие учётки площадки — только тем адаптерам, что их просят.
+    use_credentials = getattr(adapter, "use_credentials", None)
+    if use_credentials is not None:
+        from app.services.credentials_service import get_credentials_for_source
+
+        use_credentials(get_credentials_for_source(db, source.key))
+
     if adapter is None:
         log_action(
             db,
@@ -323,7 +370,11 @@ def poll_source(
     # и увидеть помеченное «Подобрано ИИ», а не запускать проверку руками. Ограничение по
     # числу — защита от лавины: если источник вывалил сотни новых записей, разбираем первую
     # партию сейчас, остальное дочистит кнопка в настройках.
-    if created:
+    #
+    # Канал Госплана модель на сборе не проверяет: он почти целиком повторяет ЕИС, и
+    # проверка удвоила бы расход на ИИ ради сравнения каналов. Непроверенное доступно
+    # кнопке «Проверить моделью» в настройках.
+    if created and source.type not in SEPARATE_FEED_SOURCE_TYPES:
         try:
             ai_relevance_service.check_batch(db, limit=min(created, AI_CHECK_ON_POLL_LIMIT))
         except Exception as exc:  # noqa: BLE001 - сбой модели не отменяет успешный сбор
@@ -439,6 +490,9 @@ class TenderFilters:
     bookmarked_by_user_id: uuid.UUID | None = None
     # Теги (замечание 17.09.2026): закупка проходит, если у неё есть хотя бы один из них.
     tag_ids: list[uuid.UUID] = field(default_factory=list)
+    # Канал сбора (переключатель на странице тендеров, 28.09.2026): `standard` — площадки
+    # из «Источников тендеров» и ручные заявки, `gosplan` — API Госплана, `None` — все.
+    feed: str | None = None
 
 
 # По каким столбцам разрешена сортировка (раздел 5.6 ТЗ — «по всем столбцам»). Явный
@@ -514,6 +568,18 @@ def ai_score_subquery():
     )
 
 
+def feed_condition_for(feed: str | None):
+    """Условие «закупка из этого канала сбора» — для списка, доски, выгрузки и счётчиков."""
+
+    if feed == FEED_GOSPLAN:
+        types = select(Source.id).where(Source.type.in_(SEPARATE_FEED_SOURCE_TYPES))
+        return Tender.source_id.in_(types)
+    if feed == FEED_STANDARD:
+        types = select(Source.id).where(Source.type.notin_(SEPARATE_FEED_SOURCE_TYPES))
+        return Tender.source_id.in_(types)
+    return None
+
+
 def _build_conditions(filters: TenderFilters) -> list:
     conditions = []
 
@@ -522,6 +588,9 @@ def _build_conditions(filters: TenderFilters) -> list:
         conditions.append(
             Tender.title.ilike(pattern) | Tender.customer_name.ilike(pattern)
         )
+    feed_condition = feed_condition_for(filters.feed)
+    if feed_condition is not None:
+        conditions.append(feed_condition)
     if filters.source_keys:
         conditions.append(
             Tender.source_id.in_(select(Source.id).where(Source.key.in_(filters.source_keys)))
@@ -796,8 +865,12 @@ def list_board_columns(
     return columns
 
 
-def get_tender_stats(db: Session) -> dict:
-    total = db.scalar(select(func.count()).select_from(Tender)) or 0
-    rows = db.execute(select(Tender.status, func.count()).group_by(Tender.status)).all()
+def get_tender_stats(db: Session, feed: str | None = None) -> dict:
+    condition = feed_condition_for(feed)
+    conditions = [condition] if condition is not None else []
+    total = db.scalar(select(func.count()).select_from(Tender).where(*conditions)) or 0
+    rows = db.execute(
+        select(Tender.status, func.count()).where(*conditions).group_by(Tender.status)
+    ).all()
     by_status = {(status or "unknown"): count for status, count in rows}
     return {"total": total, "by_status": by_status}

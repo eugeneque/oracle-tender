@@ -190,7 +190,7 @@ export function CompanyProfilesPanel({
         {isAdmin && (
           <button
             onClick={() => setEditing({ profile: null })}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-1.5 text-xs font-medium text-snow hover:opacity-90"
           >
             <Plus size={13} />
             Добавить компанию
@@ -343,7 +343,7 @@ function CompanyRow({
           <span
             className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-base font-semibold ${
               profile.is_primary
-                ? "bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-500/30"
+                ? "bg-gradient-to-br from-indigo-500 to-violet-600 text-snow shadow-lg shadow-indigo-500/30"
                 : "bg-white/[0.06] text-zinc-300"
             }`}
           >
@@ -1018,7 +1018,7 @@ export function CompanyProfileModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 py-8"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/60 px-4 py-8"
       onClick={onClose}
     >
       <div
@@ -1346,7 +1346,7 @@ export function CompanyProfileModal({
             <button
               onClick={() => void save()}
               disabled={isSaving}
-              className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+              className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-sm font-medium text-snow hover:opacity-90 disabled:opacity-50"
             >
               {isSaving && <Loader2 size={14} className="animate-spin" />}
               Сохранить

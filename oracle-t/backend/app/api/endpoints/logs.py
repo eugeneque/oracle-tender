@@ -1,7 +1,10 @@
+import urllib.parse
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -41,6 +44,43 @@ def get_logs(
         since=since,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get("/logs/export")
+def export_logs(
+    hours: int = Query(default=24, ge=1, le=24 * 30, description="За последние N часов"),
+    format: Literal["txt", "md"] = Query(default="txt"),
+    level: list[str] | None = Query(default=None),
+    component: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    """Выгрузка журнала за период файлом — страница «Логирование», кнопки «За час / сутки /
+    неделю». Фильтры те же, что у списка, чтобы в файл попадало то, что видно на экране."""
+
+    content, file_name, rows = log_service.export_logs(
+        db,
+        hours=hours,
+        fmt=format,
+        actor=user,
+        levels=level,
+        component=component,
+        search=search,
+    )
+    media_type = "text/markdown" if format == "md" else "text/plain"
+    return Response(
+        content=content,
+        media_type=f"{media_type}; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"{file_name}\"; "
+                f"filename*=UTF-8''{urllib.parse.quote(file_name)}"
+            ),
+            "X-Exported-Rows": str(rows),
+            "Access-Control-Expose-Headers": "Content-Disposition, X-Exported-Rows",
+        },
     )
 
 

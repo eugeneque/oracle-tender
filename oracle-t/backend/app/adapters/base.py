@@ -38,6 +38,11 @@ class TenderSummary:
     application_start: datetime | None = None
     application_end: datetime | None = None
     publish_date: date | None = None
+    # Структурированные поля, которые отдают не HTML-выдачи, а API (Госплан): код ОКПД2 и
+    # код субъекта РФ заказчика. Заполняются только при создании записи — дальше их уточняют
+    # разбор карточки и ИИ-анализ, и перезаписывать их при каждом опросе было бы нельзя.
+    okpd2_code: str | None = None
+    region_code: str | None = None
 
 
 @dataclass

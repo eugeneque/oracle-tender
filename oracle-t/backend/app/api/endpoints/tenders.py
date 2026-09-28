@@ -17,6 +17,9 @@ from app.models.tender_document import DOCUMENT_CLASS_LABELS, DocumentClass, Ten
 from app.models.user import User
 from app.schemas.job import BackgroundJobOut
 from app.schemas.tender import (
+    AiFeedbackCreate,
+    AiFeedbackCreated,
+    AiFeedbackOut,
     AiProfileScoreOut,
     AssigneeUpdate,
     DocumentFlagsUpdate,
@@ -58,6 +61,7 @@ from app.services.analysis_service import (
     list_requirements,
 )
 from app.services import (
+    ai_feedback_service,
     bookmark_service,
     tag_service,
     ai_profile_service,
@@ -116,6 +120,11 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
     ai_score_min: Decimal | None = Query(default=None, ge=0, le=100),
     ai_score_max: Decimal | None = Query(default=None, ge=0, le=100),
     tag: list[uuid.UUID] | None = Query(default=None, description="Теги закупки (любой из)"),
+    feed: str | None = Query(
+        default=None,
+        pattern="^(standard|gosplan)$",
+        description="Канал сбора: standard — площадки из настроек, gosplan — API Госплана",
+    ),
 ) -> TenderFilters:
     """Общий разбор фильтров для списка и доски.
 
@@ -149,6 +158,7 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
         win_percentage_max=win_percentage_max,
         ai_score_min=ai_score_min,
         ai_score_max=ai_score_max,
+        feed=feed,
     )
 
 
@@ -235,9 +245,11 @@ def get_tenders_board(
 
 @router.get("/stats", response_model=TenderStatsOut)
 def get_tenders_stats(
-    db: Session = Depends(get_db), _user: User = Depends(get_current_user)
+    feed: str | None = Query(default=None, pattern="^(standard|gosplan)$"),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
 ) -> dict:
-    return get_tender_stats(db)
+    return get_tender_stats(db, feed)
 
 
 def _get_tender_or_404(db: Session, tender_id: uuid.UUID) -> Tender:
@@ -734,6 +746,47 @@ def compute_ai_score(
         ) from exc
     job = enqueue(db, kind=JobKind.AI_PROFILE_SCORE, tender=tender, actor=user)
     return BackgroundJobOut.model_validate(job, from_attributes=True)
+
+
+@router.get("/{tender_id}/ai-score/feedback", response_model=list[AiFeedbackOut])
+def get_ai_feedback(
+    tender_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Ответы специалистов на заключение ИИ по закупке — свежие первыми. Видны всем."""
+
+    tender = _get_tender_or_404(db, tender_id)
+    return ai_feedback_service.list_for_tender(db, tender)
+
+
+@router.post(
+    "/{tender_id}/ai-score/feedback",
+    response_model=AiFeedbackCreated,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_ai_feedback(
+    tender_id: uuid.UUID,
+    payload: AiFeedbackCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Согласие или несогласие с заключением ИИ (28.09.2026). Несогласие сразу ставит
+    задачу пересмотра — ответ приходит с ней, карточка опрашивает её, как любую другую."""
+
+    tender = _get_tender_or_404(db, tender_id)
+    try:
+        feedback, job = ai_feedback_service.create(
+            db, tender, kind=payload.kind, text=payload.text, actor=user
+        )
+    except ai_feedback_service.FeedbackError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    return AiFeedbackCreated(
+        feedback=AiFeedbackOut(**ai_feedback_service.serialize(feedback, user.full_name, tender)),
+        job=BackgroundJobOut.model_validate(job, from_attributes=True) if job else None,
+    )
 
 
 @router.patch("/{tender_id}/stage", response_model=TenderOut)

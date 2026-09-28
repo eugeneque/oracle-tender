@@ -156,6 +156,7 @@ METER_PARAMETERS: tuple[MeterParameter, ...] = (
     ),
     MeterParameter(
         16, "Наличие сменного модуля связи",
+        fields=("Сменный модуль связи",),
         patterns=_re(r"сменн\w+\s+модул", r"модул\w+\s+связи"),
     ),
     MeterParameter(
@@ -170,22 +171,27 @@ METER_PARAMETERS: tuple[MeterParameter, ...] = (
     ),
     MeterParameter(
         19, "Наличие исполнения с неразрушаемым корпусом",
+        fields=("Неразрушаемый корпус",),
         patterns=_re(r"неразрушаем"),
     ),
     MeterParameter(
         20, "Невыпадающие винты в клеммной колодке",
+        fields=("Невыпадающие винты клеммной колодки",),
         patterns=_re(r"невыпадающ\w+\s+винт\w*[^.]{0,30}клеммн\w+\s+колодк"),
     ),
     MeterParameter(
         21, "Невыпадающие винты на крышке отсека модуля связи и крышке клеммной колодки",
+        fields=("Невыпадающие винты крышек",),
         patterns=_re(r"невыпадающ\w+\s+винт\w*[^.]{0,40}крышк"),
     ),
     MeterParameter(
         22, "Прозрачная крышка отсека сменного модуля связи",
+        fields=("Прозрачная крышка отсека модуля связи",),
         patterns=_re(r"прозрачн\w+\s+крышк"),
     ),
     MeterParameter(
         23, "Собственный корпус сменного модуля связи",
+        fields=("Собственный корпус модуля связи",),
         patterns=_re(r"собственн\w+\s+корпус"),
     ),
     MeterParameter(
@@ -195,6 +201,7 @@ METER_PARAMETERS: tuple[MeterParameter, ...] = (
     ),
     MeterParameter(
         25, "Физическое переключение реле без специального инструмента",
+        fields=("Переключение реле без инструмента",),
         patterns=_re(r"без\s+(?:применени\w+\s+)?(?:специальн\w+\s+)?инструмент"),
     ),
     MeterParameter(
@@ -213,10 +220,12 @@ METER_PARAMETERS: tuple[MeterParameter, ...] = (
     MeterParameter(
         28, "Расположение батарейки",
         note="Под клеммной крышкой, либо в отдельном отсеке, либо в отсеке модуля связи.",
+        fields=("Расположение батарейки",),
         patterns=_re(r"расположен\w+\s+батар", r"батар\w+[^.]{0,40}(?:отсек|клеммн\w+\s+крышк)"),
     ),
     MeterParameter(
         29, "Тип литиевого элемента",
+        fields=("Тип литиевого элемента",),
         patterns=_re(r"литиев"),
     ),
     MeterParameter(
@@ -238,10 +247,12 @@ METER_PARAMETERS: tuple[MeterParameter, ...] = (
     ),
     MeterParameter(
         33, "Наличие датчиков высокочастотного (ВЧ) поля",
+        fields=("Датчик ВЧ-поля",),
         patterns=_re(r"\bВЧ\b", r"высокочастотн\w+\s+(?:электромагнитн\w+\s+)?пол"),
     ),
     MeterParameter(
         34, "Наличие датчика наклона",
+        fields=("Датчик наклона",),
         patterns=_re(r"датчик\w*\s+наклон"),
     ),
     MeterParameter(
@@ -259,6 +270,7 @@ METER_PARAMETERS: tuple[MeterParameter, ...] = (
     ),
     MeterParameter(
         37, "Наличие мобильного приложения для считывания данных",
+        fields=("Мобильное приложение",),
         patterns=_re(r"мобильн\w+\s+приложени"),
     ),
     MeterParameter(

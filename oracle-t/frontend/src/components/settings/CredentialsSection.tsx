@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import {
-  ChevronDown,
   KeyRound,
   Loader2,
   Pencil,
@@ -12,9 +11,19 @@ import {
 
 import { ApiError, api } from "../../api/client";
 import type { Source, SourceCredential, SourceCredentialInput } from "../../api/types";
+import { MANUAL_SOURCE_TYPE } from "../../api/types";
+import {
+  SettingCard,
+  SettingsGroup,
+  SettingsNotice,
+  SettingsPanel,
+  dangerButtonClass,
+  primaryButtonClass,
+  secondaryButtonClass,
+  settingsInputClass,
+} from "./ui";
 
-const inputClass =
-  "mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none";
+const inputClass = settingsInputClass;
 
 function formatDateTime(value: string): string {
   return new Date(value).toLocaleString("ru-RU");
@@ -68,8 +77,8 @@ function CredentialForm({
   };
 
   return (
-    <div className="mb-4 rounded-xl border border-indigo-500/25 bg-indigo-500/[0.04] p-4">
-      <div className="mb-3 text-sm font-semibold text-indigo-300">
+    <div className="rounded-2xl border border-indigo-500/25 bg-indigo-500/[0.05] p-5">
+      <div className="mb-4 text-sm font-semibold text-indigo-300">
         {isEdit ? `Блок «${credential.label}»` : "Новый блок учётных данных"}
       </div>
 
@@ -143,15 +152,15 @@ function CredentialForm({
         <button
           onClick={() => void submit()}
           disabled={!canSubmit || isSaving}
-          className="flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3.5 py-2 text-xs font-medium text-white hover:bg-indigo-400 disabled:opacity-50"
+          className={primaryButtonClass}
         >
-          {isSaving && <Loader2 size={13} className="animate-spin" />}
+          {isSaving && <Loader2 size={14} className="animate-spin" />}
           Сохранить
         </button>
         <button
           onClick={onCancel}
           disabled={isSaving}
-          className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3.5 py-2 text-xs text-zinc-300 hover:bg-white/5"
+          className={secondaryButtonClass}
         >
           <X size={13} />
           Отмена
@@ -162,7 +171,7 @@ function CredentialForm({
 }
 
 /**
- * Раздел «Пользовательские данные» — логины и пароли к личным кабинетам площадок
+ * Вкладка «Доступы к площадкам» (до 28.09.2026 — «Пользовательские данные») — логины и пароли к личным кабинетам площадок
  * (раздел 4.1, 5.1 ТЗ). Доступен только администратору.
  *
  * Пароль сюда можно только записать: сервер его не возвращает, поэтому в списке стоит маска,
@@ -172,7 +181,6 @@ function CredentialForm({
 export function CredentialsSection() {
   const [credentials, setCredentials] = useState<SourceCredential[] | null>(null);
   const [sources, setSources] = useState<Source[]>([]);
-  const [isExpanded, setIsExpanded] = useState(true);
   const [editing, setEditing] = useState<SourceCredential | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -188,7 +196,10 @@ export function CredentialsSection() {
 
   useEffect(() => {
     void load();
-    void api.get<Source[]>("/sources").then(setSources);
+    // Доступы бывают только у площадок: у ручных заявок входить некуда.
+    void api
+      .get<Source[]>("/sources")
+      .then((all) => setSources(all.filter((source) => source.type !== MANUAL_SOURCE_TYPE)));
   }, []);
 
   const handleCreate = async (payload: SourceCredentialInput) => {
@@ -225,135 +236,110 @@ export function CredentialsSection() {
   };
 
   return (
-    <div className="mt-6 overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.03]">
-      <button
-        onClick={() => setIsExpanded((v) => !v)}
-        className="flex w-full items-center justify-between px-5 py-4 text-left"
-      >
-        <div>
-          <h2 className="text-sm font-semibold text-zinc-100">Пользовательские данные</h2>
-          <p className="mt-0.5 text-xs text-zinc-500">
-            Логины и пароли к личным кабинетам площадок — для источников, которые отдают
-            закупки только авторизованному пользователю. Хранятся на этом компьютере в
-            зашифрованном виде и переживают перезагрузку.
-          </p>
-        </div>
-        <ChevronDown
-          size={18}
-          className={`shrink-0 text-zinc-500 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+    <SettingsPanel
+      title="Доступы к площадкам"
+      description="Логины и пароли к личным кабинетам площадок — для источников, которые отдают закупки только авторизованному пользователю. Здесь же хранится ключ платного тарифа Госплана."
+      actions={
+        <button
+          onClick={() => {
+            setEditing(null);
+            setIsCreating(true);
+          }}
+          className={primaryButtonClass}
+        >
+          <Plus size={15} />
+          Добавить доступ
+        </button>
+      }
+    >
+      {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
+
+      <SettingsNotice tone="info">
+        <span className="flex items-start gap-2">
+          <ShieldCheck size={15} className="mt-0.5 shrink-0 text-emerald-400" />
+          <span>
+            Пароль шифруется ключом из файла <code className="text-zinc-300">.credentials_key</code>{" "}
+            в корне проекта и обратно через интерфейс не отдаётся — его можно только заменить. Не
+            удаляйте этот файл: без него сохранённые пароли не восстановить.
+          </span>
+        </span>
+      </SettingsNotice>
+
+      {(isCreating || editing) && (
+        <CredentialForm
+          key={editing?.id ?? "new"}
+          sources={sources}
+          credential={editing}
+          onSubmit={editing ? handleUpdate : handleCreate}
+          onCancel={() => {
+            setIsCreating(false);
+            setEditing(null);
+          }}
         />
-      </button>
-
-      {isExpanded && (
-        <div className="border-t border-white/[0.08] px-5 py-4">
-          {error && (
-            <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
-              {error}
-            </div>
-          )}
-
-          <div className="mb-4 flex items-start gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-xs text-zinc-500">
-            <ShieldCheck size={14} className="mt-0.5 shrink-0 text-emerald-400" />
-            <span>
-              Пароль шифруется ключом из файла <code className="text-zinc-400">.credentials_key</code>{" "}
-              в корне проекта и обратно через интерфейс не отдаётся — его можно только заменить.
-              Не удаляйте этот файл: без него сохранённые пароли не восстановить.
-            </span>
-          </div>
-
-          {isCreating && (
-            <CredentialForm
-              sources={sources}
-              credential={null}
-              onSubmit={handleCreate}
-              onCancel={() => setIsCreating(false)}
-            />
-          )}
-          {editing && (
-            <CredentialForm
-              sources={sources}
-              credential={editing}
-              onSubmit={handleUpdate}
-              onCancel={() => setEditing(null)}
-            />
-          )}
-
-          {credentials === null ? (
-            <div className="flex items-center gap-2 text-sm text-zinc-500">
-              <Loader2 size={14} className="animate-spin" />
-              Загрузка…
-            </div>
-          ) : credentials.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-white/10 p-5 text-center text-sm text-zinc-500">
-              Учётные данные не заданы. Добавьте блок для площадки, которая требует входа в
-              личный кабинет.
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {credentials.map((credential) => (
-                <div
-                  key={credential.id}
-                  className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2.5"
-                >
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <KeyRound size={14} className="shrink-0 text-indigo-400" />
-                      <span className="text-sm text-zinc-100">{credential.label}</span>
-                      <span className="rounded-md bg-white/5 px-2 py-0.5 text-xs text-zinc-400">
-                        {credential.source_name}
-                      </span>
-                      {!credential.is_active && (
-                        <span className="rounded-md border border-white/10 px-2 py-0.5 text-[11px] text-zinc-500">
-                          выключен
-                        </span>
-                      )}
-                    </div>
-                    <div className="mt-1 text-xs text-zinc-500">
-                      Логин: <span className="text-zinc-300">{credential.username}</span> · Пароль:{" "}
-                      <span className="text-zinc-400">{credential.password_masked}</span>
-                      {credential.notes ? ` · ${credential.notes}` : ""}
-                    </div>
-                    <div className="mt-0.5 text-[11px] text-zinc-600">
-                      Изменено {formatDateTime(credential.updated_at)}
-                      {credential.updated_by ? ` · ${credential.updated_by}` : ""}
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <button
-                      onClick={() => {
-                        setIsCreating(false);
-                        setEditing(credential);
-                      }}
-                      className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5"
-                    >
-                      <Pencil size={13} />
-                      Изменить
-                    </button>
-                    <button
-                      onClick={() => void handleDelete(credential)}
-                      className="flex items-center gap-1.5 rounded-lg border border-red-500/20 px-2.5 py-1.5 text-xs text-red-400 hover:bg-red-500/10"
-                    >
-                      <Trash2 size={13} />
-                      Удалить
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <button
-            onClick={() => {
-              setEditing(null);
-              setIsCreating(true);
-            }}
-            className="mt-4 flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3.5 py-2 text-xs font-medium text-white hover:bg-indigo-400"
-          >
-            <Plus size={14} />
-            Добавить блок
-          </button>
-        </div>
       )}
-    </div>
+
+      <SettingsGroup id="credentials-list" label="Сохранённые доступы">
+        {credentials === null ? (
+          <div className="flex items-center gap-2 text-sm text-zinc-500">
+            <Loader2 size={14} className="animate-spin" />
+            Загрузка…
+          </div>
+        ) : credentials.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-zinc-500">
+            Доступы не заданы. Добавьте их для площадки, которая требует входа в личный кабинет.
+          </div>
+        ) : (
+          credentials.map((credential) => (
+            <SettingCard
+              key={credential.id}
+              active={credential.is_active}
+              icon={<KeyRound size={18} />}
+              title={
+                <span className="flex flex-wrap items-center gap-2">
+                  {credential.label}
+                  <span className="rounded-md bg-white/[0.06] px-2 py-0.5 text-xs font-normal text-zinc-400">
+                    {credential.source_name}
+                  </span>
+                  {!credential.is_active && (
+                    <span className="rounded-md border border-white/10 px-2 py-0.5 text-[11px] font-normal text-zinc-500">
+                      выключен
+                    </span>
+                  )}
+                </span>
+              }
+              description={
+                <>
+                  Логин: <span className="text-zinc-300">{credential.username}</span> · Пароль:{" "}
+                  <span className="text-zinc-400">{credential.password_masked}</span>
+                  {credential.notes ? ` · ${credential.notes}` : ""}
+                  <span className="block text-[11px] text-zinc-600">
+                    Изменено {formatDateTime(credential.updated_at)}
+                    {credential.updated_by ? ` · ${credential.updated_by}` : ""}
+                  </span>
+                </>
+              }
+              control={
+                <>
+                  <button
+                    onClick={() => {
+                      setIsCreating(false);
+                      setEditing(credential);
+                    }}
+                    className={secondaryButtonClass}
+                  >
+                    <Pencil size={13} />
+                    Изменить
+                  </button>
+                  <button onClick={() => void handleDelete(credential)} className={dangerButtonClass}>
+                    <Trash2 size={13} />
+                    Удалить
+                  </button>
+                </>
+              }
+            />
+          ))
+        )}
+      </SettingsGroup>
+    </SettingsPanel>
   );
 }

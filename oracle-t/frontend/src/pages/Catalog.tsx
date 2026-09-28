@@ -1,14 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  BadgeCheck,
-  BookOpen,
+  AlertTriangle,
+  Check,
   Boxes,
-  ChevronDown,
   ChevronRight,
-  FileDown,
-  Globe,
+  ExternalLink,
   Link2,
-  FileText,
   Loader2,
   Pencil,
   Plus,
@@ -19,63 +16,186 @@ import {
 
 import { ApiError, api, uploadFile } from "../api/client";
 import type {
+  CatalogAutofillStatus,
   CatalogImportOutcome,
-  Characteristic,
-  ExtractionOutcome,
   CatalogSite,
   CatalogTask,
   LinkSiTypesOutcome,
-  ManualIngestOutcome,
   Manufacturer,
-  ManualExtractionOutcome,
   Product,
-  ProductDocumentation,
-  ProductSupport,
   SiType,
 } from "../api/types";
 import { AppShell } from "../components/AppShell";
 import { CatalogDocumentsSection } from "../components/catalog/CatalogDocumentsSection";
-import { RegistryLearningSection } from "../components/catalog/RegistryLearningSection";
-import { UpperSoftwareSection } from "../components/catalog/UpperSoftwareSection";
-import { ProductRegistrySection } from "../components/catalog/ProductRegistrySection";
+import { ProductDrawer } from "../components/catalog/ProductDrawer";
 import { ProductMatrix } from "../components/catalog/ProductMatrix";
-import { formatDate } from "../utils/format";
+import { RegistryLearningSection } from "../components/catalog/RegistryLearningSection";
+import { SiTypeGroups } from "../components/catalog/SiTypeGroups";
+import { siTypeGroup } from "../components/catalog/siTypeGroup";
+import { UpperSoftwareSection } from "../components/catalog/UpperSoftwareSection";
 import { PageHeader } from "../components/PageHeader";
 import { useAuth } from "../context/useAuth";
+import { formatDate } from "../utils/format";
 
-const SOURCE_LABELS: Record<string, string> = {
-  fgis_description_type: "ФГИС «Описание типа»",
-  manufacturer_site: "сайт производителя",
-  user_manual: "руководство пользователя",
-  manual_entry: "введено вручную",
-  web_search: "поиск в интернете (официальный сайт)",
+// Каталог продукции (переделан 28.09.2026 по замечанию «слишком много блоков друг над
+// другом, непонятно, как всё связано»). Раньше коды СИ, модели, обучение, документы, ПО
+// верхнего уровня и характеристики модели шли одной лентой. Теперь у производителя пять
+// шагов в порядке, в котором наполняется каталог, — у каждого подпись, что в нём и что
+// делать дальше, — а модель открывается отдельным окном.
+
+type StepKey = "si" | "models" | "learning" | "documents" | "software";
+
+const STEPS: { key: StepKey; title: string; caption: string; about: string }[] = [
+  {
+    key: "si",
+    title: "Коды СИ",
+    caption: "Госреестр ФГИС",
+    about:
+      "Какие типы приборов производителя утверждены в Госреестре средств измерений. Код СИ связывает модель " +
+      "с «Описанием типа» — главным источником метрологических характеристик. Дальше: привяжите коды к моделям.",
+  },
+  {
+    key: "models",
+    title: "Модели",
+    caption: "Приборы и характеристики",
+    about:
+      "Приборы производителя по фазности и способу установки. Модели приходят с сайта производителя и из " +
+      "реестра. Нажмите на модель — откроется её карточка: параметры для ПУ, характеристики, реестры допуска.",
+  },
+  {
+    key: "learning",
+    title: "Обучение",
+    caption: "Аршин и руководства",
+    about:
+      "Дополняет каталог: исполнения из Аршина, которых ещё нет на сайте производителя, характеристики из " +
+      "«Описаний типа» и руководств по эксплуатации. Полный проход — кнопкой «Обучить», по шагам — остальными.",
+  },
+  {
+    key: "documents",
+    title: "Документы",
+    caption: "Актуальность",
+    about:
+      "Документы, из которых взяты характеристики: даты редакций и еженедельная сверка с источником. " +
+      "Переизданный документ — повод заново разобрать модель.",
+  },
+  {
+    key: "software",
+    title: "ПО верхнего уровня",
+    caption: "Поддержка в АСКУЭ",
+    about:
+      "В каких АСКУЭ поддержаны приборы производителя — ответ на требование ТЗ «интеграция в ПО верхнего " +
+      "уровня». Отсутствие в списке — тоже ответ.",
+  },
+];
+
+function readStep(): StepKey {
+  try {
+    const stored = localStorage.getItem("catalog.step");
+    return STEPS.some((s) => s.key === stored) ? (stored as StepKey) : "models";
+  } catch {
+    return "models";
+  }
+}
+
+// Порядок списка производителей: по доле рынка (как отдаёт сервер, без доли — в конце) или по
+// алфавиту. Выбор запоминается в браузере.
+type ManufacturerSort = "share" | "alpha";
+
+function readManufacturerSort(): ManufacturerSort {
+  try {
+    return localStorage.getItem("catalog.manufacturerSort") === "alpha" ? "alpha" : "share";
+  } catch {
+    return "share";
+  }
+}
+
+const manufacturerTitle = (m: Manufacturer) => m.brand_name ?? m.legal_name;
+
+// Автозаполнение каталога (28.09.2026): сервер раз в сутки опрашивает все источники по
+// каждому производителю по очереди — ФГИС, сайт, Аршин, руководства. Здесь — значок хода
+// опроса в списке и ручной запуск.
+const AUTOFILL_STEP_LABELS: Record<string, string> = {
+  si_search: "коды СИ в ФГИС",
+  site: "сайт производителя",
+  link: "привязка кодов СИ",
+  registry: "модели из реестра",
+  relink: "привязка исполнений",
 };
 
-const SI_SOURCE_LABELS: Record<string, string> = {
-  auto_search: "автопоиск",
-  manual: "вручную",
-  import: "импорт",
-};
+const isAutofillActive = (s?: CatalogAutofillStatus) => s?.status === "queued" || s?.status === "running";
 
-function Badge({ tone, children }: { tone: "green" | "amber" | "zinc"; children: React.ReactNode }) {
-  const tones = {
-    green: "bg-emerald-500/10 text-emerald-400",
-    amber: "bg-amber-500/10 text-amber-400",
-    zinc: "bg-zinc-500/10 text-zinc-400",
-  };
+function autofillTitle(s: CatalogAutofillStatus): string {
+  if (s.status === "queued") return "В очереди на опрос источников";
+  if (s.status === "running")
+    return `Идёт опрос${s.current_step ? `: ${AUTOFILL_STEP_LABELS[s.current_step] ?? s.current_step}` : ""}`;
+  const when = s.finished_at ? ` ${formatDate(s.finished_at)}` : "";
+  if (s.status === "error") return `Опрос${when} не удался: ${s.message ?? "подробности в журнале"}`;
+  if (s.empty) {
+    const why = s.failed_steps.length
+      ? `не ответили: ${s.failed_steps.map((k) => AUTOFILL_STEP_LABELS[k] ?? k).join(", ")}`
+      : "источники не нашли ни одного прибора";
+    return `Опрошен${when}, моделей нет — ${why}`;
+  }
+  if (s.failed_steps.length)
+    return `Опрошен${when}, но не всё: ${s.failed_steps.map((k) => AUTOFILL_STEP_LABELS[k] ?? k).join(", ")} — подробности в журнале`;
+  if (s.enriching) return `Опрошен${when}: приборы и коды СИ заведены, характеристики дополняются по Аршину и руководствам`;
+  return `Опрошен${when}: каталог заполнен`;
+}
+
+function AutofillMark({ status }: { status?: CatalogAutofillStatus }) {
+  if (!status) return null;
+  const title = autofillTitle(status);
+  if (status.status === "running")
+    return (
+      <span title={title} className="inline-flex text-indigo-400">
+        <Search size={12} className="catalog-searching" />
+      </span>
+    );
+  if (status.status === "queued")
+    return (
+      <span title={title} className="inline-flex text-zinc-500">
+        <Search size={12} />
+      </span>
+    );
+  if (status.status === "error" || status.empty)
+    return (
+      <span title={title} className="inline-flex text-red-400">
+        <AlertTriangle size={12} />
+      </span>
+    );
   return (
-    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${tones[tone]}`}>
-      {children}
+    <span title={title} className={`inline-flex ${status.failed_steps.length ? "text-amber-400" : "text-emerald-400"}`}>
+      <Check size={13} strokeWidth={2.5} />
     </span>
   );
 }
 
-function summariseExtraction(outcome: ExtractionOutcome): string {
-  const parts = [`сохранено ${outcome.saved}`];
-  if (outcome.skipped_protected) parts.push(`не тронуто ручных ${outcome.skipped_protected}`);
-  if (outcome.skipped_unknown_field) parts.push(`отброшено ${outcome.skipped_unknown_field}`);
-  if (outcome.chunks_failed) parts.push(`ошибок разбора ${outcome.chunks_failed}`);
-  return parts.join(", ");
+function ToolbarButton({
+  onClick,
+  disabled,
+  busy,
+  icon,
+  title,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  busy?: boolean;
+  icon: React.ReactNode;
+  title?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+    >
+      {busy ? <Loader2 size={13} className="animate-spin" /> : icon}
+      {children}
+    </button>
+  );
 }
 
 export function CatalogPage() {
@@ -86,31 +206,45 @@ export function CatalogPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [siTypes, setSiTypes] = useState<SiType[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
-  const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
-  const [characteristics, setCharacteristics] = useState<Characteristic[]>([]);
-  // В каких списках ПО верхнего уровня есть выбранная модель (замечание тестировщика
-  // 16.09.2026). Рядом с характеристиками, потому что на вопрос «интегрирован ли прибор
-  // в Пирамиду» отвечают именно здесь, а не в блоке площадок.
-  const [productSupport, setProductSupport] = useState<ProductSupport[]>([]);
+  const [openProductId, setOpenProductId] = useState<string | null>(null);
+  const [step, setStep] = useState<StepKey>(readStep);
+  const [manufacturerSort, setManufacturerSort] = useState<ManufacturerSort>(readManufacturerSort);
 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [newModelName, setNewModelName] = useState("");
-  // Список кодов СИ длинный (у МИРТЕК их 28, и половина — теплосчётчики и счётчики воды,
-  // не относящиеся к справочнику) и оттесняет вниз то, ради чего страницу открывают —
-  // модели и характеристики. По умолчанию свёрнут; счётчик в заголовке позволяет понять,
-  // есть ли там что-то, не разворачивая.
-  const [siTypesOpen, setSiTypesOpen] = useState(false);
   // Сайты, каталоги которых система умеет обходить. Кнопка обхода показывается только у тех
-  // производителей, для чьего сайта есть разобранный профиль: у остальных нажимать было бы
-  // не на что, и кнопка вводила бы в заблуждение.
+  // производителей, для чьего сайта есть разобранный профиль.
   const [catalogSites, setCatalogSites] = useState<CatalogSite[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Форма производителя (администратор): добавить нового или поправить долю рынка и сайт
-  // у существующего. Одна форма на оба случая — поля те же; `editingId === "new"` —
-  // создание. Доля рынка вводится руками вместе с источником оценки: без подписи «чья и
-  // за какой год» цифра через год станет неотличима от выдумки.
+  const [autofill, setAutofill] = useState<Record<string, CatalogAutofillStatus>>({});
+  const autofillActive = useMemo(() => Object.values(autofill).some(isAutofillActive), [autofill]);
+  // Ход опроса для полосы над списком: сколько производителей этого прогона уже опрошено,
+  // кого опрашивают прямо сейчас и на каком шаге, скольким ещё дополняются характеристики.
+  // «Этот прогон» начался, когда встала в очередь самая ранняя ещё не выполненная задача;
+  // опрошенными в нём считаются закончившие после этого момента (по времени окончания, а не
+  // постановки — иначе закончившие раньше соседей по очереди выпадали из счёта).
+  const autofillProgress = useMemo(() => {
+    const rows = Object.values(autofill);
+    const active = rows.filter(isAutofillActive);
+    const enriching = rows.filter((r) => !isAutofillActive(r) && r.enriching).length;
+    const running = rows.find((r) => r.status === "running");
+    const current = running ? manufacturers.find((m) => m.id === running.manufacturer_id) : undefined;
+    if (!active.length) return { done: 0, total: 0, current: null, step: null, enriching };
+    // Сравнение моментов, а не строк: время постановки приходит в поясе базы, окончания — в UTC.
+    const since = Math.min(...active.map((r) => Date.parse(r.created_at)));
+    const done = rows.filter((r) => !isAutofillActive(r) && r.finished_at != null && Date.parse(r.finished_at) >= since).length;
+    return {
+      done,
+      total: done + active.length,
+      current: current ? manufacturerTitle(current) : null,
+      step: running?.current_step ? AUTOFILL_STEP_LABELS[running.current_step] ?? running.current_step : null,
+      enriching,
+    };
+  }, [autofill, manufacturers]);
+  // Форма производителя (администратор): добавить нового или поправить долю рынка и сайт.
+  // `editingId === "new"` — создание. Доля рынка вводится вместе с источником оценки.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [manufacturerDraft, setManufacturerDraft] = useState({
     legal_name: "",
@@ -120,14 +254,24 @@ export function CatalogPage() {
     market_share_source: "",
   });
 
-  const selected = useMemo(
-    () => manufacturers.find((m) => m.id === selectedId) ?? null,
-    [manufacturers, selectedId]
+  const sortedManufacturers = useMemo(
+    () =>
+      manufacturerSort === "alpha"
+        ? [...manufacturers].sort((a, b) => manufacturerTitle(a).localeCompare(manufacturerTitle(b), "ru"))
+        : manufacturers,
+    [manufacturers, manufacturerSort]
   );
-  const selectedProduct = useMemo(
-    () => products.find((p) => p.id === selectedProductId) ?? null,
-    [products, selectedProductId]
+  const selected = useMemo(() => manufacturers.find((m) => m.id === selectedId) ?? null, [manufacturers, selectedId]);
+  const openProduct = useMemo(() => products.find((p) => p.id === openProductId) ?? null, [products, openProductId]);
+  const selectedSite = useMemo(
+    () => catalogSites.find((site) => site.manufacturer_id === selectedId) ?? null,
+    [catalogSites, selectedId]
   );
+  // «Ждут проверки» — только коды, по которым от человека требуется действие; истёкшие и
+  // «не электросчётчики» — факты реестра, подтверждение их не меняет.
+  const siTypesNeedingReview = useMemo(() => siTypes.filter((s) => siTypeGroup(s) === "pending").length, [siTypes]);
+  const activeProducts = useMemo(() => products.filter((p) => p.status !== "discontinued").length, [products]);
+  const productsNeedingReview = useMemo(() => products.filter((p) => p.review_status === "needs_review").length, [products]);
 
   const run = async (key: string, action: () => Promise<void>) => {
     setBusy(key);
@@ -166,91 +310,102 @@ export function CatalogPage() {
 
   useEffect(() => {
     if (!selectedId) return;
-    setSelectedProductId(null);
-    setCharacteristics([]);
+    setOpenProductId(null);
+    setNotice(null);
     void run("manufacturer", () => loadManufacturerData(selectedId));
   }, [selectedId]);
 
-  useEffect(() => {
-    setProductSupport([]);
-    if (!selectedProductId) return;
-    void run("characteristics", async () => {
-      const [rows, support] = await Promise.all([
-        api.get<Characteristic[]>(`/products/${selectedProductId}/characteristics`),
-        api.get<ProductSupport[]>(`/products/${selectedProductId}/upper-software`),
-      ]);
-      setCharacteristics(rows);
-      setProductSupport(support);
-    });
-  }, [selectedProductId]);
-
-  // Одна площадка может покрывать модель несколькими записями (у Пирамиды семейство и
-  // исполнение с СПОДЭС стоят отдельными строками) — в подписи каждая площадка один раз.
-  const productPlatforms = useMemo(() => {
-    const seen = new Map<string, ProductSupport>();
-    for (const row of productSupport) if (!seen.has(row.adapter_key)) seen.set(row.adapter_key, row);
-    return [...seen.values()];
-  }, [productSupport]);
-
-  const selectedSite = useMemo(
-    () => catalogSites.find((site) => site.manufacturer_id === selectedId) ?? null,
-    [catalogSites, selectedId]
-  );
-
-  const siTypesNeedingReview = useMemo(
-    () => siTypes.filter((s) => s.review_status === "needs_review").length,
-    [siTypes]
-  );
-
-  const groupedCharacteristics = useMemo(() => {
-    const groups: Record<string, Characteristic[]> = {};
-    for (const c of characteristics) {
-      (groups[c.group_name] ??= []).push(c);
+  // Ход автозаполнения: пока кто-то в очереди или опрашивается — каждые 5 секунд, иначе раз
+  // в минуту (ночной проход начинается сам). Когда опрос открытого производителя закончился,
+  // его данные перечитываются — пользователь видит заполненное без перезагрузки.
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const autofillRef = useRef<Record<string, CatalogAutofillStatus>>({});
+  const loadAutofill = useCallback(async () => {
+    try {
+      const rows = await api.get<CatalogAutofillStatus[]>("/catalog/autofill/status");
+      const next: Record<string, CatalogAutofillStatus> = Object.fromEntries(rows.map((r) => [r.manufacturer_id, r]));
+      const current = selectedIdRef.current;
+      if (current && isAutofillActive(autofillRef.current[current]) && next[current] && !isAutofillActive(next[current])) {
+        void loadManufacturerData(current).catch(() => undefined);
+      }
+      autofillRef.current = next;
+      setAutofill(next);
+    } catch {
+      // статус опроса — подсказка, без него каталог работает
     }
-    return Object.entries(groups);
-  }, [characteristics]);
+  }, []);
+
+  useEffect(() => {
+    void loadAutofill();
+    const timer = window.setInterval(() => void loadAutofill(), autofillActive ? 5000 : 60000);
+    return () => window.clearInterval(timer);
+  }, [autofillActive, loadAutofill]);
+
+  const handleAutofillAll = () =>
+    run("autofill-all", async () => {
+      const { queued } = await api.post<{ queued: number }>("/catalog/autofill");
+      setNotice(
+        `Опрос каталога запущен: производителей в очереди — ${queued}. Они опрашиваются по одному; ` +
+          "лупа в списке — идёт опрос, галочка — готово. Раз в сутки это происходит само."
+      );
+      await loadAutofill();
+    });
+
+  const handleAutofillOne = () =>
+    run("autofill-one", async () => {
+      await api.post<CatalogTask>(`/manufacturers/${selectedId}/autofill`);
+      await loadAutofill();
+    });
+
+  const closeProduct = useCallback(() => setOpenProductId(null), []);
+
+  const switchStep = (next: StepKey) => {
+    setStep(next);
+    try {
+      localStorage.setItem("catalog.step", next);
+    } catch {
+      // без сохранения — шаг просто не запомнится
+    }
+  };
+
+  const switchManufacturerSort = (next: ManufacturerSort) => {
+    setManufacturerSort(next);
+    try {
+      localStorage.setItem("catalog.manufacturerSort", next);
+    } catch {
+      // без сохранения — порядок просто не запомнится
+    }
+  };
 
   const handleSearchSiTypes = () =>
     run("si-search", async () => {
       const found = await api.post<SiType[]>(`/manufacturers/${selectedId}/si-types/search`);
       setSiTypes(found);
-      // Раскрываем блок: человек только что нажал кнопку и должен увидеть результат, а не
-      // гадать, отработала ли она.
-      if (found.length) setSiTypesOpen(true);
       setNotice(
         found.length
           ? `Автопоиск ФГИС: найдено кодов СИ — ${found.length}. Подходящие подставлены к моделям; проверьте и подтвердите записи.`
           : "Автопоиск ФГИС не вернул результатов (реестр может быть недоступен — см. журнал)."
       );
-      // Список моделей мог измениться: найденные коды подставляются к ним сразу.
       await loadManufacturerData(selectedId!);
     });
 
-  // Обход каталога МИРТЕК запускается синхронно, а не через очередь: администратор,
-  // нажавший кнопку, должен увидеть итог обхода целиком (сколько создано, что ушло на
-  // проверку, где сломалось), а не «задача поставлена». Плановый обход — раз в неделю
-  // из планировщика.
-  // Обход ставится в очередь, а не выполняется в запросе: сайты производителей отвечают
-  // по 2-6 секунд на страницу, и каталог из двух сотен позиций обходится минутами. Держать
-  // на этом открытую вкладку нельзя — человек решит, что интерфейс завис.
+  // Обход ставится в очередь: сайты производителей отвечают по 2-6 секунд на страницу, и
+  // каталог из двух сотен позиций обходится минутами.
   const handleSyncSite = (adapterKey: string) =>
     run("site-sync", async () => {
       await api.post<CatalogTask>(`/catalog/sites/${adapterKey}/sync`);
       setNotice(
-        "Обход каталога запущен в фоне — сайты производителей отвечают медленно, полный " +
-          "каталог занимает минуты. Ход работы виден в разделе «Логирование» настроек; " +
-          "обновите страницу, когда обход закончится."
+        "Обход каталога запущен в фоне — полный каталог занимает минуты. Ход работы виден в разделе " +
+          "«Логирование» настроек; обновите страницу, когда обход закончится."
       );
     });
 
-  // Привязка моделей к кодам СИ. Обход каталога делает это сам; отдельная кнопка нужна для
-  // случая «модели уже есть, а автопоиск в ФГИС запустили только что» — иначе пришлось бы
-  // заново обходить сайт ради одной связи.
+  // Привязка моделей к кодам СИ — для случая «модели уже есть, а автопоиск в ФГИС запустили
+  // только что»: иначе пришлось бы заново обходить сайт ради одной связи.
   const handleLinkSiTypes = () =>
     run("link-si", async () => {
-      const outcome = await api.post<LinkSiTypesOutcome>(
-        `/manufacturers/${selectedId}/link-si-types`
-      );
+      const outcome = await api.post<LinkSiTypesOutcome>(`/manufacturers/${selectedId}/link-si-types`);
       const parts = [`привязано ${outcome.linked}`];
       if (outcome.already_linked) parts.push(`было привязано ранее ${outcome.already_linked}`);
       if (outcome.not_found) parts.push(`без подходящего кода СИ ${outcome.not_found}`);
@@ -259,33 +414,9 @@ export function CatalogPage() {
       await loadManufacturerData(selectedId!);
     });
 
-  // Руководства по эксплуатации. Обход сайта сохраняет только ссылку на документ, а сам
-  // документ — самый подробный источник о приборе (интерфейсы, протоколы, функции). Отдельной
-  // кнопкой, а не частью обхода: PDF весит мегабайты, а разбор каждого стоит нескольких
-  // обращений к модели, и делать это на каждом еженедельном обходе незачем.
-  const handleIngestManuals = () =>
-    run("manuals", async () => {
-      const outcome = await api.post<ManualIngestOutcome>(
-        `/manufacturers/${selectedId}/ingest-manuals`
-      );
-      const parts = [
-        `разобрано руководств ${outcome.processed}`,
-        `характеристик сохранено ${outcome.characteristics_saved}`,
-      ];
-      if (outcome.skipped_have_data) parts.push(`уже разобраны ранее ${outcome.skipped_have_data}`);
-      if (outcome.skipped_no_link) parts.push(`без ссылки на руководство ${outcome.skipped_no_link}`);
-      if (outcome.skipped_by_robots)
-        parts.push(`закрыто robots.txt сайта ${outcome.skipped_by_robots}`);
-      if (outcome.failed) parts.push(`не загрузилось ${outcome.failed}`);
-      setNotice(`Руководства: ${parts.join(", ")}.`);
-      await loadManufacturerData(selectedId!);
-    });
-
   const handleVerifySiType = (siType: SiType) =>
     run(`si-${siType.id}`, async () => {
-      const updated = await api.patch<SiType>(`/si-types/${siType.id}`, {
-        verified_by_user: !siType.verified_by_user,
-      });
+      const updated = await api.patch<SiType>(`/si-types/${siType.id}`, { verified_by_user: !siType.verified_by_user });
       setSiTypes((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
     });
 
@@ -336,70 +467,11 @@ export function CatalogPage() {
 
   const handleCreateProduct = () =>
     run("create-product", async () => {
-      const created = await api.post<Product>(`/manufacturers/${selectedId}/products`, {
-        model_name: newModelName.trim(),
-      });
+      const created = await api.post<Product>(`/manufacturers/${selectedId}/products`, { model_name: newModelName.trim() });
       setProducts((prev) => [...prev, created]);
       setNewModelName("");
-      setSelectedProductId(created.id);
+      setOpenProductId(created.id);
     });
-
-  const handleExtractFromSiType = () =>
-    run("extract-fgis", async () => {
-      const outcome = await api.post<ExtractionOutcome>(
-        `/products/${selectedProductId}/extract-characteristics/from-si-type`
-      );
-      setCharacteristics(await api.get<Characteristic[]>(`/products/${selectedProductId}/characteristics`));
-      setNotice(`Из «Описание типа»: ${summariseExtraction(outcome)}.`);
-    });
-
-  const handleExtractFromSite = () =>
-    run("extract-site", async () => {
-      const outcome = await api.post<ManualExtractionOutcome>(
-        `/products/${selectedProductId}/extract-characteristics/from-manufacturer-site`
-      );
-      setCharacteristics(await api.get<Characteristic[]>(`/products/${selectedProductId}/characteristics`));
-      setNotice(
-        outcome.message ??
-          `Из «${outcome.manual_title ?? "руководства"}»: ${summariseExtraction(outcome.extraction)}.`
-      );
-    });
-
-  // Документация одной модели через поиск в интернете (замечание заказчика 15.09.2026):
-  // для исполнения, которого нет в каталоге на сайте производителя, это единственный
-  // автоматический путь к руководству — обход каталога на него не выйдет.
-  const handleFindDocumentation = () =>
-    run("find-docs", async () => {
-      const outcome = await api.post<ProductDocumentation>(
-        `/products/${selectedProductId}/find-documentation`
-      );
-      setCharacteristics(await api.get<Characteristic[]>(`/products/${selectedProductId}/characteristics`));
-      setNotice(outcome.message);
-    });
-
-  const handleVerifyCharacteristic = (characteristic: Characteristic) =>
-    run(`ch-${characteristic.id}`, async () => {
-      const updated = await api.post<Characteristic>(`/characteristics/${characteristic.id}/verify`, {
-        verified_by_user: !characteristic.verified_by_user,
-      });
-      setCharacteristics((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
-    });
-
-  const handleEditValue = (characteristic: Characteristic) => {
-    const next = window.prompt(
-      `${characteristic.group_name} → ${characteristic.field_name}`,
-      characteristic.value ?? ""
-    );
-    if (next === null || next === characteristic.value) return;
-    void run(`edit-${characteristic.id}`, async () => {
-      const updated = await api.put<Characteristic>(`/products/${selectedProductId}/characteristics`, {
-        group_name: characteristic.group_name,
-        field_name: characteristic.field_name,
-        value: next,
-      });
-      setCharacteristics((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
-    });
-  };
 
   const handleImport = (file: File) =>
     run("import", async () => {
@@ -409,11 +481,27 @@ export function CatalogPage() {
       setNotice(outcome.errors.length ? `${base} Ошибок в строках: ${outcome.errors.length} — ${outcome.errors[0]}` : base);
     });
 
+  // Счётчики на вкладках — только там, где данные уже загружены страницей.
+  const stepCount = (key: StepKey): React.ReactNode => {
+    if (key === "si" && siTypes.length)
+      return (
+        <>
+          {siTypes.length}
+          {siTypesNeedingReview > 0 && <span className="ml-1 text-amber-400">⚠ {siTypesNeedingReview}</span>}
+        </>
+      );
+    if (key === "models" && products.length) return products.length;
+    return null;
+  };
+
+  const currentStep = STEPS.find((s) => s.key === step) ?? STEPS[1];
+  const stepIndex = STEPS.indexOf(currentStep);
+
   return (
     <AppShell>
       <div className="mx-auto max-w-7xl px-8 py-8">
         <PageHeader
-          breadcrumb={["Sova Scanner", "Каталог продукции"]}
+          breadcrumb={["Sova", "Каталог продукции"]}
           title="Каталог продукции"
           icon={
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
@@ -423,9 +511,7 @@ export function CatalogPage() {
         />
 
         {error && (
-          <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
-            {error}
-          </div>
+          <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">{error}</div>
         )}
         {notice && (
           <div className="mb-4 flex items-start justify-between gap-4 rounded-lg border border-indigo-500/20 bg-indigo-500/10 px-4 py-2.5 text-sm text-indigo-300">
@@ -436,13 +522,13 @@ export function CatalogPage() {
           </div>
         )}
 
-        <div className="grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+        <div className="grid gap-5 lg:grid-cols-[240px_minmax(0,1fr)]">
           {/* Производители */}
-          <div className="rounded-xl border border-white/[0.08] bg-white/[0.03]">
+          <aside className="self-start rounded-xl border border-white/[0.08] bg-white/[0.03] lg:sticky lg:top-6">
             <div className="flex items-center justify-between border-b border-white/[0.08] px-4 py-3">
               <h2 className="text-sm font-semibold text-zinc-100">Производители</h2>
               {isAdmin && (
-                <>
+                <div className="flex gap-1.5">
                   <input
                     ref={fileInputRef}
                     type="file"
@@ -457,7 +543,7 @@ export function CatalogPage() {
                   <button
                     onClick={() => openManufacturerForm(null)}
                     title="Добавить производителя"
-                    className="mr-1.5 flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1 text-[11px] text-zinc-300 hover:bg-white/5"
+                    className="rounded-lg border border-white/10 px-2 py-1 text-[11px] text-zinc-300 hover:bg-white/5"
                   >
                     <Plus size={12} />
                   </button>
@@ -470,7 +556,7 @@ export function CatalogPage() {
                     {busy === "import" ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
                     CSV
                   </button>
-                </>
+                </div>
               )}
             </div>
             {editingId && (
@@ -513,443 +599,334 @@ export function CatalogPage() {
                 </div>
               </div>
             )}
+            {(isAdmin || autofillActive || autofillProgress.enriching > 0) && (
+              <div className="space-y-1.5 border-b border-white/[0.08] px-3 py-2">
+                {autofillActive ? (
+                  <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-2.5 py-2" aria-live="polite">
+                    <div className="flex items-center gap-1.5 text-xs text-zinc-200">
+                      <Search size={12} className="catalog-searching shrink-0 text-indigo-400" />
+                      Опрошено {autofillProgress.done} из {autofillProgress.total}
+                    </div>
+                    <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/[0.06]">
+                      <div
+                        className="h-full rounded-full bg-indigo-400 transition-[width] duration-500"
+                        style={{ width: `${autofillProgress.total ? (autofillProgress.done / autofillProgress.total) * 100 : 0}%` }}
+                      />
+                    </div>
+                    {autofillProgress.current && (
+                      <div className="mt-1.5 truncate text-[11px] text-zinc-500">
+                        Сейчас: <span className="text-zinc-300">{autofillProgress.current}</span>
+                        {autofillProgress.step && <> — {autofillProgress.step}</>}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  isAdmin && (
+                    <button
+                      onClick={handleAutofillAll}
+                      disabled={busy === "autofill-all"}
+                      title="Опросить все источники по всем производителям по очереди: ФГИС, сайты, реестр, затем характеристики по Аршину и руководствам. Раз в сутки это происходит само."
+                      className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+                    >
+                      {busy === "autofill-all" ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                      Опросить весь каталог
+                    </button>
+                  )
+                )}
+                {autofillProgress.enriching > 0 && (
+                  <div
+                    className="flex items-center gap-1.5 px-1 text-[11px] text-zinc-500"
+                    title="Приборы и коды СИ уже заведены; характеристики из «Описаний типа» и руководств дополняются вторым проходом — он дольше, потому что читает документы"
+                  >
+                    <Loader2 size={11} className="shrink-0 animate-spin" />
+                    Характеристики дополняются: {autofillProgress.enriching}
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="flex items-center gap-1 border-b border-white/[0.08] px-3 py-2" role="radiogroup" aria-label="Порядок производителей">
+              <span className="mr-auto pl-1 text-[11px] text-zinc-500">Порядок</span>
+              {(
+                [
+                  ["share", "По доле рынка"],
+                  ["alpha", "А–Я"],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  role="radio"
+                  aria-checked={manufacturerSort === key}
+                  onClick={() => switchManufacturerSort(key)}
+                  className={`rounded-md px-2 py-1 text-[11px] transition-colors ${
+                    manufacturerSort === key ? "bg-white/[0.08] text-zinc-100" : "text-zinc-500 hover:text-zinc-300"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <div className="max-h-[70vh] overflow-y-auto py-1">
-              {/* Порядок — по доле рынка (сервер сортирует), у кого доля не опубликована —
-                  в конце по алфавиту. Доля показана справа, источник — в подсказке. */}
-              {manufacturers.map((m) => (
-                <div
+              {/* По доле рынка — порядок сервера, без опубликованной доли — в конце. */}
+              {sortedManufacturers.map((m) => (
+                <button
                   key={m.id}
-                  className={`group flex w-full items-center gap-1 pr-2 text-sm ${
+                  onClick={() => setSelectedId(m.id)}
+                  className={`flex w-full items-center justify-between py-2 pl-4 pr-3 text-left text-sm ${
                     m.id === selectedId ? "bg-indigo-500/10 text-indigo-300" : "text-zinc-300 hover:bg-white/5"
                   }`}
                 >
-                  <button
-                    onClick={() => setSelectedId(m.id)}
-                    className="flex min-w-0 flex-1 items-center justify-between py-2 pl-4 text-left"
-                  >
-                    <span className="truncate">
-                      {m.brand_name ?? m.legal_name}
-                      {m.is_mirtek && <span className="ml-1.5 text-[10px] text-emerald-400">МИРТЕК</span>}
-                    </span>
-                    <span
-                      className="ml-2 shrink-0 font-mono text-[11px] text-zinc-500"
-                      title={
-                        m.market_share_pct != null
-                          ? `Доля рынка ${m.market_share_pct} % — ${m.market_share_source ?? "источник не указан"}`
-                          : "Доля рынка не опубликована"
-                      }
-                    >
-                      {m.market_share_pct != null ? `${m.market_share_pct} %` : "—"}
-                    </span>
-                  </button>
-                  {isAdmin ? (
-                    <button
-                      onClick={() => openManufacturerForm(m)}
-                      title="Изменить производителя: сайт, доля рынка"
-                      className="shrink-0 rounded p-1 text-zinc-500 opacity-0 hover:bg-white/5 hover:text-zinc-200 group-hover:opacity-100"
-                    >
-                      <Pencil size={12} />
-                    </button>
-                  ) : (
-                    <ChevronRight size={14} className="shrink-0 opacity-40" />
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            {/* Коды СИ */}
-            <div className="rounded-xl border border-white/[0.08] bg-white/[0.03]">
-              <div
-                className={`flex flex-wrap items-center justify-between gap-2 px-5 py-3 ${
-                  siTypesOpen ? "border-b border-white/[0.08]" : ""
-                }`}
-              >
-                <button
-                  onClick={() => setSiTypesOpen((open) => !open)}
-                  className="flex items-start gap-2 text-left"
-                  aria-expanded={siTypesOpen}
-                >
-                  <span className="mt-0.5 text-zinc-500">
-                    {siTypesOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                  <span className="truncate">
+                    {manufacturerTitle(m)}
+                    {m.is_mirtek && <span className="ml-1.5 text-[10px] text-emerald-400">мы</span>}
                   </span>
-                  <span>
-                    <h2 className="text-sm font-semibold text-zinc-100">
-                      Коды СИ {selected && <span className="text-zinc-500">· {selected.legal_name}</span>}
-                      {siTypes.length > 0 && (
-                        <span className="ml-1.5 text-zinc-500">({siTypes.length})</span>
-                      )}
-                      {/* Сколько записей ждут человека — видно и в свёрнутом виде, иначе
-                          пометка «требует проверки» перестала бы попадаться на глаза. */}
-                      {siTypesNeedingReview > 0 && (
-                        <span className="ml-1.5 text-amber-400">⚠ {siTypesNeedingReview}</span>
-                      )}
-                    </h2>
-                    <p className="mt-0.5 text-xs text-zinc-500">
-                      Госреестр средств измерений (ФГИС). Автопоиск требует проверки человеком — раздел 5.3 ТЗ.
-                    </p>
+                  <span className="ml-2 flex shrink-0 items-center gap-1.5">
+                  <AutofillMark status={autofill[m.id]} />
+                  <span
+                    className="font-mono text-[11px] tabular-nums text-zinc-500"
+                    title={
+                      m.market_share_pct != null
+                        ? `Доля рынка ${m.market_share_pct} % — ${m.market_share_source ?? "источник не указан"}`
+                        : "Доля рынка не опубликована"
+                    }
+                  >
+                    {m.market_share_pct != null ? `${m.market_share_pct} %` : "—"}
+                  </span>
                   </span>
                 </button>
-                {isAdmin && selectedId && (
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      onClick={handleSearchSiTypes}
-                      disabled={busy === "si-search"}
-                      className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                    >
-                      {busy === "si-search" ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
-                      Автопоиск в ФГИС
-                    </button>
-                    <button
-                      onClick={handleLinkSiTypes}
-                      disabled={busy === "link-si"}
-                      title="Сопоставить модели каталога с кодами СИ по обозначению типа (по артикулу — он различает заводские исполнения)"
-                      className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                    >
-                      {busy === "link-si" ? <Loader2 size={13} className="animate-spin" /> : <Link2 size={13} />}
-                      Привязать к моделям
-                    </button>
-                    <button
-                      onClick={handleIngestManuals}
-                      disabled={busy === "manuals"}
-                      title="Скачать руководства по эксплуатации моделей и извлечь из них характеристики. За один запуск — до 20 документов; уже разобранные пропускаются"
-                      className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                    >
-                      {busy === "manuals" ? <Loader2 size={13} className="animate-spin" /> : <FileText size={13} />}
-                      Разобрать руководства
-                    </button>
+              ))}
+            </div>
+          </aside>
+
+          <div className="min-w-0 space-y-4">
+            {selected && (
+              <>
+                {/* Производитель: кто это и главные цифры */}
+                <div className="flex flex-wrap items-end justify-between gap-6 rounded-xl border border-white/[0.08] bg-white/[0.03] px-6 py-5">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h2 className="truncate text-2xl font-semibold tracking-tight text-zinc-50">
+                        {selected.brand_name ?? selected.legal_name}
+                      </h2>
+                      {isAdmin && (
+                        <button
+                          onClick={() => openManufacturerForm(selected)}
+                          title="Изменить производителя: сайт, доля рынка"
+                          className="rounded p-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button
+                          onClick={handleAutofillOne}
+                          disabled={busy === "autofill-one" || isAutofillActive(autofill[selected.id])}
+                          title={
+                            autofill[selected.id]
+                              ? autofillTitle(autofill[selected.id])
+                              : "Опросить все источники по этому производителю: ФГИС, сайт, Аршин, руководства"
+                          }
+                          className="flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1 text-[11px] text-zinc-400 hover:bg-white/5 hover:text-zinc-200 disabled:opacity-60"
+                        >
+                          {isAutofillActive(autofill[selected.id]) ? (
+                            <Search size={12} className={autofill[selected.id]?.status === "running" ? "catalog-searching" : ""} />
+                          ) : busy === "autofill-one" ? (
+                            <Loader2 size={12} className="animate-spin" />
+                          ) : (
+                            <RefreshCw size={12} />
+                          )}
+                          {autofill[selected.id]?.status === "running"
+                            ? "Идёт опрос"
+                            : autofill[selected.id]?.status === "queued"
+                              ? "В очереди"
+                              : "Опросить"}
+                        </button>
+                      )}
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
+                      {selected.brand_name && <span>{selected.legal_name}</span>}
+                      {selected.website && (
+                        <a
+                          href={selected.website}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 text-indigo-400 hover:text-indigo-300"
+                        >
+                          {selected.website.replace(/^https?:\/\//, "").replace(/\/$/, "")} <ExternalLink size={11} />
+                        </a>
+                      )}
+                      {selected.market_share_pct != null && (
+                        <span title={selected.market_share_source ?? undefined}>доля рынка {selected.market_share_pct} %</span>
+                      )}
+                    </div>
                   </div>
-                )}
-              </div>
-              <div className="px-5 py-3" hidden={!siTypesOpen}>
-                {siTypes.length === 0 ? (
-                  <p className="text-xs text-zinc-500">Кодов СИ пока нет — запустите автопоиск или загрузите CSV.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {siTypes.map((s) => (
-                      <div key={s.id} className="flex flex-wrap items-center gap-2 text-sm">
-                        <span className="font-mono text-zinc-200">{s.si_code}</span>
-                        <Badge tone="zinc">{SI_SOURCE_LABELS[s.source] ?? s.source}</Badge>
-                        {s.verified_by_user ? (
-                          <Badge tone="green">
-                            <BadgeCheck size={11} /> подтверждён
-                          </Badge>
-                        ) : (
-                          <Badge tone="amber">требует проверки</Badge>
-                        )}
-                        {s.has_description_type_text && <Badge tone="green">описание типа загружено</Badge>}
-                        {s.tested_modifications.length > 0 && (
-                          <span title={s.tested_modifications.join("\n")}>
-                            <Badge tone="zinc">исполнений в реестре: {s.tested_modifications.length}</Badge>
-                          </span>
-                        )}
-                        {s.description_type_changed_at && (
-                          // Новая редакция «Описания типа» — то самое изменение, о котором
-                          // заказчик просил узнавать; дата обязательна, без неё пометка не
-                          // отличима от давно известного.
-                          <span
-                            title={`Редакция ${s.description_type_version ?? "—"}; характеристики разнесены из редакции ${
-                              s.description_type_extracted_version ?? "—"
-                            }`}
-                          >
-                            <Badge
-                              tone={
-                                s.description_type_extracted_version === s.description_type_version ? "zinc" : "amber"
-                              }
-                            >
-                              описание типа изменилось {formatDate(s.description_type_changed_at)}
-                            </Badge>
-                          </span>
-                        )}
-                        {s.review_status === "needs_review" && (
-                          // Причина показывается целиком в подсказке: без неё пометка
-                          // бесполезна — человек всё равно пойдёт искать в ФГИС руками.
-                          // Отдельная формулировка для типов вне области справочника: их у
-                          // производителя бывает половина реестра (теплосчётчики, вода, газ),
-                          // и путать их с настоящей неоднозначностью нельзя.
-                          <span title={s.review_reason ?? undefined}>
-                            <Badge tone="amber">
-                              {s.review_reason?.includes("Справочник продукции ограничен")
-                                ? "⚠ не электросчётчик"
-                                : "⚠ требует ручной проверки"}
-                            </Badge>
-                          </span>
-                        )}
-                        {isAdmin && (
-                          <div className="ml-auto flex gap-2">
-                            {s.description_type_url && (
-                              <button
-                                onClick={() => handleFetchDescriptionType(s)}
-                                disabled={busy === `fetch-${s.id}`}
-                                className="flex items-center gap-1 rounded border border-white/10 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                              >
-                                {busy === `fetch-${s.id}` ? (
-                                  <Loader2 size={11} className="animate-spin" />
-                                ) : (
-                                  <FileDown size={11} />
-                                )}
-                                загрузить описание типа
-                              </button>
-                            )}
-                            <button
-                              onClick={() => handleVerifySiType(s)}
-                              disabled={busy === `si-${s.id}`}
-                              className="rounded border border-white/10 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                            >
-                              {s.verified_by_user ? "снять подтверждение" : "подтвердить"}
-                            </button>
-                          </div>
-                        )}
+                  <div className="flex gap-8">
+                    {(
+                      [
+                        [activeProducts, "моделей в выпуске"],
+                        [siTypes.length, "кодов СИ"],
+                        [siTypesNeedingReview + productsNeedingReview, "ждут проверки"],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <div key={label}>
+                        <div className="text-3xl font-semibold tabular-nums tracking-tight text-zinc-50">
+                          {busy === "manufacturer" ? "…" : value}
+                        </div>
+                        <div className="text-[11px] text-zinc-500">{label}</div>
                       </div>
                     ))}
                   </div>
-                )}
-              </div>
-            </div>
+                </div>
 
-            {/* Модели */}
-            <div className="rounded-xl border border-white/[0.08] bg-white/[0.03]">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] px-5 py-3">
-                <h2 className="text-sm font-semibold text-zinc-100">Модели приборов</h2>
-                {isAdmin && selectedId && (
-                  <div className="flex flex-wrap gap-2">
-                    {selectedSite && (
+                {/* Шаги: как наполняется каталог */}
+                <nav className="grid grid-cols-2 gap-1 rounded-xl border border-white/[0.08] bg-white/[0.02] p-1 sm:grid-cols-5" aria-label="Шаги каталога">
+                  {STEPS.map((s, index) => {
+                    const active = s.key === step;
+                    const count = stepCount(s.key);
+                    return (
                       <button
-                        onClick={() => handleSyncSite(selectedSite.adapter_key)}
-                        disabled={busy === "site-sync"}
-                        title={`Обойти каталог на ${selectedSite.base_url} и заполнить справочник (занимает несколько минут)`}
-                        className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+                        key={s.key}
+                        onClick={() => switchStep(s.key)}
+                        aria-current={active ? "step" : undefined}
+                        className={`flex items-start gap-2.5 rounded-lg px-3 py-2.5 text-left transition-colors ${
+                          active ? "bg-indigo-500/15" : "hover:bg-white/[0.04]"
+                        }`}
                       >
-                        {busy === "site-sync" ? (
-                          <Loader2 size={13} className="animate-spin" />
-                        ) : (
-                          <RefreshCw size={13} />
-                        )}
-                        Обойти сайт производителя
+                        <span
+                          className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold ${
+                            active ? "bg-indigo-500 text-snow" : "border border-white/15 text-zinc-500"
+                          }`}
+                        >
+                          {index + 1}
+                        </span>
+                        <span className="min-w-0">
+                          <span className={`block text-sm font-medium leading-snug ${active ? "text-zinc-50" : "text-zinc-300"}`}>
+                            {s.title}
+                            {count !== null && <span className="ml-1.5 whitespace-nowrap font-normal tabular-nums text-zinc-500">{count}</span>}
+                          </span>
+                          <span className="hidden text-[11px] text-zinc-500 xl:block">{s.caption}</span>
+                        </span>
                       </button>
-                    )}
-                    <input
-                      value={newModelName}
-                      onChange={(e) => setNewModelName(e.target.value)}
-                      placeholder="Название модели"
-                      className="rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none"
-                    />
+                    );
+                  })}
+                </nav>
+
+                <div className="flex items-start gap-2 px-1 text-xs leading-relaxed text-zinc-400">
+                  <span className="whitespace-nowrap text-zinc-600">Шаг {stepIndex + 1} из {STEPS.length}.</span>
+                  <p>{currentStep.about}</p>
+                  {stepIndex < STEPS.length - 1 && (
                     <button
-                      onClick={handleCreateProduct}
-                      disabled={!newModelName.trim() || busy === "create-product"}
-                      className="flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+                      onClick={() => switchStep(STEPS[stepIndex + 1].key)}
+                      className="ml-auto flex shrink-0 items-center gap-0.5 whitespace-nowrap text-indigo-400 hover:text-indigo-300"
                     >
-                      <Plus size={13} />
-                      Добавить
+                      {STEPS[stepIndex + 1].title} <ChevronRight size={13} />
                     </button>
+                  )}
+                </div>
+
+                {/* 1. Коды СИ */}
+                {step === "si" && (
+                  <div className="rounded-xl border border-white/[0.08] bg-white/[0.03]">
+                    {isAdmin && (
+                      <div className="flex flex-wrap gap-2 border-b border-white/[0.08] px-5 py-3">
+                        <ToolbarButton onClick={handleSearchSiTypes} disabled={busy === "si-search"} busy={busy === "si-search"} icon={<Search size={13} />}>
+                          Автопоиск в ФГИС
+                        </ToolbarButton>
+                        <ToolbarButton
+                          onClick={handleLinkSiTypes}
+                          disabled={busy === "link-si"}
+                          busy={busy === "link-si"}
+                          icon={<Link2 size={13} />}
+                          title="Сопоставить модели каталога с кодами СИ по обозначению типа (по артикулу — он различает заводские исполнения)"
+                        >
+                          Привязать к моделям
+                        </ToolbarButton>
+                      </div>
+                    )}
+                    <div className="px-5 py-3">
+                      {siTypes.length === 0 ? (
+                        <p className="text-xs text-zinc-500">Кодов СИ пока нет — запустите автопоиск или загрузите CSV.</p>
+                      ) : (
+                        <SiTypeGroups
+                          siTypes={siTypes}
+                          isAdmin={isAdmin}
+                          busy={busy}
+                          onVerify={handleVerifySiType}
+                          onFetchDescriptionType={handleFetchDescriptionType}
+                        />
+                      )}
+                    </div>
                   </div>
                 )}
-              </div>
-              <div className="px-5 py-3">
-                {products.length === 0 ? (
-                  <p className="text-xs text-zinc-500">Моделей пока нет.</p>
-                ) : (
-                  <ProductMatrix
-                    products={products}
-                    siTypes={siTypes}
-                    selectedProductId={selectedProductId}
-                    onSelect={setSelectedProductId}
+
+                {/* 2. Модели */}
+                {step === "models" && (
+                  <div className="rounded-xl border border-white/[0.08] bg-white/[0.03]">
+                    {isAdmin && (
+                      <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.08] px-5 py-3">
+                        {selectedSite && (
+                          <ToolbarButton
+                            onClick={() => handleSyncSite(selectedSite.adapter_key)}
+                            disabled={busy === "site-sync"}
+                            busy={busy === "site-sync"}
+                            icon={<RefreshCw size={13} />}
+                            title={`Обойти каталог на ${selectedSite.base_url} и заполнить справочник (занимает несколько минут)`}
+                          >
+                            Обойти сайт производителя
+                          </ToolbarButton>
+                        )}
+                        <div className="ml-auto flex gap-2">
+                          <input
+                            value={newModelName}
+                            onChange={(e) => setNewModelName(e.target.value)}
+                            onKeyDown={(e) => e.key === "Enter" && newModelName.trim() && void handleCreateProduct()}
+                            placeholder="Новая модель"
+                            className="rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none"
+                          />
+                          <ToolbarButton
+                            onClick={() => void handleCreateProduct()}
+                            disabled={!newModelName.trim() || busy === "create-product"}
+                            icon={<Plus size={13} />}
+                          >
+                            Добавить
+                          </ToolbarButton>
+                        </div>
+                      </div>
+                    )}
+                    <div className="px-5 py-3">
+                      {products.length === 0 ? (
+                        <p className="text-xs text-zinc-500">
+                          Моделей пока нет — обойдите сайт производителя или заведите исполнения из реестра на шаге «Обучение».
+                        </p>
+                      ) : (
+                        <ProductMatrix products={products} siTypes={siTypes} selectedProductId={openProductId} onSelect={setOpenProductId} />
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* 3. Обучение */}
+                {step === "learning" && (
+                  <RegistryLearningSection
+                    manufacturerId={selectedId}
+                    isAdmin={isAdmin}
+                    onChanged={() => (selectedId ? loadManufacturerData(selectedId) : Promise.resolve())}
                   />
                 )}
-              </div>
-            </div>
 
-            {/* Обучение по Аршину: исполнения и характеристики из реестра, документация через поиск */}
-            <RegistryLearningSection
-              manufacturerId={selectedId}
-              isAdmin={isAdmin}
-              onChanged={() => (selectedId ? loadManufacturerData(selectedId) : Promise.resolve())}
-            />
+                {/* 4. Документы */}
+                {step === "documents" && <CatalogDocumentsSection manufacturerId={selectedId} isAdmin={isAdmin} />}
 
-            {/* Документы по СИ и руководства — актуальные даты и результат еженедельной сверки */}
-            <CatalogDocumentsSection manufacturerId={selectedId} isAdmin={isAdmin} />
-
-            {/* Списки поддерживаемого оборудования ПО верхнего уровня: статус производителя на каждом */}
-            <UpperSoftwareSection manufacturerId={selectedId} isAdmin={isAdmin} />
-
-            {/* Характеристики */}
-            {selectedProduct && (
-              <div className="rounded-xl border border-white/[0.08] bg-white/[0.03]">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] px-5 py-3">
-                  <div>
-                    <h2 className="text-sm font-semibold text-zinc-100">
-                      Характеристики · {selectedProduct.model_name}
-                    </h2>
-                    <p className="mt-0.5 text-xs text-zinc-500">
-                      Приложение C ТЗ. Извлечённое ИИ отмечено как требующее проверки, ручной ввод имеет приоритет.
-                    </p>
-                    {selectedProduct.registry_modification && (
-                      <p className="mt-0.5 font-mono text-[11px] text-sky-400/80" title="Полное условное обозначение исполнения из реестра ФГИС">
-                        {selectedProduct.registry_modification}
-                      </p>
-                    )}
-                    {selectedProduct.review_status === "needs_review" && selectedProduct.review_reason && (
-                      <p className="mt-0.5 text-[11px] text-amber-400/90">⚠ {selectedProduct.review_reason}</p>
-                    )}
-                    <p className="mt-1 flex flex-wrap items-center gap-1 text-[11px]">
-                      <span className="text-zinc-500">ПО верхнего уровня:</span>
-                      {productPlatforms.length === 0 ? (
-                        <span className="text-zinc-600">ни в одном списке поддерживаемого оборудования</span>
-                      ) : (
-                        productPlatforms.map((row) => (
-                          <span
-                            key={row.adapter_key}
-                            title={`${row.device_raw} — ${row.section}`}
-                            className="rounded-full bg-emerald-500/10 px-2 py-0.5 font-medium text-emerald-400"
-                          >
-                            {row.name}
-                          </span>
-                        ))
-                      )}
-                    </p>
-                  </div>
-                  {isAdmin && (
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        onClick={handleExtractFromSiType}
-                        disabled={busy === "extract-fgis"}
-                        title="Извлечь из текста «Описание типа» привязанного кода СИ"
-                        className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                      >
-                        {busy === "extract-fgis" ? (
-                          <Loader2 size={13} className="animate-spin" />
-                        ) : (
-                          <BookOpen size={13} />
-                        )}
-                        Из «Описание типа»
-                      </button>
-                      <button
-                        onClick={handleExtractFromSite}
-                        disabled={busy === "extract-site"}
-                        title="Найти руководство пользователя на сайте производителя (занимает до минуты)"
-                        className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                      >
-                        {busy === "extract-site" ? (
-                          <Loader2 size={13} className="animate-spin" />
-                        ) : (
-                          <Globe size={13} />
-                        )}
-                        С сайта производителя
-                      </button>
-                      <button
-                        onClick={handleFindDocumentation}
-                        disabled={busy === "find-docs"}
-                        title="Найти руководство на официальном сайте через поиск в интернете и разобрать его (до минуты)"
-                        className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                      >
-                        {busy === "find-docs" ? (
-                          <Loader2 size={13} className="animate-spin" />
-                        ) : (
-                          <Search size={13} />
-                        )}
-                        Найти документацию
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                <div className="px-5 py-3">
-                  {characteristics.length === 0 ? (
-                    <p className="text-xs text-zinc-500">
-                      Характеристик пока нет — запустите извлечение или добавьте значения вручную.
-                    </p>
-                  ) : (
-                    <div className="space-y-4">
-                      {groupedCharacteristics.map(([group, items]) => (
-                        <div key={group}>
-                          <h3 className="mb-1.5 text-xs font-medium uppercase tracking-wide text-zinc-500">
-                            {group}
-                          </h3>
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-left text-sm">
-                              <tbody>
-                                {items.map((c) => (
-                                  <tr key={c.id} className="border-t border-white/[0.06]">
-                                    <td className="py-1.5 pr-4 text-zinc-400">{c.field_name}</td>
-                                    <td className="py-1.5 pr-4 text-zinc-100">{c.value}</td>
-                                    <td className="py-1.5 pr-4">
-                                      <span className="text-[11px] text-zinc-500">
-                                        {SOURCE_LABELS[c.source] ?? c.source}
-                                        {c.confidence !== null && ` · ${Math.round(c.confidence * 100)}%`}
-                                      </span>
-                                    </td>
-                                    <td className="py-1.5 pr-4">
-                                      {c.verified_by_user ? (
-                                        <Badge tone="green">
-                                          <BadgeCheck size={11} /> проверено
-                                        </Badge>
-                                      ) : (
-                                        <Badge tone="amber">требует проверки</Badge>
-                                      )}
-                                    </td>
-                                    {isAdmin && (
-                                      <td className="py-1.5 text-right">
-                                        <button
-                                          onClick={() => handleEditValue(c)}
-                                          className="mr-2 text-[11px] text-indigo-400 hover:underline"
-                                        >
-                                          править
-                                        </button>
-                                        <button
-                                          onClick={() => handleVerifyCharacteristic(c)}
-                                          disabled={busy === `ch-${c.id}`}
-                                          className="text-[11px] text-zinc-400 hover:underline disabled:opacity-50"
-                                        >
-                                          {c.verified_by_user ? "снять" : "подтвердить"}
-                                        </button>
-                                      </td>
-                                    )}
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Реестры допуска — под характеристиками: это не свойство прибора, а
-                      его допуск с датами (замечание тестировщика 16.09.2026). */}
-                  <ProductRegistrySection productId={selectedProduct.id} isAdmin={isAdmin} />
-
-                  {Object.keys(selectedProduct.extra_specifications ?? {}).length > 0 && (
-                    // Характеристики, снятые с сайта производителя, которым не нашлось поля
-                    // в Приложении C. Показываются отдельно и как есть: это данные, а не
-                    // мусор, — просто справочник до них ещё не дорос, и человек, увидев их
-                    // здесь, может завести значение в нужное поле руками.
-                    <div className="mt-4 rounded-lg border border-white/[0.06] bg-black/20 px-4 py-3">
-                      <h3 className="mb-1.5 text-xs font-medium uppercase tracking-wide text-zinc-500">
-                        Вне справочника Приложения C
-                      </h3>
-                      <p className="mb-2 text-[11px] text-zinc-600">
-                        Извлечены из документации, но подходящего поля в справочнике нет.
-                        Значение можно перенести в нужное поле вручную.
-                      </p>
-                      <table className="w-full text-left text-sm">
-                        <tbody>
-                          {Object.entries(selectedProduct.extra_specifications).map(([key, value]) => (
-                            <tr key={key} className="border-t border-white/[0.06]">
-                              <td className="py-1.5 pr-4 text-zinc-400">{key}</td>
-                              <td className="py-1.5 text-zinc-100">{value}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              </div>
+                {/* 5. ПО верхнего уровня */}
+                {step === "software" && <UpperSoftwareSection manufacturerId={selectedId} isAdmin={isAdmin} />}
+              </>
             )}
           </div>
         </div>
       </div>
+
+      {openProduct && (
+        <ProductDrawer product={openProduct} siTypes={siTypes} isAdmin={isAdmin} onClose={closeProduct} />
+      )}
     </AppShell>
   );
 }

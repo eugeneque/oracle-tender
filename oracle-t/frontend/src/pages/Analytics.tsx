@@ -1,3 +1,5 @@
+import NumberFlow from "@number-flow/react";
+import { motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   BarChart3,
@@ -18,6 +20,7 @@ import { RankingList } from "../components/analytics/RankingList";
 import { SystemWidgets } from "../components/analytics/SystemWidgets";
 import { TrendChart } from "../components/analytics/TrendChart";
 import { AppShell } from "../components/AppShell";
+import { staggerContainer, staggerItem } from "../utils/motion";
 import { PageHeader } from "../components/PageHeader";
 import { percentTextClass, tenderTypeLabel } from "../utils/format";
 
@@ -53,6 +56,17 @@ function formatCount(value: number): string {
   return new Intl.NumberFormat("ru-RU").format(value);
 }
 
+/** Процент с одним знаком после запятой; цифры «перекатываются» при появлении и смене. */
+function Percent({ value }: { value: number }) {
+  return (
+    <NumberFlow
+      value={value / 100}
+      locales="ru-RU"
+      format={{ style: "percent", minimumFractionDigits: 1, maximumFractionDigits: 1 }}
+    />
+  );
+}
+
 function SummaryCard({
   icon,
   label,
@@ -62,19 +76,23 @@ function SummaryCard({
 }: {
   icon: React.ReactNode;
   label: string;
-  value: string;
+  value: React.ReactNode;
   hint?: string;
   valueClass?: string;
 }) {
   return (
-    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-5">
+    <motion.div
+      variants={staggerItem}
+      whileHover={{ y: -2 }}
+      className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-5 transition-colors hover:border-white/[0.14]"
+    >
       <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
         {icon}
       </div>
       <div className={`text-2xl font-semibold ${valueClass ?? "text-white"}`}>{value}</div>
       <div className="mt-0.5 text-sm text-zinc-500">{label}</div>
       {hint && <div className="mt-2 text-xs text-zinc-600">{hint}</div>}
-    </div>
+    </motion.div>
   );
 }
 
@@ -232,7 +250,7 @@ export function AnalyticsPage() {
     <AppShell>
       <div className="mx-auto w-full max-w-[1400px] px-8 py-8">
         <PageHeader
-          breadcrumb={["Sova Scanner", "Аналитика"]}
+          breadcrumb={["Sova", "Аналитика"]}
           title="Аналитика"
           icon={
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
@@ -285,11 +303,16 @@ export function AnalyticsPage() {
           overview &&
           summary && (
             <div className="space-y-6">
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              <motion.div
+                variants={staggerContainer}
+                initial="initial"
+                animate="animate"
+                className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4"
+              >
                 <SummaryCard
                   icon={<Layers size={18} />}
                   label="Тендеров в базе"
-                  value={formatCount(summary.total)}
+                  value={<NumberFlow value={summary.total} locales="ru-RU" />}
                   hint={`проанализировано ИИ: ${formatCount(summary.analysed)}`}
                 />
                 <SummaryCard
@@ -301,16 +324,14 @@ export function AnalyticsPage() {
                 <SummaryCard
                   icon={<CalendarClock size={18} />}
                   label="Истекают в ближайшие 5 дней"
-                  value={formatCount(summary.deadline_soon)}
+                  value={<NumberFlow value={summary.deadline_soon} locales="ru-RU" />}
                   hint="приём заявок ещё идёт"
                   valueClass={summary.deadline_soon > 0 ? "text-amber-400" : "text-white"}
                 />
                 <SummaryCard
                   icon={<Sparkles size={18} />}
                   label="Средняя AI-оценка по профилю"
-                  value={
-                    averageAiScore === null ? "нет расчёта" : `${averageAiScore.toFixed(1)} %`
-                  }
+                  value={averageAiScore === null ? "нет расчёта" : <Percent value={averageAiScore} />}
                   hint="готовность компании участвовать: история, задача, компетенции"
                   valueClass={
                     averageAiScore === null ? "text-zinc-500" : percentTextClass(averageAiScore)
@@ -319,13 +340,13 @@ export function AnalyticsPage() {
                 <SummaryCard
                   icon={<Trophy size={18} />}
                   label="Средний % соответствия МИРТЕК"
-                  value={averageWin === null ? "нет расчёта" : `${averageWin.toFixed(1)} %`}
+                  value={averageWin === null ? "нет расчёта" : <Percent value={averageWin} />}
                   hint="взвешенная оценка характеристик приборов, без учёта цены"
                   valueClass={
                     averageWin === null ? "text-zinc-500" : percentTextClass(averageWin)
                   }
                 />
-              </div>
+              </motion.div>
 
               <TrendChart points={overview.monthly} />
 

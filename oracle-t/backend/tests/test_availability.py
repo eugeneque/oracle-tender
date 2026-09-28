@@ -1,10 +1,18 @@
 import uuid
 
 import httpx
+import pytest
 
 from app.db.session import SessionLocal
 from app.models.source import Source
 from app.services.availability_service import ping_source
+
+
+@pytest.fixture(autouse=True)
+def _no_ping_retry_pause(monkeypatch):
+    from app.services import availability_service
+
+    monkeypatch.setattr(availability_service, "PING_RETRY_PAUSE_SECONDS", 0)
 
 
 class _FakeStreamResponse:
@@ -99,5 +107,34 @@ def test_ping_source_logs_only_on_state_change(monkeypatch):
             .where(Log.action == f"ping_source:{source.key}")
         )
         assert count == 1
+    finally:
+        db.close()
+
+
+def test_ping_retries_before_marking_unavailable_and_treats_429_as_alive(monkeypatch):
+    """Разовый таймаут — не недоступность (Госплан «мигал» 27 раз за два дня), а 429 — сайт
+    жив, просто просит реже (waviot.ru на ботовый User-Agent)."""
+
+    from app.services import availability_service
+
+    monkeypatch.setattr(availability_service, "PING_RETRY_PAUSE_SECONDS", 0)
+    answers = iter([httpx.ConnectTimeout("t"), 200])
+
+    def _once(source):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(availability_service, "_ping_once", _once)
+    db = SessionLocal()
+    try:
+        source = _make_source(db)
+        availability_service.ping_source(db, source)
+        assert source.availability_status == "available"
+
+        monkeypatch.setattr(availability_service, "_ping_once", lambda source: 429)
+        availability_service.ping_source(db, source)
+        assert source.availability_status == "available"
     finally:
         db.close()

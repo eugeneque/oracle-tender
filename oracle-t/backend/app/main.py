@@ -12,17 +12,20 @@ from app.core.jobs import recover_interrupted_jobs, shutdown as shutdown_jobs
 from app.core.logging import configure_logging
 from app.core.scheduler import start_scheduler, stop_scheduler
 from app.db.session import SessionLocal
+from app.core import dns_fallback
 from app.middleware.ai_context import AiContextMiddleware
 from app.middleware.audit import AuditLogMiddleware
 # Импорт регистрирует обработчики фоновых задач в очереди (см. app/core/jobs.py).
 from app.services import job_runner  # noqa: F401
 from app.services import (
+    catalog_autofill,
     catalog_learning,
     catalog_queue_service,
     catalog_site_sync,
     document_registry_service,
     fgis_catalog_sync,
     relevance_service,
+    startup_refresh,
     upper_software_service,
 )
 from app.services.notification_service import bootstrap_from_env as bootstrap_notifications
@@ -46,6 +49,7 @@ def _bootstrap_relevance() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    dns_fallback.install(settings.dns_fallback_hosts)
     db = SessionLocal()
     try:
         admin = bootstrap_admin(
@@ -72,15 +76,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     document_registry_service.register()
     catalog_learning.register()
     upper_software_service.register()
+    catalog_autofill.register()
     catalog_queue_service.recover_interrupted_tasks()
+    catalog_autofill.resume_pending()
     start_scheduler()
+    startup_refresh.start()
     yield
     stop_scheduler()
     shutdown_jobs()
     catalog_queue_service.shutdown()
 
 
-app = FastAPI(title="Sova Scanner API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Sova API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

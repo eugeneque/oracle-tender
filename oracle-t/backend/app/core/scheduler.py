@@ -226,9 +226,41 @@ def _run_catalog_queue_job() -> None:
     Штатно запрос по событию выполняется сразу в фоновом пуле; сюда попадает то, что не
     успело выполниться до перезапуска сервера или сорвалось на недоступном источнике."""
 
-    from app.services import catalog_queue_service
+    from app.services import catalog_autofill, catalog_queue_service
 
-    catalog_queue_service.process_queue_in_background()
+    # Опрос производителя целиком — десятки минут; он идёт только в потоке очереди, строго
+    # по одному. Взять его здесь значило бы опрашивать двух производителей параллельно.
+    catalog_queue_service.process_pending(exclude_keys=catalog_autofill.LONG_RUNNING_KEYS)
+
+
+def _run_catalog_autofill_job() -> None:
+    """Суточное автозаполнение каталога: все производители по очереди, затем списки ПО
+    верхнего уровня. Выполняется в потоке очереди справочника, планировщик только ставит."""
+
+    from app.services import catalog_autofill
+
+    try:
+        queued = catalog_autofill.run_all_in_background()
+        logger.info(f"Автозаполнение каталога: в очереди производителей {queued}")
+    except Exception as exc:  # noqa: BLE001 - сбой постановки не должен ронять планировщик
+        logger.warning(f"Автозаполнение каталога не запустилось: {exc}")
+
+
+def _run_gap_repair_job() -> None:
+    """Достройка матриц соответствия у открытых закупок с заключением ИИ (28.09.2026):
+    оборванный разбор или переанализ без пересчёта не должен оставлять в карточке
+    «не проверен по ТЗ» до того, как кто-то заметит."""
+
+    from app.services.job_runner import enqueue_gap_repairs
+
+    db = SessionLocal()
+    try:
+        queued = enqueue_gap_repairs(db)
+        logger.info(f"Достройка матриц соответствия: в очереди закупок {queued}")
+    except Exception as exc:  # noqa: BLE001 - сбой обхода не должен ронять планировщик
+        logger.warning(f"Достройка матриц соответствия не запустилась: {exc}")
+    finally:
+        db.close()
 
 
 def _parse_hh_mm(value: str) -> tuple[int, int]:
@@ -282,7 +314,18 @@ def start_scheduler() -> BackgroundScheduler | None:
             id="fgis_revalidation",
             replace_existing=True,
         )
-    if settings.catalog_sites_sync_enabled:
+    # Суточное автозаполнение покрывает обход сайтов, обучение и списки ПО — при нём
+    # еженедельные запуски тех же шагов не ставятся.
+    autofill = settings.catalog_autofill_enabled
+    if autofill:
+        hour, minute = _parse_hh_mm(settings.catalog_autofill_time)
+        scheduler.add_job(
+            _run_catalog_autofill_job,
+            CronTrigger(hour=hour, minute=minute),
+            id="catalog_autofill",
+            replace_existing=True,
+        )
+    if settings.catalog_sites_sync_enabled and not autofill:
         hour, minute = _parse_hh_mm(settings.catalog_sites_sync_time)
         scheduler.add_job(
             _run_catalog_sites_job,
@@ -300,7 +343,7 @@ def start_scheduler() -> BackgroundScheduler | None:
             id="document_registry_check",
             replace_existing=True,
         )
-    if settings.catalog_learning_enabled:
+    if settings.catalog_learning_enabled and not autofill:
         hour, minute = _parse_hh_mm(settings.catalog_learning_time)
         scheduler.add_job(
             _run_catalog_learning_job,
@@ -308,7 +351,7 @@ def start_scheduler() -> BackgroundScheduler | None:
             id="catalog_learning",
             replace_existing=True,
         )
-    if settings.upper_software_sync_enabled:
+    if settings.upper_software_sync_enabled and not autofill:
         hour, minute = _parse_hh_mm(settings.upper_software_sync_time)
         scheduler.add_job(
             _run_upper_software_job,
@@ -316,6 +359,13 @@ def start_scheduler() -> BackgroundScheduler | None:
             id="upper_software_sync",
             replace_existing=True,
         )
+    # После ночного автозаполнения каталога (01:00) и до утреннего опроса.
+    scheduler.add_job(
+        _run_gap_repair_job,
+        CronTrigger(hour=5, minute=0),
+        id="tender_gap_repair",
+        replace_existing=True,
+    )
     # Подбор «зависших» задач очереди. Раз в четверть часа, а не раз в минуту: штатно
     # задачи выполняются сразу в фоне, и этот проход — страховка, а не основной путь.
     scheduler.add_job(
@@ -344,7 +394,8 @@ def start_scheduler() -> BackgroundScheduler | None:
         f"{settings.fgis_revalidation_time if settings.fgis_revalidation_enabled else 'отключена'}, "
         f"каталоги сайтов производителей {settings.catalog_sites_sync_time if settings.catalog_sites_sync_enabled else 'отключены'}, "
         f"сверка документов {settings.document_registry_check_time if settings.document_registry_check_enabled else 'отключена'}, "
-        f"списки ПО верхнего уровня {settings.upper_software_sync_time if settings.upper_software_sync_enabled else 'отключены'}"
+        f"списки ПО верхнего уровня {settings.upper_software_sync_time if settings.upper_software_sync_enabled else 'отключены'}, "
+        f"автозаполнение каталога {settings.catalog_autofill_time + ' ежедневно' if autofill else 'отключено'}"
     )
     _scheduler = scheduler
     return scheduler

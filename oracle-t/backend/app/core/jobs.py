@@ -15,13 +15,15 @@ from __future__ import annotations
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Callable
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.job import BackgroundJob, JobKind, JobStatus
 from app.models.log import LogLevel
@@ -57,6 +59,60 @@ _HANDLERS: dict[str, Callable[[Session, Tender, User | None], str]] = {}
 # Обработчики задач без тендера (опрос площадок): получают саму задачу — входные данные
 # лежат в её `payload`, и туда же по ходу пишется прогресс.
 _JOB_HANDLERS: dict[str, Callable[[Session, BackgroundJob, User | None], str]] = {}
+
+
+# Задача, которую выполняет текущий поток: (id, момент постановки в очередь). Обработчики
+# уровня тендера получают только тендер, а сообщить о ходе («матрица: 6 из 17
+# производителей») и узнать, что уже посчитано до перезапуска сервера, им нужно (28.09.2026:
+# карточка 10 минут показывала «обычно около минуты» без единого признака жизни).
+_current_job: ContextVar[tuple[uuid.UUID, datetime] | None] = ContextVar(
+    "oraclet_current_job", default=None
+)
+
+
+def current_job_created_at() -> datetime | None:
+    """Когда текущая задача встала в очередь. Всё, что посчитано позже, посчитано ею же —
+    до перезапуска сервера, — и пересчитывать это после продолжения незачем."""
+
+    current = _current_job.get()
+    return current[1] if current else None
+
+
+def report_progress(message: str) -> None:
+    """Пишет ход текущей задачи в `message` — карточка показывает его вместо безымянного
+    индикатора. Отдельной сессией и отдельной транзакцией: у обработчика может быть открыта
+    своя, и коммитить её ради строки прогресса нельзя. Вне задачи (HTTP-запрос, тест) ничего
+    не делает; сбой записи работу не прерывает.
+
+    Прогресс заодно обнуляет счётчик перезапусков: задача, продвинувшаяся после прошлого
+    перезапуска, не «роняет сервер собой», и после третьего `--reload` за разбор её нельзя
+    помечать ошибкой (см. `recover_interrupted_jobs`)."""
+
+    current = _current_job.get()
+    if current is None:
+        return
+    db = SessionLocal()
+    try:
+        # Строку задачи может держать транзакция обработчика — ждать её ради прогресса
+        # нельзя, одно пропущенное обновление не страшно.
+        db.execute(text("SET LOCAL lock_timeout = '2s'"))
+        db.execute(
+            update(BackgroundJob)
+            .where(
+                BackgroundJob.id == current[0],
+                BackgroundJob.status == JobStatus.RUNNING.value,
+            )
+            .values(
+                message=message[:500],
+                payload=BackgroundJob.payload.op("-")("restarts"),
+            )
+        )
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - прогресс не должен ронять задачу
+        db.rollback()
+        logger.debug(f"Прогресс задачи {current[0]} не записан: {exc}")
+    finally:
+        db.close()
 
 
 def register_handler(kind: JobKind, handler: Callable[[Session, Tender, User | None], str]) -> None:
@@ -182,6 +238,8 @@ def run_job(job_id: uuid.UUID) -> None:
             return
 
         actor = db.get(User, job.created_by_id) if job.created_by_id else None
+        # Поток пула переиспользуется: контекст выставляется на каждую задачу заново.
+        _current_job.set((job.id, job.created_at))
 
         # Задача без тендера — одна попытка: опрос площадок сам изолирует ошибку каждой
         # площадки, а повторять 25-минутный проход целиком из-за сбоя было бы хуже, чем
@@ -235,6 +293,7 @@ def run_job(job_id: uuid.UUID) -> None:
             _finish(db, job, JobStatus.SUCCESS, message, tender=tender, actor=actor)
             return
     finally:
+        _current_job.set(None)
         db.close()
 
 
@@ -273,14 +332,28 @@ def _finish(
         )
 
 
-def recover_interrupted_jobs() -> None:
-    """При старте приложения помечает задачи, оборванные предыдущим запуском.
+# Сколько раз задача переживает перезапуск сервера. Больше — значит, она сама его и
+# вызывает (падение процесса на конкретном тендере), и крутить её по кругу нельзя.
+MAX_RESTARTS = 2
+
+
+def recover_interrupted_jobs(*, resume: bool | None = None) -> None:
+    """При старте приложения продолжает задачи, оборванные предыдущим запуском.
 
     Пул живёт в памяти процесса: после перезапуска сервера «выполняется» в базе — это
-    задача, которую уже никто не считает. Оставить её висеть значило бы вечный «идёт
-    анализ…» в карточке тендера."""
+    задача, которую уже никто не считает. Раньше она помечалась ошибкой «запустите заново»,
+    и разбор оставался с дырой (28.09.2026: «Полный разбор» оборвался на матрице, а
+    «Обновить разбор» её не строил — заключение вышло без проверки по ТЗ). Теперь задача
+    встаёт в очередь снова; «Полный разбор» продолжает с того шага, на котором оборвался
+    (итоги пройденных шагов — в `payload`). Ошибкой задача помечается, только если пережила
+    уже `MAX_RESTARTS` перезапусков (или продолжение выключено настройкой
+    `jobs_resume_interrupted`)."""
 
+    if resume is None:
+        resume = get_settings().jobs_resume_interrupted
     db = SessionLocal()
+    resumed: list[BackgroundJob] = []
+    ids: list[tuple[uuid.UUID, str]] = []
     try:
         stale = (
             db.execute(
@@ -291,10 +364,23 @@ def recover_interrupted_jobs() -> None:
             .scalars()
             .all()
         )
+        failed = 0
         for job in stale:
-            job.status = JobStatus.ERROR.value
-            job.finished_at = datetime.now(timezone.utc)
-            job.message = "Прервана перезапуском сервера — запустите заново"
+            restarts = int((job.payload or {}).get("restarts") or 0)
+            known = job.kind in _HANDLERS or job.kind in _JOB_HANDLERS
+            if not resume or not known or restarts >= MAX_RESTARTS:
+                job.status = JobStatus.ERROR.value
+                job.finished_at = datetime.now(timezone.utc)
+                job.message = (
+                    f"Прервана перезапуском сервера {restarts + 1} раз подряд — запустите заново"
+                )
+                failed += 1
+                continue
+            job.status = JobStatus.QUEUED.value
+            job.started_at = None
+            job.message = "Продолжается после перезапуска сервера…"
+            job.payload = {**(job.payload or {}), "restarts": restarts + 1}
+            resumed.append(job)
         if stale:
             log_action(
                 db,
@@ -302,12 +388,21 @@ def recover_interrupted_jobs() -> None:
                 action="recover_interrupted",
                 result="success",
                 level=LogLevel.WARNING,
-                details=f"Помечено прерванными задач: {len(stale)}",
+                details=f"Продолжено задач: {len(resumed)}, помечено прерванными: {failed}",
             )
             db.commit()
-            logger.warning(f"Помечено прерванными фоновых задач: {len(stale)}")
+            logger.warning(
+                f"Оборванные фоновые задачи: продолжено {len(resumed)}, прервано {failed}"
+            )
+        ids = [(job.id, job.kind) for job in resumed]
     finally:
         db.close()
+
+    for job_id, kind in ids:
+        if kind in _JOB_HANDLERS and kind != JobKind.TENDER_FULL_REVIEW.value:
+            _submit_poll(job_id)
+        else:
+            _executor.submit(run_job, job_id)
 
 
 def shutdown() -> None:

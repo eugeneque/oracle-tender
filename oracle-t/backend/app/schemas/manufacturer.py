@@ -65,11 +65,17 @@ class SiTypeOut(BaseModel):
     matched_by: str | None = None
     source: str
     verified_by_user: bool
-    # «Требует ручной проверки»: реестр вернул несколько кандидатов, кандидат оказался не
-    # того вида измерений, либо истекает свидетельство об утверждении типа. Отличается от
-    # `verified_by_user` («человек подтвердил») — здесь «системе не хватило оснований».
+    # «Требует ручной проверки»: реестр вернул несколько кандидатов либо кандидата не того
+    # вида измерений. Отличается от `verified_by_user` («человек подтвердил») — здесь
+    # «системе не хватило оснований».
     review_status: str = "ok"
     review_reason: str | None = None
+    # Вычисляются при каждом запросе (`app/services/si_type_state.py`), по ним интерфейс
+    # раскладывает коды на группы: электросчётчик ли это и действует ли свидетельство
+    # (`valid` / `expiring` / `expired` / `inactive` / `unknown`, дни — до окончания срока).
+    is_electricity_meter: bool = True
+    approval_state: str = "unknown"
+    approval_days_left: int | None = None
     last_checked_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -155,6 +161,39 @@ class CharacteristicOut(BaseModel):
     updated_at: datetime
 
 
+class MeterParameterFieldOut(BaseModel):
+    """Поле справочника, где у модели лежит ответ на параметр; `characteristic` пуст, если
+    значение ещё не заведено."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    group_name: str
+    field_name: str
+    characteristic: CharacteristicOut | None
+
+
+class MeterParameterFactOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    text: str
+    tone: str
+    url: str | None
+
+
+class MeterParameterOut(BaseModel):
+    """Параметр файла «Параметры для ПУ» в карточке модели (28.09.2026)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    no: int
+    name: str
+    note: str
+    rule: str
+    filled: bool
+    fields: list[MeterParameterFieldOut]
+    facts: list[MeterParameterFactOut]
+
+
 class CharacteristicUpsert(BaseModel):
     """Ручной ввод/правка значения (раздел 5.3 ТЗ, источник 3 — «ручной ввод/импорт через
     админ-панель для любых полей, включая корректировку автоматически извлечённых данных»).
@@ -213,6 +252,23 @@ class CatalogTaskOut(BaseModel):
     # Рассмотренные кандидаты реестра при неоднозначности — чтобы человек видел, из чего
     # выбирала система, не повторяя поиск руками.
     details: dict = {}
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class CatalogAutofillStatusOut(BaseModel):
+    """Последний сквозной опрос производителя — для значка в списке каталога."""
+
+    manufacturer_id: uuid.UUID
+    status: str
+    current_step: str | None
+    failed_steps: list[str] = []
+    # Опрос прошёл, а моделей у производителя так и нет — не «готово».
+    empty: bool = False
+    # Быстрый проход закончен, дополнение характеристик (обучение) ещё впереди или идёт.
+    enriching: bool = False
+    message: str | None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None

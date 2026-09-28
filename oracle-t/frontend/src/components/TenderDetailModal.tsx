@@ -1,4 +1,7 @@
+import { motion } from "motion/react";
+
 import type { Tender } from "../api/types";
+import { dialogVariants, scrimVariants } from "../utils/motion";
 import { TenderDetailPanel } from "./TenderDetailPanel";
 
 /**
@@ -18,16 +21,20 @@ export function TenderDetailModal({
   onChanged?: (tender: Tender) => void;
 }) {
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 py-8"
+    <motion.div
+      variants={scrimVariants}
+      initial="initial"
+      animate="animate"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/60 px-4 py-8"
       onClick={onClose}
     >
-      <div
+      <motion.div
+        variants={dialogVariants}
         className="flex max-h-full w-full max-w-7xl flex-col overflow-hidden rounded-xl border border-white/10 bg-zinc-900 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <TenderDetailPanel tender={tender} onClose={onClose} onChanged={onChanged} />
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 }

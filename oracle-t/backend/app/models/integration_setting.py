@@ -49,12 +49,14 @@ class AiProviderSettings(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    # "yandex" | "claude" — см. AiProvider в app/services/ai_provider_service.py.
+    # "yandex" | "claude" | "deepseek" — см. PROVIDER_LABELS в app/services/ai_provider_service.py.
     active_provider: Mapped[str] = mapped_column(String(20), nullable=False, default="yandex")
     routerai_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Путь до модели в терминах RouterAI («anthropic/claude-opus-5»). Настраивается, чтобы
     # смена поколения Claude не требовала правки кода — как и `DEFAULT_MODEL` у Yandex.
     routerai_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # То же для DeepSeek (28.09.2026): ключ и адрес шлюза общие с Claude, модель своя.
+    deepseek_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     routerai_base_url: Mapped[str | None] = mapped_column(String(200), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False

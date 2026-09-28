@@ -41,8 +41,12 @@ def analytics_filters(  # noqa: PLR0913 - по параметру на филь�
     tender_status: list[str] | None = Query(default=None),
     relevance_status: list[str] | None = Query(default=None),
     okpd2: str | None = Query(default=None, max_length=20),
+    # Аналитика по умолчанию — по стандартному каналу: канал Госплана почти целиком
+    # повторяет ЕИС, и без этого условия каждая закупка считалась бы дважды.
+    feed: str = Query(default="standard", pattern="^(standard|gosplan)$"),
 ) -> TenderFilters:
     return TenderFilters(
+        feed=feed,
         publish_date_from=publish_date_from,
         publish_date_to=publish_date_to,
         source_keys=source or [],

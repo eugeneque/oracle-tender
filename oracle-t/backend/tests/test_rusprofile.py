@@ -394,3 +394,73 @@ def test_settings_api_hides_password(client, admin_token):
 
 def test_settings_api_admin_only(client, admin_token):
     assert client.get("/integrations/rusprofile").status_code == 401
+
+
+# --- анонимная актуализация при старте (28.09.2026) ---------------------------------------------
+
+
+def test_anonymous_sync_only_adds_and_keeps_paid_data(db_session, mirtek_profile, monkeypatch):
+    """Без учётной записи синхронизация идёт по открытой части карточки и ничего не удаляет:
+    лицензии и проекты, полученные раньше под подпиской, остаются, досье дополняется."""
+
+    settings = rusprofile_service._get_or_create(db_session)
+    settings.login = None
+    settings.password = None
+    mirtek_profile.licenses = [
+        {"name": "Старая лицензия", "number": "OLD-1", "source": "rusprofile"},
+        {"name": "Ручная", "number": None, "source": "manual"},
+    ]
+    mirtek_profile.rusprofile_data = {"revenue": "1 млрд", "headcount": 500}
+    db_session.commit()
+
+    dossier = rusprofile.parse_dossier(
+        _fixture("card.html"), card_id="6723224", source_url="https://www.rusprofile.ru/id/6723224"
+    )
+    dossier.headcount = None  # скрыто подпиской
+    calls = {}
+
+    def fake(_db, _profile, *, anonymous=False):
+        calls["anonymous"] = anonymous
+        return rusprofile_service._Fetched(
+            card_id="6723224",
+            dossier=dossier,
+            purchases=rusprofile.parse_purchases(_fixture("purchases.html"), our_card_id="6723224"),
+            purchases_total=None,
+            licenses=rusprofile.parse_licenses(_fixture("licenses.html")),
+        )
+
+    monkeypatch.setattr(rusprofile_service, "_fetch", fake)
+    result = rusprofile_service.sync_profile(
+        db_session, mirtek_profile, actor=None, allow_anonymous=True
+    )
+
+    assert calls["anonymous"] is True
+    numbers = {item.get("number") for item in mirtek_profile.licenses}
+    assert "OLD-1" in numbers  # прежняя запись сайта не удалена
+    assert any(item.get("source") == "manual" for item in mirtek_profile.licenses)
+    assert mirtek_profile.rusprofile_data["revenue"] == "1 млрд"
+    assert mirtek_profile.rusprofile_data["headcount"] == 500
+    assert mirtek_profile.rusprofile_data["card_id"] == "6723224"
+    assert "Без учётной записи" in result.message
+
+
+def test_manual_sync_still_requires_credentials_without_anonymous_flag(
+    db_session, mirtek_profile, admin_user
+):
+    settings = rusprofile_service._get_or_create(db_session)
+    settings.login = None
+    settings.password = None
+    db_session.commit()
+    with pytest.raises(rusprofile_service.RusprofileNotConfiguredError):
+        rusprofile_service.sync_profile(db_session, mirtek_profile, actor=admin_user)
+
+
+def test_anonymous_session_does_not_log_in():
+    session = rusprofile.RusprofileSession(None, None, anonymous=True)
+    try:
+        session.login = lambda: (_ for _ in ()).throw(AssertionError("вход без учётной записи"))
+        session._ensure_login()
+    finally:
+        session.close()
+    with pytest.raises(rusprofile.RusprofileAuthError):
+        rusprofile.RusprofileSession(None, None)
