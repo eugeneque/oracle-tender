@@ -26,9 +26,12 @@ from app.models.source import Source
 from app.models.tender import RELEVANCE_TO_STAGE, Tender, TenderStage
 from app.services import ai_profile_service, company_profile_service
 from app.services.ai_profile_service import (
+    CompetenciesAnswer,
+    CriterionAnswer,
     DecisionAnswer,
-    DimensionAnswer,
+    ParticipantRequirementAnswer,
     ResumeAnswer,
+    TaskAnswer,
     WeakPointAnswer,
 )
 from app.services.company_profile_service import CompanyProfileError
@@ -99,18 +102,117 @@ def test_evidence_drops_references_to_objects_that_were_not_in_the_prompt(
     first = _requirement(db_session, tender, "Класс точности не хуже 0,5S")
     second = _requirement(db_session, tender, "Поддержка протокола обмена ИВК «Пирамида»")
 
-    answer = DimensionAnswer(
-        score=70,
-        comment="—",
-        requirement_numbers=[1, 2, 99],
-        profile_numbers=[1, 42],
-    )
-    evidence = ai_profile_service._evidence(answer, [first, second], filled_profile)
+    evidence = ai_profile_service._evidence([1, 2, 99], [1, 42], [first, second], filled_profile)
 
     refs = {item["ref_id"] for item in evidence}
     assert str(first.id) in refs and str(second.id) in refs
     assert "years_of_experience" in refs  # первая строка профиля — стаж
     assert len(evidence) == 3  # номера 99 и 42 отброшены
+
+
+def _task_answer(statuses: dict[str, str], profile_numbers=(1,), requirement_numbers=(1,)):
+    return TaskAnswer(
+        criteria=[
+            CriterionAnswer(
+                code=code,
+                status=status,
+                comment=f"{code}: {status}",
+                requirement_numbers=list(requirement_numbers),
+                profile_numbers=list(profile_numbers),
+            )
+            for code, status in statuses.items()
+        ],
+        comment="Вывод по задаче.",
+    )
+
+
+ALL_MET = {"subject": "met", "product_fit": "met", "experience": "met", "scope_purity": "met"}
+
+
+def _participant(text, status, *, mandatory=True, profile_numbers=(1,), number=1):
+    return ParticipantRequirementAnswer(
+        text=text,
+        requirement_number=number,
+        mandatory=mandatory,
+        status=status,
+        comment="—",
+        profile_numbers=list(profile_numbers),
+    )
+
+
+def test_task_score_is_weighted_share_of_criteria(filled_profile):
+    """Число «Задачи» считает код по весам 40/30/20/10 (25.09.2026), а не модель."""
+
+    score, checklist, _ = ai_profile_service._score_task(
+        _task_answer(ALL_MET), [], filled_profile
+    )
+    assert score == Decimal("100")
+    assert [item["weight"] for item in checklist] == [40, 30, 20, 10]
+
+    score, _, _ = ai_profile_service._score_task(
+        _task_answer({**ALL_MET, "product_fit": "partial", "scope_purity": "not_met"}),
+        [],
+        filled_profile,
+    )
+    assert score == Decimal("75")  # 40 + 15 + 20 + 0
+
+    # «Не применимо» выпадает из знаменателя: 40 + 20 + 10 из 70.
+    score, _, _ = ai_profile_service._score_task(
+        _task_answer({**ALL_MET, "product_fit": "not_applicable"}), [], filled_profile
+    )
+    assert score == Decimal("100")
+
+
+def test_task_rules_on_top_of_model_answer(filled_profile):
+    # Непрофильный предмет обнуляет измерение, как бы ни ответили остальные критерии.
+    score, _, _ = ai_profile_service._score_task(
+        _task_answer({**ALL_MET, "subject": "not_met"}), [], filled_profile
+    )
+    assert score == Decimal("0")
+
+    # Опыт «выполнено» без ссылки на профиль — «частично»; пропущенный критерий — тоже.
+    answer = _task_answer(ALL_MET, profile_numbers=())
+    answer.criteria = [item for item in answer.criteria if item.code != "scope_purity"]
+    score, checklist, _ = ai_profile_service._score_task(answer, [], filled_profile)
+    statuses = {item["title"]: item["status"] for item in checklist}
+    assert list(statuses.values()) == ["met", "met", "partial", "partial"]
+    assert score == Decimal("85")  # 40 + 30 + 10 + 5
+
+    # Неизвестный статус — «частично», а не ошибка.
+    score, _, _ = ai_profile_service._score_task(
+        _task_answer({**ALL_MET, "product_fit": "maybe"}), [], filled_profile
+    )
+    assert score == Decimal("85")
+
+
+def test_competencies_without_participant_requirements_are_not_applicable(filled_profile):
+    """Нет требований к участнику — «не применимо», а не 0 и не 50 (25.09.2026)."""
+
+    score, checklist, _ = ai_profile_service._score_competencies(
+        CompetenciesAnswer(requirements=[], comment="—"), [], filled_profile
+    )
+    assert score is None and checklist == []
+
+
+def test_competencies_score_by_participant_requirements(filled_profile):
+    answer = CompetenciesAnswer(
+        requirements=[
+            _participant("СРО на проектирование", "met"),
+            _participant("Опыт аналогичных поставок", "unknown", mandatory=False),
+            # «Выполнено» без ссылки на профиль — «не подтверждено».
+            _participant("Сертификат ISO 9001", "met", profile_numbers=()),
+            _participant("Сервисный центр в регионе", "not_met", mandatory=False),
+        ],
+        comment="—",
+    )
+    score, checklist, _ = ai_profile_service._score_competencies(answer, [], filled_profile)
+    assert [item["status"] for item in checklist] == ["met", "unknown", "unknown", "not_met"]
+    assert score == Decimal("50")  # (1 + 0.5 + 0.5 + 0) / 4
+
+    # Невыполненное обязательное требование обнуляет измерение.
+    answer.requirements[3].mandatory = True
+    score, _, _ = ai_profile_service._score_competencies(answer, [], filled_profile)
+    assert score == Decimal("0")
 
 
 def test_weak_points_are_sorted_by_severity_and_normalized():
@@ -142,12 +244,15 @@ def test_compute_profile_score_saves_traceable_current_version(
     decision_inputs: list[str] = []
 
     def fake_run_structured(db, *, system_prompt, user_text, response_model, temperature=0.0):
-        if response_model is DimensionAnswer:
-            return DimensionAnswer(
-                score=90,
-                comment="Предмет закупки — профильная продукция компании.",
-                requirement_numbers=[1],
-                profile_numbers=[1],
+        if response_model is TaskAnswer:
+            return _task_answer({**ALL_MET, "scope_purity": "partial"})
+        if response_model is CompetenciesAnswer:
+            return CompetenciesAnswer(
+                requirements=[
+                    _participant("Наличие СРО на проектирование", "met", number=1),
+                    _participant("Опыт от 10 лет", "unknown", mandatory=False, number=0),
+                ],
+                comment="СРО подтверждено профилем.",
             )
         if response_model is DecisionAnswer:
             decision_inputs.append(user_text)
@@ -166,12 +271,16 @@ def test_compute_profile_score_saves_traceable_current_version(
     score = outcome.score
 
     assert score is not None
-    assert score.task_score == Decimal("90.00")
-    assert score.competencies_score == Decimal("90.00")
+    assert score.task_score == Decimal("95.00")
+    assert score.competencies_score == Decimal("75.00")
     # History исключена из расчёта, а не посчитана нулём.
     assert score.history_score is None
-    assert score.overall_score == Decimal("90.00")
+    assert score.overall_score == Decimal("85.00")
     assert score.verdict == Verdict.GO.value
+    assert len(score.task_checklist) == 4
+    assert score.competencies_checklist[0]["mandatory"] is True
+    # Модель, посчитавшая оценку, записана рядом с ней (25.09.2026).
+    assert score.ai_provider in {"yandex", "claude"}
     assert score.recommended_strategy["first_step"].startswith("Запросить")
     assert any(
         item["ref_id"] == str(requirement.id) for item in score.task_evidence
@@ -182,10 +291,14 @@ def test_compute_profile_score_saves_traceable_current_version(
     assert score.decision is True
     assert score.decision_summary == "Задача и компетенции подтверждены."
     assert "Наличие СРО на проектирование" in decision_inputs[0]
-    assert "Компетенции: 90%" in decision_inputs[0]
+    assert "Компетенции: 75%" in decision_inputs[0]
+    # Пункты чек-листа уходят в решение с пометкой обязательности.
+    assert "Наличие СРО на проектирование (обязательное): выполнено" in decision_inputs[0]
     serialized = ai_profile_service.serialize(db_session, score)
     assert serialized["decision"] is True
     assert "decision_summary" not in serialized
+    assert serialized["task_checklist"][0]["status_label"] == "выполнено"
+    assert serialized["ai_provider_label"] in {"YandexGPT", "Claude"}
 
 
 def test_verdict_follows_decision_and_threshold():
@@ -213,14 +326,14 @@ def test_recalculation_keeps_previous_version(db_session, filled_profile, monkey
     tender = _tender(db_session)
     _requirement(db_session, tender, "Класс точности не хуже 0,5S")
 
-    scores = iter([40, 85])
+    subjects = iter(["partial", "met"])
 
     def fake_run_structured(db, *, system_prompt, user_text, response_model, temperature=0.0):
-        if response_model is DimensionAnswer:
-            return DimensionAnswer(
-                score=next(scores, 85), comment="—", requirement_numbers=[], profile_numbers=[]
-            )
-        raise RuntimeError("резюме в этом тесте не нужно")
+        if response_model is TaskAnswer:
+            return _task_answer({**ALL_MET, "subject": next(subjects, "met")})
+        if response_model is CompetenciesAnswer:
+            return CompetenciesAnswer(requirements=[], comment="—")
+        raise RuntimeError("решение и резюме в этом тесте не нужны")
 
     monkeypatch.setattr(ai_profile_service, "run_structured", fake_run_structured)
 
@@ -239,6 +352,32 @@ def test_recalculation_keeps_previous_version(db_session, filled_profile, monkey
     assert current[0].verdict is not None
     # Решение без ответа модели не выдумывается порогом — остаётся «не выносилось».
     assert current[0].decision is None
+
+
+def test_failed_model_does_not_replace_previous_score(db_session, filled_profile, monkeypatch):
+    """Модель недоступна — новая версия не сохраняется, прежняя остаётся текущей: иначе итог
+    сложился бы из одной «Истории» (25.09.2026)."""
+
+    tender = _tender(db_session)
+
+    def working(db, *, system_prompt, user_text, response_model, temperature=0.0):
+        if response_model is TaskAnswer:
+            return _task_answer(ALL_MET)
+        if response_model is CompetenciesAnswer:
+            return CompetenciesAnswer(requirements=[], comment="—")
+        raise RuntimeError("не нужно")
+
+    def broken(db, **kwargs):
+        raise RuntimeError('HTTP 402: "Insufficient balance"')
+
+    monkeypatch.setattr(ai_profile_service, "run_structured", working)
+    first = ai_profile_service.compute_profile_score(db_session, tender).score
+
+    monkeypatch.setattr(ai_profile_service, "run_structured", broken)
+    with pytest.raises(ai_profile_service.AiProfileError, match="Insufficient balance"):
+        ai_profile_service.compute_profile_score(db_session, tender)
+
+    assert ai_profile_service.get_current(db_session, tender.id).id == first.id
 
 
 def test_score_requires_filled_company_profile(db_session):

@@ -288,3 +288,70 @@ def test_coerce_shape_unwraps_bare_list_and_stringified_field():
     }
     # Строка в поле, которая не JSON, — отдаётся как есть, ошибку даст валидация.
     assert _coerce_shape('{"items": "не json"}', Wrapper) == {"items": "не json"}
+
+
+def test_spending_limit_is_not_retried_and_says_what_to_do(monkeypatch):
+    """28.09.2026: ключ RouterAI упёрся в месячный лимит, и каждый вызов трижды повторялся с
+    паузами, а пользователь видел «модель не вернула ни одного раздела — попробуйте ещё раз».
+    Денежный отказ — отдельная ошибка без повторов, с текстом шлюза и подсказкой."""
+
+    import httpx
+
+    from app.services import routerai_client
+
+    calls: list[int] = []
+
+    def fake_post(*args, **kwargs):
+        calls.append(1)
+        return httpx.Response(
+            429,
+            json={"error": {"message": "API key monthly spending limit exceeded: 1 509,84 руб. / 1 500,00 руб."}},
+        )
+
+    monkeypatch.setattr(routerai_client.httpx, "post", fake_post)
+    monkeypatch.setattr(routerai_client, "get_routerai_credentials", lambda db: ("k", "m", "https://x"))
+    monkeypatch.setattr(routerai_client.time, "sleep", lambda seconds: None)
+
+    class Answer(pydantic.BaseModel):
+        text: str
+
+    try:
+        routerai_client.run_structured(None, system_prompt="s", user_text="u", response_model=Answer)
+    except ai_client.AiQuotaExceededError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("ожидался AiQuotaExceededError")
+
+    assert calls == [1]
+    assert "spending limit" in message
+    assert "YandexGPT" in message
+
+
+def test_plain_rate_limit_is_still_retried(monkeypatch):
+    """429 без слов о деньгах — частота запросов, её лечит повтор."""
+
+    import httpx
+
+    from app.services import routerai_client
+
+    calls: list[int] = []
+
+    def fake_post(*args, **kwargs):
+        calls.append(1)
+        return httpx.Response(429, json={"error": {"message": "Too many requests"}})
+
+    monkeypatch.setattr(routerai_client.httpx, "post", fake_post)
+    monkeypatch.setattr(routerai_client, "get_routerai_credentials", lambda db: ("k", "m", "https://x"))
+    monkeypatch.setattr(routerai_client.time, "sleep", lambda seconds: None)
+
+    class Answer(pydantic.BaseModel):
+        text: str
+
+    try:
+        routerai_client.run_structured(None, system_prompt="s", user_text="u", response_model=Answer)
+    except ai_client.AiQuotaExceededError:
+        raise AssertionError("обычный 429 не денежный отказ")
+    except routerai_client.RouterAiError:
+        pass
+
+    assert len(calls) == routerai_client.RETRY_ATTEMPTS

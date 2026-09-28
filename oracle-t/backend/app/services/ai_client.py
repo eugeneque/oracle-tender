@@ -25,12 +25,20 @@ from app.services import routerai_client, yandex_ai_client
 from app.services.ai_provider_service import (
     PROVIDER_CLAUDE,
     AiNotConfiguredError,
+    AiQuotaExceededError,
     get_active_provider,
+    get_routerai_credentials,
 )
 
 ResponseT = TypeVar("ResponseT", bound=pydantic.BaseModel)
 
-__all__ = ["AiNotConfiguredError", "chunk_text", "run_structured"]
+__all__ = [
+    "AiNotConfiguredError",
+    "AiQuotaExceededError",
+    "active_model",
+    "chunk_text",
+    "run_structured",
+]
 
 
 def run_structured(
@@ -61,6 +69,21 @@ def run_structured(
         response_model=response_model,
         temperature=temperature,
     )
+
+
+def active_model(db: Session) -> tuple[str, str | None]:
+    """Провайдер и модель, которые обслужат текущее обращение: `("claude",
+    "anthropic/claude-opus-5")`. Пишется рядом с результатом (AI-оценка, 25.09.2026), чтобы
+    расхождение двух расчётов можно было отнести к смене модели. Модель `None` — у Claude не
+    заполнен ключ: сам вызов тогда всё равно упадёт с понятной ошибкой."""
+
+    provider = get_active_provider(db)
+    if provider == PROVIDER_CLAUDE:
+        try:
+            return provider, get_routerai_credentials(db)[1]
+        except AiNotConfiguredError:
+            return provider, None
+    return provider, yandex_ai_client.DEFAULT_MODEL
 
 
 def chunk_text(text: str, *, max_chars: int, overlap: int = 200) -> list[str]:

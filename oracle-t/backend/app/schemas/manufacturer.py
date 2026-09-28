@@ -119,6 +119,9 @@ class ProductOut(BaseModel):
     # производителя; пустые значения — «не определено».
     phases: int | None = None
     mountings: list[str] = []
+    # Типы прибора из одиннадцати (файл «Параметры для ПУ», `services/meter_kind.py`) —
+    # только если фазность и включение определены; пусто — не определено.
+    meter_kinds: list[str] = []
     created_at: datetime
     updated_at: datetime
 

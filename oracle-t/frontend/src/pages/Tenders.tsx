@@ -47,6 +47,7 @@ import { TenderDetailModal } from "../components/TenderDetailModal";
 import { TagChip, TagRow } from "../components/tags/TagChip";
 import { TenderSplitView } from "../components/tender-views/TenderSplitView";
 import { TenderTableView } from "../components/tender-views/TenderTableView";
+import { METER_KINDS } from "../utils/meterKinds";
 import type {
   SortDirection,
   SortKey,
@@ -289,6 +290,7 @@ interface TendersFilters {
   // выполнен, эти поля у него пустые — и он честно не попадает в такую выборку.
   regionCodes: string[];
   tenderTypes: string[];
+  meterKinds: string[];
   statuses: string[];
   relevanceStatuses: string[];
   stages: string[];
@@ -324,6 +326,7 @@ const DEFAULT_FILTERS: TendersFilters = {
   tagIds: [],
   regionCodes: [],
   tenderTypes: [],
+  meterKinds: [],
   statuses: [],
   relevanceStatuses: [],
   stages: [],
@@ -341,6 +344,15 @@ const TENDER_TYPE_OPTIONS = [
   { value: "reverification", label: "Переповерка" },
   { value: "other", label: "Прочее" },
 ];
+
+// Типы приборов (файл «Параметры для ПУ»). Определяются по наименованию при сборе и по
+// требованиям после «Разобрать закупку»; закупка без определённого типа в выборку не
+// попадает, как и при других фильтрах по незаполненным полям.
+const METER_KIND_OPTIONS = METER_KINDS.map((kind) => ({
+  value: kind.value,
+  label: kind.short,
+  title: kind.label,
+}));
 
 const STATUS_OPTIONS = [
   { value: "collecting_bids", label: "Сбор заявок" },
@@ -391,6 +403,7 @@ function buildFilterParams(filters: TendersFilters): URLSearchParams {
   if (filters.onlyAiSelected) params.set("only_ai_selected", "true");
   for (const code of filters.regionCodes) params.append("region", code);
   for (const value of filters.tenderTypes) params.append("tender_type", value);
+  for (const value of filters.meterKinds) params.append("meter_kind", value);
   for (const value of filters.statuses) params.append("tender_status", value);
   for (const value of filters.relevanceStatuses)
     params.append("relevance_status", value);
@@ -454,7 +467,7 @@ function ChipGroup({
   onToggle,
 }: {
   label: string;
-  options: { value: string; label: string }[];
+  options: { value: string; label: string; title?: string }[];
   selected: string[];
   onToggle: (value: string) => void;
 }) {
@@ -467,6 +480,7 @@ function ChipGroup({
           <button
             key={option.value}
             onClick={() => onToggle(option.value)}
+            title={option.title}
             className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
               active
                 ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-300"
@@ -749,6 +763,14 @@ function FiltersPanel({
           }
         />
         <ChipGroup
+          label="Тип прибора учёта"
+          options={METER_KIND_OPTIONS}
+          selected={filters.meterKinds}
+          onToggle={(value) =>
+            onChange({ meterKinds: toggleIn(filters.meterKinds, value) })
+          }
+        />
+        <ChipGroup
           label="Статус"
           options={STATUS_OPTIONS}
           selected={filters.statuses}
@@ -918,6 +940,7 @@ function countActiveFilters(filters: TendersFilters): number {
   const listKeys: Array<keyof TendersFilters> = [
     "sourceKeys",
     "tenderTypes",
+    "meterKinds",
     "statuses",
     "stages",
     "relevanceStatuses",

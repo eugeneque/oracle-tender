@@ -97,7 +97,20 @@ trap cleanup EXIT INT TERM HUP
 echo "==> Проверяю PostgreSQL"
 if ! "$PG_BIN/pg_isready" >/dev/null 2>&1; then
   echo "    Postgres не запущен, запускаю (brew services)..."
-  brew services start postgresql@15
+  # После аварийного выключения Mac остаётся postmaster.pid, а его PID после перезагрузки
+  # занимает чужой процесс — Postgres считает, что уже запущен, и падает в цикле. Такой файл
+  # удаляем, если процесс с этим PID не postgres.
+  PG_PIDFILE="/opt/homebrew/var/postgresql@15/postmaster.pid"
+  if [ -f "$PG_PIDFILE" ]; then
+    STALE_PID="$(head -1 "$PG_PIDFILE")"
+    if ! ps -p "$STALE_PID" -o comm= 2>/dev/null | grep -q postgres; then
+      echo "    Удаляю устаревший postmaster.pid (PID $STALE_PID не postgres)"
+      rm -f "$PG_PIDFILE"
+    fi
+  fi
+  # restart, а не start: сервис в состоянии error остаётся загруженным в launchd,
+  # и повторный bootstrap падает с «Input/output error».
+  brew services restart postgresql@15
   for i in $(seq 1 20); do
     "$PG_BIN/pg_isready" >/dev/null 2>&1 && break
     sleep 1
@@ -171,7 +184,11 @@ for _ in $(seq 1 120); do
 done
 
 echo "==> Запускаю frontend (http://localhost:$FRONTEND_PORT)"
-(cd "$FRONTEND_DIR" && exec npm run dev -- --port "$FRONTEND_PORT" --strictPort) &
+# Cookie не привязаны к порту: браузер шлёт на localhost:5173 cookie всех проектов, когда-либо
+# открытых на localhost, и набегает больше 16 КБ — стандартного лимита Node на заголовки. Vite
+# тогда отвечает 431 ещё до приложения. Поднимаем лимит до 64 КБ (сами cookie ORACLE-T не нужны).
+(cd "$FRONTEND_DIR" && NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-http-header-size=65536" \
+  exec npm run dev -- --port "$FRONTEND_PORT" --strictPort) &
 FRONTEND_PID=$!
 
 echo ""

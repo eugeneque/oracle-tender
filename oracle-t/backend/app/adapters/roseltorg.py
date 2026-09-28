@@ -11,12 +11,13 @@ Drupal-бэкенд, судя по `data-drupal-selector` в разметке ф
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
 
-from app.adapters.eis_documents import fetch_eis_documents
+from app.adapters.eis_documents import fetch_eis_documents, normalize_eis_number
 from app.adapters.base import (
     DocumentRef,
     PollError,
@@ -159,12 +160,67 @@ class RoseltorgAdapter(SourceAdapter):
     def download_documents(
         self, external_id: str, source_url: str | None = None
     ) -> list[DocumentRef]:
-        """Документация закупки из ЕИС по её реестровому номеру.
+        """Документация закупки — с карточки площадки, запасной путь — ЕИС.
 
-        Своего перечня файлов у площадки взять неоткуда: антибот-защита закрывает карточку для любого клиента, кроме браузера с сессией.
-        Но закупки 44-ФЗ и 223-ФЗ публикуются в ЕИС по закону, и там документация открыта —
-        см. `app/adapters/eis_documents.py`. Для коммерческих закупок площадки (без номера
-        ЕИС) документов не будет: их публикуют только в личном кабинете.
+        До 25.09.2026 документы брались только из ЕИС по реестровому номеру, и коммерческие
+        закупки площадки (номера `RH…` — ДЭК, сетевые компании Россетей) оставались без
+        единого файла: в ЕИС их нет. На карточке же файлы лежат обычными ссылками в блоке
+        «Документы» (`a.lot-docs__file`) на `msp.roseltorg.ru/api/v1/documents/<uuid>`,
+        и скачиваются без входа — вход нужен только архиву «Скачать все документы».
+
+        Сбой карточки поднимается наружу, только если в ЕИС идти не с чем: иначе анализ
+        написал бы «документов нет» там, где их просто не удалось получить.
         """
 
+        card_url = source_url or f"{BASE_URL}/procedure/{external_id}"
+        card_error: Exception | None = None
+        try:
+            with self._client() as client:
+                response = fetch_with_retry(
+                    client, "GET", card_url, headers={"Accept": "text/html"}
+                )
+                response.raise_for_status()
+            documents = parse_card_documents(response.text)
+            if documents:
+                return documents
+        except Exception as exc:  # noqa: BLE001 - дальше запасной путь через ЕИС
+            card_error = exc
+
+        if card_error is not None and normalize_eis_number(external_id) is None:
+            raise RuntimeError(f"карточка Росэлторга не получена: {card_error}") from card_error
         return fetch_eis_documents(external_id)
+
+
+def parse_card_documents(html: str) -> list[DocumentRef]:
+    """Файлы из блока «Документы» карточки процедуры.
+
+    Берутся все подблоки — «Приложения к извещению», «Протоколы», «Разъяснения»: в
+    протоколах и разъяснениях тоже бывают требования. Имя файла — в `title` ссылки; у
+    протоколов там название без расширения («Протокол подведения итогов»), и тип тогда
+    виден только по классу `file-pdf` / `file-docx` — без расширения файл не разобрался бы.
+    """
+
+    soup = BeautifulSoup(html, "lxml")
+    documents: list[DocumentRef] = []
+    for link in soup.select("a.lot-docs__file[href]"):
+        name = (link.get("title") or element_text(link) or "").strip()
+        if not name:
+            continue
+        extension = next(
+            (
+                cls.removeprefix("file-")
+                for cls in link.get("class") or []
+                if cls.startswith("file-") and cls != "file-"
+            ),
+            None,
+        )
+        if extension and not Path(name).suffix:
+            name = f"{name}.{extension}"
+        documents.append(
+            DocumentRef(
+                file_name=name,
+                url=urljoin(BASE_URL, link["href"]),
+                file_type=f".{extension}" if extension else None,
+            )
+        )
+    return documents

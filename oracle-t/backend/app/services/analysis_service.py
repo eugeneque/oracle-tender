@@ -110,6 +110,7 @@ def get_compliance_matrix(db: Session, tender: Tender) -> ComplianceMatrixOut:
             reason_summary=record.reason_summary,
             requirements_total=record.requirements_total,
             requirements_scored=record.requirements_scored,
+            verdict=record.verdict,
             calculated_at=record.calculated_at,
         )
         for record in db.scalars(

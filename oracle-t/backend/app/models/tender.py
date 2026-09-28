@@ -16,7 +16,7 @@ from sqlalchemy import (
     case,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -142,6 +142,11 @@ class Tender(Base):
     )
     okpd2_code: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
     tender_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # Типы закупаемых приборов учёта — коды из `app.services.meter_kind.METER_KINDS`
+    # («3ph_semi_din» и т.п.; файл «Параметры для ПУ», 25.09.2026). Выводится кодом по
+    # наименованию и требованиям к товару; NULL — тип не определён (фильтр такую закупку
+    # не покажет, как и прочие незаполненные поля).
+    meter_kinds: Mapped[list[str] | None] = mapped_column(ARRAY(String(30)), nullable=True)
 
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_comment: Mapped[str | None] = mapped_column(Text, nullable=True)

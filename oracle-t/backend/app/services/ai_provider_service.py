@@ -55,6 +55,13 @@ class AiNotConfiguredError(RuntimeError):
     пользователю понятный текст вместо 500-й, не зная, какая модель сейчас выбрана."""
 
 
+class AiQuotaExceededError(RuntimeError):
+    """Провайдер отказал из-за денег: исчерпан лимит расходов ключа или баланс. В отличие от
+    сетевого сбоя, повтор тут не поможет — вызывающий код прекращает обращения и показывает
+    текст как есть (28.09.2026: ключ RouterAI упёрся в месячный лимит 1 500 руб., а карточка
+    писала «модель не вернула ни одного раздела — попробуйте ещё раз»)."""
+
+
 def _get_or_create(db: Session) -> AiProviderSettings:
     settings = db.get(AiProviderSettings, _SINGLETON_ID)
     if settings is None:

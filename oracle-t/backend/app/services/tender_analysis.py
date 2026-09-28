@@ -34,9 +34,11 @@ from app.models.tender import Tender, TenderType
 from app.models.tender_document import DocumentClass, TenderDocument
 from app.models.user import User
 from app.seed.characteristics_data import CHARACTERISTIC_GROUPS
+from app.seed.meter_parameters import PARAMETERS_BY_NO, detect_parameter, parameters_prompt_list
 from app.services.audit import log_action
 from app.services.document_service import classify_document, reextract_stale_documents
-from app.services.ai_client import chunk_text, run_structured
+from app.services.ai_client import AiQuotaExceededError, chunk_text, run_structured
+from app.services.meter_kind import METER_KINDS, fill_tender_kinds
 
 # Кусок текста на один запрос. Тендерная документация длиннее «Описания типа», а системный
 # промпт здесь короче (список групп, а не всех ~120 полей), поэтому кусок крупнее, чем в
@@ -164,6 +166,22 @@ _REQUIREMENTS_SYSTEM_PROMPT = """Ты анализируешь документ�
 которой относится требование. Для `service` и `participant`, и если ни одна группа не \
 подходит, — пустая строка.
 6. Не придумывай требований, которых нет в тексте. Если требований нет — верни пустой список.
+7. `parameter_no` — для требований `product` номер параметра из перечня «Параметры для \
+приборов учёта» ниже (перечень тендерного отдела, по нему проверяется каждое ТЗ на прибор \
+учёта). Если требование не относится ни к одному параметру, а также для `service` и \
+`participant` — 0. Руководствуйся комментариями к параметрам.
+8. Одно требование — один параметр. Если в ТЗ параметры записаны вместе («Номинальный \
+(максимальный) ток 5(60) А», «Габариты и масса»), раздели их на отдельные требования: \
+«Номинальный ток: 5 А» (параметр 6) и «Максимальный ток: 60 А» (параметр 7).
+9. Для параметра 1 (тип прибора) в `normalized_text` назови тип одним из видов: \
+{meter_kinds}. Вид определяй по комментариям к параметрам 5, 6, 7, 14 и 32 \
+(напряжение, токи, способ крепления, выносной индикатор). Если вид из текста не \
+следует — оставь формулировку ТЗ, не угадывай.
+10. Для параметра 3 (габариты) записывай размеры в порядке ширина (b) × длина (a) × \
+высота (c), как в перечне, и указывай, «не более» это или точное значение.
+
+Параметры для приборов учёта:
+{parameters_list}
 
 Справочник групп характеристик:
 {groups_list}"""
@@ -206,6 +224,7 @@ class ExtractedRequirement(pydantic.BaseModel):
     kind: str
     criticality: str
     group_name: str
+    parameter_no: int
 
 
 class RequirementsResult(pydantic.BaseModel):
@@ -430,6 +449,10 @@ def analyze_tender(db: Session, tender: Tender, *, actor: User | None) -> Analys
 
     _classify(db, tender, text, outcome)
     _extract_requirements(db, tender, text, primary_document_id, outcome)
+    # Тип прибора уточняется по извлечённым требованиям к товару: в наименовании закупки
+    # его обычно нет, а в ТЗ есть напряжение, токи и крепление.
+    db.flush()
+    fill_tender_kinds(db, tender)
 
     db.commit()
     db.refresh(tender)
@@ -615,9 +638,13 @@ def _extract_requirements(
     if not chunks:
         return
 
-    system_prompt = _REQUIREMENTS_SYSTEM_PROMPT.format(groups_list=_groups_list())
+    system_prompt = _REQUIREMENTS_SYSTEM_PROMPT.format(
+        groups_list=_groups_list(),
+        parameters_list=parameters_prompt_list(),
+        meter_kinds="; ".join(f"«{label}»" for label in METER_KINDS.values()),
+    )
     extracted: list[ExtractedRequirement] = []
-    for chunk in chunks:
+    for index, chunk in enumerate(chunks):
         try:
             result = run_structured(
                 db,
@@ -625,6 +652,11 @@ def _extract_requirements(
                 user_text=chunk,
                 response_model=RequirementsResult,
             )
+        except AiQuotaExceededError as exc:
+            # Остальные куски упрутся в тот же лимит — не тратим на них время.
+            outcome.chunks_failed += len(chunks) - index
+            outcome.messages.append(str(exc))
+            break
         except Exception as exc:  # noqa: BLE001 - один неудачный кусок не должен терять остальные
             logger.warning(f"Извлечение требований из куска документации не удалось: {exc}")
             outcome.chunks_failed += 1
@@ -682,6 +714,13 @@ def _replace_requirements(
         # исчезнет; для закупок на поставку это к тому же почти всегда верно.
         kind = item.kind if item.kind in _KIND_VALUES else RequirementKind.PRODUCT.value
         group = item.group_name.strip() if item.group_name else ""
+        parameter_no = None
+        if kind == RequirementKind.PRODUCT.value:
+            parameter_no = item.parameter_no if item.parameter_no in PARAMETERS_BY_NO else None
+            # Правила кода (реле, ПП 719, Astra) не должны зависеть от того, проставила ли
+            # модель номер: узнаём такие параметры и по формулировке.
+            if parameter_no is None:
+                parameter_no = detect_parameter(f"{text_value} {item.normalized_text or ''}")
         db.add(
             Requirement(
                 tender_id=tender.id,
@@ -695,6 +734,7 @@ def _replace_requirements(
                 category=group
                 if kind == RequirementKind.PRODUCT.value and group in known_groups
                 else None,
+                parameter_no=parameter_no,
             )
         )
         outcome.requirements_saved += 1

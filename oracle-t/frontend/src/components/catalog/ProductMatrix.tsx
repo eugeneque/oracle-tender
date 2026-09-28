@@ -12,7 +12,17 @@ import type { Product, ProductMounting, SiType } from "../../api/types";
 // заказчик всё ещё указывает их в документации.
 
 type ColumnKey = ProductMounting | "unknown";
-type RowKey = "1" | "3" | "unknown";
+// Строки — фазность и способ включения, как в одиннадцати типах файла «Параметры для ПУ»
+// (25.09.2026): «трёхфазные» одной строкой смешивали прямое включение с трансформаторным,
+// а это разные закупки. Модель без определённого включения остаётся в строке по фазности.
+type RowKey =
+  | "1"
+  | "3_direct"
+  | "3_semi"
+  | "3_indirect"
+  | "3"
+  | "hv"
+  | "unknown";
 
 const COLUMNS: { key: ColumnKey; label: string; hint: string }[] = [
   { key: "split", label: "Сплит", hint: "наружная установка, на опору" },
@@ -23,12 +33,25 @@ const COLUMNS: { key: ColumnKey; label: string; hint: string }[] = [
 
 const ROWS: { key: RowKey; label: string }[] = [
   { key: "1", label: "Однофазные" },
-  { key: "3", label: "Трёхфазные" },
+  { key: "3_direct", label: "Трёхфазные прямого включения" },
+  { key: "3_semi", label: "Трёхфазные полукосвенного включения" },
+  { key: "3_indirect", label: "Трёхфазные косвенного включения" },
+  { key: "3", label: "Трёхфазные, включение не определено" },
+  { key: "hv", label: "Высоковольтные (ВПУ)" },
   { key: "unknown", label: "Фазность не определена" },
 ];
 
-function rowOf(p: Product): RowKey {
-  return p.phases === 1 ? "1" : p.phases === 3 ? "3" : "unknown";
+function rowsOf(p: Product): RowKey[] {
+  const rows = new Set<RowKey>();
+  for (const kind of p.meter_kinds ?? []) {
+    if (kind === "hv") rows.add("hv");
+    else if (kind.startsWith("1ph")) rows.add("1");
+    else if (kind.startsWith("3ph_direct")) rows.add("3_direct");
+    else if (kind.startsWith("3ph_semi")) rows.add("3_semi");
+    else if (kind.startsWith("3ph_indirect")) rows.add("3_indirect");
+  }
+  if (rows.size) return [...rows];
+  return [p.phases === 1 ? "1" : p.phases === 3 ? "3" : "unknown"];
 }
 
 function columnsOf(p: Product): ColumnKey[] {
@@ -57,12 +80,13 @@ export function ProductMatrix({
     const usedColumns = new Set<ColumnKey>();
     const usedRows = new Set<RowKey>();
     for (const p of products) {
-      const row = rowOf(p);
-      usedRows.add(row);
-      for (const col of columnsOf(p)) {
-        usedColumns.add(col);
-        const key = `${row}:${col}`;
-        (cells.get(key) ?? cells.set(key, []).get(key)!).push(p);
+      for (const row of rowsOf(p)) {
+        usedRows.add(row);
+        for (const col of columnsOf(p)) {
+          usedColumns.add(col);
+          const key = `${row}:${col}`;
+          (cells.get(key) ?? cells.set(key, []).get(key)!).push(p);
+        }
       }
     }
     return {
@@ -145,7 +169,7 @@ export function ProductMatrix({
     <div className="overflow-x-auto">
       <div
         className="grid"
-        style={{ gridTemplateColumns: `7rem repeat(${columns.length}, minmax(12rem, 1fr))` }}
+        style={{ gridTemplateColumns: `9rem repeat(${columns.length}, minmax(12rem, 1fr))` }}
       >
         <div className="border-b border-white/[0.08] px-3 py-2" />
         {columns.map((c) => (
@@ -169,7 +193,9 @@ export function ProductMatrix({
       </div>
       <p className="px-1 pt-2 text-[10px] text-zinc-500">
         Исполнение выведено из характеристик «Количество фаз», «Тип монтажа», «Тип корпуса» и обозначения
-        модели; универсальный корпус (DIN-рейка + винты) показан в обоих столбцах.
+        модели; универсальный корпус (DIN-рейка + винты) показан в обоих столбцах. Включение — по
+        напряжению и токам: 230 В и 60–100 А — прямое, 230 В и 10 А — полукосвенное, 57,7 В — косвенное,
+        6–10 кВ — ВПУ; универсальный счётчик 3×(57,7–230) В, 10 А стоит в обеих строках.
       </p>
     </div>
   );

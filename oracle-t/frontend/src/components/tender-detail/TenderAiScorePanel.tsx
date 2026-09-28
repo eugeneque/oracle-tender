@@ -18,7 +18,7 @@ import {
   Wand2,
 } from "lucide-react";
 
-import type { AiProfileScore, EvidenceItem } from "../../api/types";
+import type { AiProfileScore, ChecklistItem, EvidenceItem } from "../../api/types";
 import { useAiProvider } from "../../hooks/useAiProvider";
 import { formatDateTime, percentValue, verdictLabel } from "../../utils/format";
 import { AiOrb } from "../AiOrb";
@@ -158,16 +158,53 @@ function EvidenceList({ items }: { items: EvidenceItem[] }) {
   );
 }
 
+const CHECK_STATUS_STYLE: Record<string, string> = {
+  met: "bg-emerald-500/15 text-emerald-200",
+  partial: "bg-amber-500/15 text-amber-200",
+  unknown: "bg-amber-500/15 text-amber-200",
+  not_met: "bg-red-500/15 text-red-300",
+  not_applicable: "bg-white/[0.06] text-zinc-500",
+};
+
+/** Пункты чек-листа: из их статусов код посчитал число измерения (25.09.2026). */
+function Checklist({ items }: { items: ChecklistItem[] }) {
+  return (
+    <ul className="space-y-1.5">
+      {items.map((item, index) => (
+        <li key={`${item.title}-${index}`} className="text-xs text-zinc-400">
+          <div className="flex items-start justify-between gap-2">
+            <span className="text-zinc-300">
+              {item.title}
+              {item.mandatory && <span className="text-zinc-500"> · обязательное</span>}
+              {item.weight !== null && <span className="text-zinc-600"> · вес {item.weight}</span>}
+            </span>
+            <span
+              className={`shrink-0 rounded px-1.5 py-px text-[10px] ${
+                CHECK_STATUS_STYLE[item.status] ?? CHECK_STATUS_STYLE.not_applicable
+              }`}
+            >
+              {item.status_label}
+            </span>
+          </div>
+          {item.comment && <p className="mt-0.5 text-zinc-500">{item.comment}</p>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function Dimension({
   title,
   score,
   comment,
   evidence,
+  checklist = null,
 }: {
   title: DimensionTitle;
   score: string | null;
   comment: string | null;
   evidence: EvidenceItem[];
+  checklist?: ChecklistItem[] | null;
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const percent = percentValue(score);
@@ -206,7 +243,9 @@ function Dimension({
           }`}
         >
           {percent === null ? (
-            <span className="text-[11px] font-normal text-zinc-600">нет данных</span>
+            <span className="text-[11px] font-normal text-zinc-600">
+              {checklist !== null && checklist.length === 0 ? "не применимо" : "нет данных"}
+            </span>
           ) : (
             `${percent}%`
           )}
@@ -228,6 +267,7 @@ function Dimension({
           <p className="text-xs leading-relaxed text-zinc-400">
             {comment ?? "Комментарий не сформирован."}
           </p>
+          {checklist !== null && checklist.length > 0 && <Checklist items={checklist} />}
           <EvidenceList items={evidence} />
         </div>
       )}
@@ -343,7 +383,11 @@ export function TenderAiScorePanel({
               : score
                 ? `История, задача и компетенции против профиля компании · ${formatDateTime(
                     score.calculated_at,
-                  )}`
+                  )}${
+                    score.ai_provider_label
+                      ? ` · ${score.ai_provider_label}${score.ai_model ? ` (${score.ai_model})` : ""}`
+                      : ""
+                  }`
                 : "Модель сравнит закупку с профилем компании и скажет, стоит ли участвовать"}
           </p>
         </div>
@@ -406,12 +450,14 @@ export function TenderAiScorePanel({
                 score={score.task_score}
                 comment={score.task_comment}
                 evidence={score.task_evidence}
+                checklist={score.task_checklist}
               />
               <Dimension
                 title="Компетенции"
                 score={score.competencies_score}
                 comment={score.competencies_comment}
                 evidence={score.competencies_evidence}
+                checklist={score.competencies_checklist}
               />
             </div>
 

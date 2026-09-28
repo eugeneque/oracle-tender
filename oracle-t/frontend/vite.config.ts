@@ -15,6 +15,11 @@ export default defineConfig({
         target: "http://localhost:8000",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ""),
+        // Бэкенд авторизует по Bearer-токену, cookie ему не нужны. А чужие cookie с localhost
+        // легко перерастают лимит заголовков uvicorn — тот же 431, только уже от API.
+        configure: (proxy) => {
+          proxy.on("proxyReq", (proxyReq) => proxyReq.removeHeader("cookie"));
+        },
       },
     },
   },

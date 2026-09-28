@@ -115,6 +115,7 @@ def _requirement(**overrides) -> ExtractedRequirement:
         "kind": RequirementKind.PRODUCT.value,
         "criticality": Criticality.IMPORTANT.value,
         "group_name": "",
+        "parameter_no": 0,
     }
     data.update(overrides)
     return ExtractedRequirement(**data)

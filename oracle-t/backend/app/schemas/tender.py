@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from app.schemas.job import BackgroundJobOut
 
@@ -42,6 +42,9 @@ class TenderOut(BaseModel):
     source: TenderSourceOut
     # Поля этапа 5: заполняются ИИ-анализом документации, до него остаются пустыми.
     tender_type: str | None = None
+    # Типы приборов учёта из одиннадцати (файл «Параметры для ПУ»); коды —
+    # `app.services.meter_kind.METER_KINDS`, `null` — не определено.
+    meter_kinds: list[str] | None = None
     region_organizer_code: str | None = None
     region_delivery_code: str | None = None
     federal_district_code: int | None = None
@@ -116,8 +119,18 @@ class RequirementOut(BaseModel):
     criticality: str
     kind: str
     category: str | None
+    # Параметр файла «Параметры для ПУ» (1-39) и его название.
+    parameter_no: int | None = None
     verified_by_user: bool
     created_at: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def parameter_name(self) -> str | None:
+        from app.seed.meter_parameters import PARAMETERS_BY_NO
+
+        item = PARAMETERS_BY_NO.get(self.parameter_no or 0)
+        return item.name if item else None
 
 
 class ComplianceEntryOut(BaseModel):
@@ -148,6 +161,9 @@ class WinPercentageOut(BaseModel):
     reason_summary: str | None
     requirements_total: int
     requirements_scored: int
+    # Итог «проходит / с оговорками / не проходит / не хватает данных» (`WinVerdict`);
+    # `null` у расчётов до 25.09.2026.
+    verdict: str | None = None
     calculated_at: datetime
 
 
@@ -327,6 +343,18 @@ class RecommendedStrategyOut(BaseModel):
     first_step: str
 
 
+class ChecklistItemOut(BaseModel):
+    """Пункт чек-листа измерения: из статусов пунктов код считает число (25.09.2026).
+    `weight` есть у критериев «Задачи», `mandatory` — у требований «Компетенций»."""
+
+    title: str
+    status: str
+    status_label: str
+    comment: str
+    weight: int | None = None
+    mandatory: bool | None = None
+
+
 class AiProfileScoreOut(BaseModel):
     """AI-оценка по профилю целиком — в том виде, в каком её рисует шапка карточки.
 
@@ -349,6 +377,15 @@ class AiProfileScoreOut(BaseModel):
     competencies_score: Decimal | None
     competencies_comment: str | None
     competencies_evidence: list[EvidenceItemOut]
+
+    # `null` — оценка посчитана до чек-листов (25.09.2026); `[]` у «Компетенций» — требований
+    # к участнику нет, измерение не применимо.
+    task_checklist: list[ChecklistItemOut] | None = None
+    competencies_checklist: list[ChecklistItemOut] | None = None
+    # Какая модель посчитала оценку; `null` у оценок до 25.09.2026.
+    ai_provider: str | None = None
+    ai_provider_label: str | None = None
+    ai_model: str | None = None
 
     overall_score: Decimal | None
     summary: str | None

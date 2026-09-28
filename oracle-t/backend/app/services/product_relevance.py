@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.models.analysis import Requirement
 from app.models.manufacturer import Manufacturer, Product, ProductCharacteristic, ProductStatus
+from app.services.meter_kind import kind_group, kinds_from_text, product_kinds
 
 # Вес прямого упоминания модели в требованиях. Заведомо больше любой суммы совпадений по
 # характеристикам: если закупка называет прибор по имени («счётчик типа CE208»), эта модель
@@ -34,6 +35,12 @@ NAMED_MODEL_SCORE = 100.0
 # целиком — это не одна характеристика из многих, а граница применимости.
 PHASE_MATCH_SCORE = 12.0
 PHASE_MISMATCH_SCORE = -12.0
+
+# Совпадение и расхождение по типу прибора (11 видов файла «Параметры для ПУ»: фазность ×
+# включение × крепление). Сильнее фазности: тип её включает и различает, например,
+# трёхфазный прямого включения и полукосвенного — у них разные токи и разные ТЗ.
+KIND_MATCH_SCORE = 15.0
+KIND_MISMATCH_SCORE = -15.0
 
 # Совпадение отдельного значения характеристики со значением из требований.
 VALUE_MATCH_SCORE = 1.0
@@ -107,11 +114,18 @@ def select_products_for_context(
     needle = _requirements_text(requirements)
     wanted_phases = _phases_in(needle)
     wanted_values = _values_in(needle)
+    # Не по `needle`: он в нижнем регистре, а «А» (амперы) от союза «а» отличает регистр.
+    wanted_kinds = set(
+        kinds_from_text(
+            " ".join((item.normalized_text or item.text or "") for item in requirements)
+        )
+    )
 
     scored = [
         ScoredProduct(
             product=product,
-            score=_score(product, by_product[product.id], needle, wanted_phases, wanted_values),
+            score=_score(product, by_product[product.id], needle, wanted_phases, wanted_values)
+            + _kind_score(product, by_product[product.id], wanted_kinds),
             characteristics=by_product[product.id],
         )
         for product in described
@@ -119,7 +133,46 @@ def select_products_for_context(
     # Сортировка стабильная, а исходный список уже упорядочен по названию: модели с равным
     # счётом идут по алфавиту, то есть отбор воспроизводим от прогона к прогону.
     scored.sort(key=lambda item: item.score, reverse=True)
-    return scored[:limit]
+    return _cover_kinds(scored, limit, wanted_kinds)
+
+
+def _cover_kinds(scored: list[ScoredProduct], limit: int, wanted: set[str]) -> list[ScoredProduct]:
+    """Первые `limit` по счёту плюс лучшая модель каждой закупаемой группы типов
+    (фазность × включение), которой среди них нет.
+
+    Закупка бывает многопозиционной: в одной спецификации СЕ101, СЕ208 и СЕ308 — однофазные
+    и трёхфазные. Шесть лучших по сумме совпадений оказывались одного типа, и позиции
+    другого типа получали «не соответствует» у всех производителей (живой прогон 25.09.2026,
+    закупка 32616309303: «не проходит» даже у Энергомеры, чьи приборы названы в ТЗ)."""
+
+    chosen = scored[:limit]
+    wanted_groups = {kind_group(code) for code in wanted}
+    covered = {
+        kind_group(code)
+        for item in chosen
+        for code in product_kinds(item.product, item.characteristics)
+    }
+    for group in sorted(wanted_groups - covered):
+        for item in scored[limit:]:
+            if item in chosen:
+                continue
+            groups = {kind_group(code) for code in product_kinds(item.product, item.characteristics)}
+            if group in groups:
+                chosen.append(item)
+                covered |= groups
+                break
+    return chosen
+
+
+def _kind_score(
+    product: Product, characteristics: list[ProductCharacteristic], wanted: set[str]
+) -> float:
+    if not wanted:
+        return 0.0
+    own = set(product_kinds(product, characteristics))
+    if not own:
+        return 0.0
+    return KIND_MATCH_SCORE if own & wanted else KIND_MISMATCH_SCORE
 
 
 def _requirements_text(requirements: list[Requirement]) -> str:

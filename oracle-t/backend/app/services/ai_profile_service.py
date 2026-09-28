@@ -5,11 +5,13 @@
 
 Три принципа, из которых собран этот модуль:
 
-1. **Каждое число прослеживаемо.** Модель не называет проценты «из головы»: ей выдаются
-   пронумерованные требования тендера и пронумерованные строки профиля компании, а в ответе
-   она обязана перечислить номера, на которые опирается. Номера превращаются в `*_evidence`
-   со ссылками на реальные `requirements.id` и ключи полей профиля — интерфейс по ним
-   показывает, из чего сложилась цифра.
+1. **Каждое число прослеживаемо.** Модель не называет проценты вовсе (с 25.09.2026): она
+   проставляет статусы пунктам чек-листа — критериям «Задачи» и требованиям к участнику в
+   «Компетенциях», — а число считает код по весам (`TASK_CRITERIA`, `STATUS_VALUES`). К
+   каждому пункту модель перечисляет номера требований и строк профиля, на которые
+   опирается; номера превращаются в `*_evidence` со ссылками на реальные
+   `requirements.id` и ключи полей профиля. Промпты и правила расчёта для согласования с
+   тендерным отделом — в `AI_SCORE_PROMPTS.md`.
 2. **«Нет данных» — не ноль.** History без записей в `company_participations` по этой
    закупке остаётся `null` и исключается из среднего, а не штрафует тендер (формула
    раздела 5.5.1).
@@ -31,8 +33,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.ai_profile import (
+    CHECK_STATUS_LABELS,
     SEVERITY_ORDER,
     VERDICT_LABELS,
+    CheckStatus,
     AiProfileScore,
     EvidenceType,
     Verdict,
@@ -60,7 +64,7 @@ from app.models.tender_card import TenderCard
 from app.models.user import User
 from app.services import company_profile_service
 from app.services.audit import log_action
-from app.services.ai_client import run_structured
+from app.services.ai_client import active_model, run_structured
 
 # Сколько требований уходит в промпт. Больше — не помещается вместе с профилем и рвёт ответ
 # по лимиту токенов; требования при этом отбираются не подряд, а по критичности (см.
@@ -86,13 +90,35 @@ class AiProfileError(RuntimeError):
 # строкой по инструкции промпта.
 
 
-class DimensionAnswer(pydantic.BaseModel):
-    """Ответ модели по одному измерению."""
+class CriterionAnswer(pydantic.BaseModel):
+    """Статус одного критерия «Задачи»."""
 
-    score: int
+    code: str
+    status: str
     comment: str
     requirement_numbers: list[int]
     profile_numbers: list[int]
+
+
+class TaskAnswer(pydantic.BaseModel):
+    criteria: list[CriterionAnswer]
+    comment: str
+
+
+class ParticipantRequirementAnswer(pydantic.BaseModel):
+    """Одно требование к участнику и его статус против профиля — пункт «Компетенций»."""
+
+    text: str
+    requirement_number: int
+    mandatory: bool
+    status: str
+    comment: str
+    profile_numbers: list[int]
+
+
+class CompetenciesAnswer(pydantic.BaseModel):
+    requirements: list[ParticipantRequirementAnswer]
+    comment: str
 
 
 class WeakPointAnswer(pydantic.BaseModel):
@@ -108,41 +134,172 @@ class ResumeAnswer(pydantic.BaseModel):
     strategy_first_step: str
 
 
-_TASK_PROMPT = """Ты — руководитель тендерного отдела производителя приборов учёта
+# --- чек-листы измерений (замечание 25.09.2026) ------------------------------------------
+# До этой правки «Задачу» и «Компетенции» модель оценивала числом 0-100 по шкале с тремя
+# опорными точками. Модели прилипали к опорам: одно измерение одного и того же тендера
+# прыгало между 0 и 50 от запуска к запуску, а у Claude и YandexGPT — тем более, и итог
+# сдвигался на 17-25 пунктов. Теперь модель отвечает на узкие вопросы — статус каждого
+# пункта, — а число считает код по весам ниже. Веса и формулировки согласуются с
+# тендерным отделом (AI_SCORE_PROMPTS.md), поэтому живут константами, а не внутри текста.
+
+# Сколько даёт статус пункта. `not_applicable` в расчёт не входит вовсе.
+STATUS_VALUES: dict[str, float] = {
+    CheckStatus.MET.value: 1.0,
+    CheckStatus.PARTIAL.value: 0.5,
+    CheckStatus.UNKNOWN.value: 0.5,
+    CheckStatus.NOT_MET.value: 0.0,
+}
+
+
+@dataclass(frozen=True)
+class TaskCriterion:
+    code: str
+    title: str
+    weight: int
+    met: str
+    partial: str
+    not_met: str
+    # Пустая строка — критерий применим всегда.
+    not_applicable: str = ""
+
+
+TASK_CRITERIA: tuple[TaskCriterion, ...] = (
+    TaskCriterion(
+        code="subject",
+        title="Предмет закупки — профиль компании",
+        weight=40,
+        met=(
+            "закупаются приборы учёта электроэнергии, системы учёта (АСКУЭ, АИИС КУЭ), "
+            "УСПД и компоненты систем учёта, либо их монтаж, наладка, обслуживание, поверка"
+        ),
+        partial=(
+            "учёт — только часть закупки, или предмет смежный: оборудование, которое "
+            "компания поставляет не как основную продукцию (шкафы учёта, трансформаторы "
+            "тока, каналообразующее оборудование)"
+        ),
+        not_met="предмет закупки к деятельности компании не относится",
+    ),
+    TaskCriterion(
+        code="product_fit",
+        title="Продукция и работы компании закрывают требования к товару и работам",
+        weight=30,
+        met=(
+            "среди требований «к товару» и «к работам» нет таких, которые продукция или "
+            "работы компании заведомо не выполняют"
+        ),
+        partial=(
+            "отдельные требования по профилю не подтверждаются или потребуют доработки, "
+            "субподрядчика, закупки у третьих лиц"
+        ),
+        not_met=(
+            "есть критичное требование, которое компания выполнить не может (другой тип "
+            "прибора, другой вид работ)"
+        ),
+        not_applicable="требований к товару и работам в списке нет",
+    ),
+    TaskCriterion(
+        code="experience",
+        title="Подтверждённый опыт аналогичных поставок или работ",
+        weight=20,
+        met=(
+            "в профиле есть реализованные проекты того же вида (та же продукция или те же "
+            "работы) — номер строки профиля обязателен"
+        ),
+        partial="в профиле есть проекты смежного вида, другого масштаба или другой отрасли",
+        not_met="подтверждений аналогичного опыта в профиле нет",
+    ),
+    TaskCriterion(
+        code="scope_purity",
+        title="В закупке нет существенной непрофильной части",
+        weight=10,
+        met="вся закупка в профиле компании",
+        partial=(
+            "есть непрофильная часть, которую можно закрыть субподрядом или закупкой у "
+            "третьих лиц"
+        ),
+        not_met="значительная доля закупки по объёму или цене непрофильна",
+    ),
+)
+TASK_CRITERIA_BY_CODE = {criterion.code: criterion for criterion in TASK_CRITERIA}
+
+
+def _task_criteria_block() -> str:
+    blocks = []
+    for number, criterion in enumerate(TASK_CRITERIA, start=1):
+        lines = [
+            f'{number}. code "{criterion.code}": {criterion.title}.',
+            f"   met — {criterion.met};",
+            f"   partial — {criterion.partial};",
+            f"   not_met — {criterion.not_met}.",
+        ]
+        if criterion.not_applicable:
+            lines[-1] = lines[-1][:-1] + ";"
+            lines.append(f"   not_applicable — {criterion.not_applicable}.")
+        blocks.append("\n".join(lines))
+    return "\n".join(blocks)
+
+
+_TASK_PROMPT = f"""Ты — руководитель тендерного отдела производителя приборов учёта
 электроэнергии. Оцени измерение «Задача» (Task): насколько предмет закупки соответствует
-опыту и продукции компании.
+опыту и продукции компании. Число не называй — проставь статус каждому критерию ниже,
+процент посчитает система.
+
+КРИТЕРИИ И ЗНАЧЕНИЕ СТАТУСОВ:
+{_task_criteria_block()}
 
 Верни JSON:
-- score: целое число 0-100. 100 — компания ровно этим и занимается, у неё есть похожие
-  выполненные проекты и подходящая продукция; 50 — предмет смежный, часть работ непрофильна;
-  0 — предмет закупки к деятельности компании отношения не имеет.
-- comment: 1-3 предложения, почему именно такая цифра. Без общих слов, со ссылкой на суть
-  закупки и конкретный опыт компании.
-- requirement_numbers: номера требований закупки (из списка ТРЕБОВАНИЯ), которые сильнее
-  всего повлияли на оценку. Пустой список, если ни одно требование не оказалось решающим.
-- profile_numbers: номера строк профиля компании (из списка ПРОФИЛЬ КОМПАНИИ), на которых
-  основан вывод. Пустой список, если профиль ничего не подтверждает.
+- criteria: ровно по одному объекту на каждый критерий из списка, в том же порядке:
+  - code: код критерия из списка;
+  - status: строго одно из "met", "partial", "not_met", "not_applicable"
+    ("not_applicable" — только там, где оно описано у критерия);
+  - comment: одно предложение — почему такой статус, со ссылкой на суть закупки или
+    конкретный опыт компании;
+  - requirement_numbers: номера требований закупки (из списка ТРЕБОВАНИЯ), на которые
+    опирается статус. Пустой список, если требования ни при чём;
+  - profile_numbers: номера строк профиля компании (из списка ПРОФИЛЬ КОМПАНИИ), на
+    которых основан статус. Пустой список, если профиль ничего не подтверждает.
+- comment: 1-2 предложения — общий вывод по измерению.
 
 Оценивай предмет закупки, а не оформление документации. Не выдумывай опыт, которого нет в
-профиле: если подтверждения нет — это довод снизить оценку, а не повод предположить.
+профиле: если подтверждения нет — это "partial" или "not_met", а не "met".
 Отвечай по-русски."""
 
 _COMPETENCIES_PROMPT = """Ты — руководитель тендерного отдела производителя приборов учёта
 электроэнергии. Оцени измерение «Компетенции» (Competencies): хватает ли компании
-формальных допусков, лицензий и стажа под требования закупки.
+формальных допусков, лицензий и стажа под требования закупки. Число не называй — выпиши
+требования к участнику и проставь каждому статус, процент посчитает система.
+
+ЧТО СЧИТАТЬ ТРЕБОВАНИЕМ К УЧАСТНИКУ: лицензии и допуски (СРО, ФСБ, ФСТЭК и т.п.),
+сертификаты систем менеджмента, нахождение продукции или ПО в реестрах, если это условие
+допуска, стаж и опыт исполнения аналогичных договоров, кадры, производственные мощности,
+сервисные центры, статус участника (например, МСП), если это условие допуска.
+Источники — список ТРЕБОВАНИЯ (пометка «к участнику») и разделы карточки закупки.
+
+НЕ ВКЛЮЧАЙ: типовые декларации участника (не в реестре недобросовестных поставщиков, не в
+стадии ликвидации или банкротства, нет недоимок, нет судимости у руководителя, нет
+конфликта интересов, не офшор) — они подтверждаются декларацией в заявке; обеспечение
+заявки и договора; требования к оформлению заявки; технические характеристики товара —
+их оценивает другой раздел. Одинаковые требования из разных источников объединяй.
 
 Верни JSON:
-- score: целое число 0-100. 100 — все обязательные допуски и требуемый опыт у компании есть;
-  50 — часть требований закрыта, часть под вопросом; 0 — обязательные допуски отсутствуют.
-- comment: 1-3 предложения: какие требования закрыты, какие нет.
-- requirement_numbers: номера требований закупки, относящихся к допускам, лицензиям, стажу
-  и опыту участника, которые повлияли на оценку.
-- profile_numbers: номера строк профиля компании, подтверждающих (или не подтверждающих)
-  соответствие.
+- requirements: список требований к участнику, не более 12. Каждое:
+  - text: требование своими словами, коротко;
+  - requirement_number: номер из списка ТРЕБОВАНИЯ, или 0, если требование взято из
+    разделов карточки закупки;
+  - mandatory: true — без выполнения заявку отклонят; false — требование даёт баллы при
+    оценке заявок или носит рекомендательный характер;
+  - status: строго одно из:
+    "met" — профиль прямо подтверждает (в profile_numbers обязателен номер строки);
+    "not_met" — профиль прямо противоречит: стаж или дата регистрации меньше требуемой,
+      допуск указан с истёкшим сроком, требуется статус, которого у компании нет;
+    "unknown" — в профиле нет сведений ни за, ни против;
+  - comment: одно предложение — чем подтверждено или чего не хватает;
+  - profile_numbers: номера строк профиля компании, на которых основан статус.
+  Пустой список, если формальных требований к участнику в закупке нет.
+- comment: 1-2 предложения — какие требования закрыты, какие нет.
 
-Считай только формальные требования к участнику — технические характеристики приборов
-оценивает другой раздел. Отсутствие сведений в профиле — это «не подтверждено», а не
-«соответствует». Отвечай по-русски."""
+Отсутствие сведений в профиле — это "unknown", а не "met". Не выдумывай допусков, которых
+нет в профиле. Отвечай по-русски."""
 
 _RESUME_PROMPT = """Ты — руководитель тендерного отдела производителя приборов учёта
 электроэнергии. Тебе даны сведения о закупке, уже посчитанные измерения AI-оценки и уже
@@ -319,7 +476,8 @@ def _matrix_hint(db: Session, tender: Tender) -> str | None:
 
 
 def _evidence(
-    answer: DimensionAnswer,
+    requirement_numbers: list[int],
+    profile_numbers: list[int],
     requirements: list[Requirement],
     profile: CompanyProfile,
 ) -> list[dict]:
@@ -332,7 +490,7 @@ def _evidence(
     evidence: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
-    for number in answer.requirement_numbers:
+    for number in requirement_numbers:
         if not 1 <= number <= len(requirements):
             continue
         requirement = requirements[number - 1]
@@ -349,7 +507,7 @@ def _evidence(
         )
 
     profile_fields = company_profile_service.profile_fields(profile)
-    for number in answer.profile_numbers:
+    for number in profile_numbers:
         if not 1 <= number <= len(profile_fields):
             continue
         field_key, text = profile_fields[number - 1]
@@ -367,23 +525,137 @@ def _evidence(
     return evidence
 
 
-def _clamp_score(value: int) -> Decimal:
-    return Decimal(str(max(0, min(100, int(value)))))
+def _valid_profile_numbers(numbers: list[int], profile: CompanyProfile) -> list[int]:
+    total = len(company_profile_service.profile_fields(profile))
+    return [number for number in numbers if 1 <= number <= total]
 
 
-def _ask_dimension(
-    db: Session,
+def _checklist_item(
+    title: str,
+    status: str,
+    comment: str,
     *,
-    system_prompt: str,
-    user_text: str,
-) -> DimensionAnswer:
-    return run_structured(
-        db,
-        system_prompt=system_prompt,
-        user_text=user_text,
-        response_model=DimensionAnswer,
-        temperature=0.1,
-    )
+    weight: int | None = None,
+    mandatory: bool | None = None,
+) -> dict:
+    return {
+        "title": title,
+        "status": status,
+        "status_label": CHECK_STATUS_LABELS.get(status, status),
+        "comment": comment,
+        "weight": weight,
+        "mandatory": mandatory,
+    }
+
+
+def _score_task(
+    answer: TaskAnswer, requirements: list[Requirement], profile: CompanyProfile
+) -> tuple[Decimal | None, list[dict], list[dict]]:
+    """Число «Задачи» по статусам критериев: взвешенная доля, `not_applicable` вне расчёта.
+
+    Правила поверх ответа модели:
+    - критерий, который модель пропустила или пометила неизвестным статусом, считается
+      «частично» — нейтральная середина, а не штраф и не подарок; в комментарии это видно;
+    - «опыт выполнено» без ссылки на строку профиля понижается до «частично»: подтверждение,
+      которое нельзя проверить, не подтверждение;
+    - непрофильный предмет закупки (`subject` = not_met) обнуляет измерение целиком — иначе
+      остальные критерии натянули бы ему до 60%.
+    """
+
+    answers = {item.code: item for item in answer.criteria}
+    checklist: list[dict] = []
+    requirement_numbers: list[int] = []
+    profile_numbers: list[int] = []
+    earned = 0.0
+    total = 0
+
+    for criterion in TASK_CRITERIA:
+        item = answers.get(criterion.code)
+        allowed = {CheckStatus.MET.value, CheckStatus.PARTIAL.value, CheckStatus.NOT_MET.value}
+        if criterion.not_applicable:
+            allowed.add(CheckStatus.NOT_APPLICABLE.value)
+
+        if item is None:
+            status, comment = CheckStatus.PARTIAL.value, "Модель критерий не оценила — учтён как «частично»."
+        else:
+            status = item.status.strip().lower()
+            comment = item.comment.strip()
+            if status not in allowed:
+                comment = f"{comment} (статус «{item.status}» не распознан — учтён как «частично»)".strip()
+                status = CheckStatus.PARTIAL.value
+            valid_profile = _valid_profile_numbers(item.profile_numbers, profile)
+            if (
+                criterion.code == "experience"
+                and status == CheckStatus.MET.value
+                and not valid_profile
+            ):
+                status = CheckStatus.PARTIAL.value
+                comment = f"{comment} (без ссылки на профиль — понижено до «частично»)".strip()
+            requirement_numbers.extend(item.requirement_numbers)
+            profile_numbers.extend(valid_profile)
+
+        checklist.append(_checklist_item(criterion.title, status, comment, weight=criterion.weight))
+        if status == CheckStatus.NOT_APPLICABLE.value:
+            continue
+        earned += criterion.weight * STATUS_VALUES[status]
+        total += criterion.weight
+
+    evidence = _evidence(requirement_numbers, profile_numbers, requirements, profile)
+    subject = checklist[0]["status"]
+    if subject == CheckStatus.NOT_MET.value:
+        return Decimal("0"), checklist, evidence
+    if not total:
+        return None, checklist, evidence
+    return Decimal(str(round(earned / total * 100))), checklist, evidence
+
+
+def _score_competencies(
+    answer: CompetenciesAnswer, requirements: list[Requirement], profile: CompanyProfile
+) -> tuple[Decimal | None, list[dict], list[dict]]:
+    """Число «Компетенций» по списку требований к участнику.
+
+    - Требований к участнику нет — измерение «не применимо» (`None`) и исключается из
+      итога: раньше модель в этом случае ставила то 0 («ничего не подтверждено»), то 50,
+      то 100 («требовать нечего»), и это был главный источник расхождений между моделями.
+    - Невыполненное обязательное требование обнуляет измерение: без него заявку отклонят.
+    - Иначе — средняя по пунктам: выполнено 1, не подтверждено 0,5, не выполнено 0.
+    - «Выполнено» без ссылки на строку профиля понижается до «не подтверждено».
+    """
+
+    checklist: list[dict] = []
+    requirement_numbers: list[int] = []
+    profile_numbers: list[int] = []
+    values: list[float] = []
+    mandatory_failed = False
+    allowed = {CheckStatus.MET.value, CheckStatus.NOT_MET.value, CheckStatus.UNKNOWN.value}
+
+    for item in answer.requirements:
+        text = item.text.strip()
+        if not text:
+            continue
+        status = item.status.strip().lower()
+        comment = item.comment.strip()
+        if status not in allowed:
+            comment = f"{comment} (статус «{item.status}» не распознан — учтён как «не подтверждено»)".strip()
+            status = CheckStatus.UNKNOWN.value
+        valid_profile = _valid_profile_numbers(item.profile_numbers, profile)
+        if status == CheckStatus.MET.value and not valid_profile:
+            status = CheckStatus.UNKNOWN.value
+            comment = f"{comment} (без ссылки на профиль — понижено до «не подтверждено»)".strip()
+        if item.requirement_number:
+            requirement_numbers.append(item.requirement_number)
+        profile_numbers.extend(valid_profile)
+        if item.mandatory and status == CheckStatus.NOT_MET.value:
+            mandatory_failed = True
+        values.append(STATUS_VALUES[status])
+        checklist.append(_checklist_item(text, status, comment, mandatory=bool(item.mandatory)))
+
+    evidence = _evidence(requirement_numbers, profile_numbers, requirements, profile)
+    if not checklist:
+        return None, checklist, evidence
+    if mandatory_failed:
+        return Decimal("0"), checklist, evidence
+    return Decimal(str(round(sum(values) / len(values) * 100))), checklist, evidence
 
 
 # Организационно-правовые формы и служебные слова, которые не отличают одного заказчика от
@@ -769,18 +1041,24 @@ def _decision_context(
     tender: Tender,
     *,
     history: tuple[Decimal | None, str | None, list | None],
-    task: tuple[Decimal | None, str | None, list],
-    competencies: tuple[Decimal | None, str | None, list],
+    task: tuple,
+    competencies: tuple,
 ) -> str:
     """Три измерения с комментариями и обоснованиями — всё, на чём строится решение.
     Само обоснование (`*_evidence`) даётся текстом, а не номерами: решению нужны факты,
     а не ссылки на них."""
 
     def block(name: str, item: tuple) -> str:
-        score, comment, evidence = item
+        score, comment, evidence, *rest = item
+        checklist = rest[0] if rest else None
         lines = [f"{name}: {'нет данных' if score is None else f'{int(score)}%'}"]
         if comment:
             lines.append(f"  Комментарий: {comment}")
+        # Пункты чек-листа — главный вход решения: правило «нет обязательного допуска —
+        # false» модель может применить, только видя, какой пункт не выполнен.
+        for point in checklist or []:
+            mark = " (обязательное)" if point.get("mandatory") else ""
+            lines.append(f"  * {point['title']}{mark}: {point['status_label']}. {point['comment']}")
         for fact in (evidence or [])[:8]:
             text = (fact.get("note") or "").strip() if isinstance(fact, dict) else str(fact)
             if text:
@@ -845,6 +1123,9 @@ def compute_profile_score(
             "закупки, точность ниже"
         )
 
+    # Модель фиксируется до первого вызова: выбор персональный, и пересчёт должен показать,
+    # какая модель его сделала (25.09.2026).
+    model = active_model(db)
     tender_block = _tender_block(db, tender)
     requirements_block = _requirements_block(requirements)
     profile_block = company_profile_service.profile_block(profile)
@@ -860,11 +1141,17 @@ def compute_profile_score(
     task_score: Decimal | None = None
     task_comment: str | None = None
     task_evidence: list[dict] = []
+    task_checklist: list[dict] | None = None
     try:
-        answer = _ask_dimension(db, system_prompt=_TASK_PROMPT, user_text=task_context)
-        task_score = _clamp_score(answer.score)
-        task_comment = answer.comment.strip()
-        task_evidence = _evidence(answer, requirements, profile)
+        task_answer = run_structured(
+            db,
+            system_prompt=_TASK_PROMPT,
+            user_text=task_context,
+            response_model=TaskAnswer,
+            temperature=0.0,
+        )
+        task_score, task_checklist, task_evidence = _score_task(task_answer, requirements, profile)
+        task_comment = task_answer.comment.strip()
     except Exception as exc:  # noqa: BLE001 - сбой одного измерения не отменяет остальные
         logger.warning(f"Измерение Task для {tender.external_id} не посчитано: {exc}")
         outcome.messages.append(f"Измерение «Задача» не посчитано: {exc}")
@@ -872,16 +1159,36 @@ def compute_profile_score(
     competencies_score: Decimal | None = None
     competencies_comment: str | None = None
     competencies_evidence: list[dict] = []
+    competencies_checklist: list[dict] | None = None
     try:
-        answer = _ask_dimension(
-            db, system_prompt=_COMPETENCIES_PROMPT, user_text=base_context
+        competencies_answer = run_structured(
+            db,
+            system_prompt=_COMPETENCIES_PROMPT,
+            user_text=base_context,
+            response_model=CompetenciesAnswer,
+            temperature=0.0,
         )
-        competencies_score = _clamp_score(answer.score)
-        competencies_comment = answer.comment.strip()
-        competencies_evidence = _evidence(answer, requirements, profile)
+        competencies_score, competencies_checklist, competencies_evidence = _score_competencies(
+            competencies_answer, requirements, profile
+        )
+        competencies_comment = competencies_answer.comment.strip()
+        if not competencies_checklist:
+            competencies_comment = (
+                "Формальных требований к участнику (допуски, лицензии, стаж, опыт) в закупке "
+                "не найдено — измерение не применимо и исключено из итоговой оценки."
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Измерение Competencies для {tender.external_id} не посчитано: {exc}")
         outcome.messages.append(f"Измерение «Компетенции» не посчитано: {exc}")
+
+    # Ни одно модельное измерение не посчитано (нет денег на счёте, модель недоступна) —
+    # новую версию не сохраняем. Иначе итог сложился бы из одной «Истории», и сбой модели
+    # вытеснил бы прежнюю нормальную оценку записью «80%, ИДТИ» (найдено 25.09.2026 на
+    # RouterAI с нулевым балансом).
+    if task_checklist is None and competencies_checklist is None:
+        raise AiProfileError(
+            "Оценка не посчитана, прежняя оставлена без изменений: " + "; ".join(outcome.messages)
+        )
 
     history_score, history_comment, history_evidence = _history_dimension(db, tender)
     overall = _overall(history_score, task_score, competencies_score)
@@ -892,7 +1199,7 @@ def compute_profile_score(
     # нечего — остаётся `None`.
     decision: bool | None = None
     decision_summary: str | None = None
-    if task_score is not None or competencies_score is not None:
+    if task_checklist is not None or competencies_checklist is not None:
         try:
             answer = run_structured(
                 db,
@@ -900,11 +1207,16 @@ def compute_profile_score(
                 user_text=_decision_context(
                     tender,
                     history=(history_score, history_comment, history_evidence),
-                    task=(task_score, task_comment, task_evidence),
-                    competencies=(competencies_score, competencies_comment, competencies_evidence),
+                    task=(task_score, task_comment, task_evidence, task_checklist),
+                    competencies=(
+                        competencies_score,
+                        competencies_comment,
+                        competencies_evidence,
+                        competencies_checklist,
+                    ),
                 ),
                 response_model=DecisionAnswer,
-                temperature=0.1,
+                temperature=0.0,
             )
             decision = bool(answer.participate)
             decision_summary = answer.summary.strip() or None
@@ -924,7 +1236,7 @@ def compute_profile_score(
             f"Задача: {'не посчитано' if task_score is None else f'{task_score}%'}"
             f"{f' — {task_comment}' if task_comment else ''}\n"
             f"Компетенции: "
-            f"{'не посчитано' if competencies_score is None else f'{competencies_score}%'}"
+            f"{('не применимо' if competencies_checklist == [] else 'не посчитано') if competencies_score is None else f'{competencies_score}%'}"
             f"{f' — {competencies_comment}' if competencies_comment else ''}\n"
             f"Итог: {'не посчитан' if overall is None else f'{overall}%'}\n"
             f"РЕШЕНИЕ: {_decision_label(decision)} — {VERDICT_LABELS.get(verdict, verdict)}"
@@ -954,6 +1266,8 @@ def compute_profile_score(
         history=(history_score, history_comment, history_evidence),
         task=(task_score, task_comment, task_evidence),
         competencies=(competencies_score, competencies_comment, competencies_evidence),
+        checklists=(task_checklist, competencies_checklist),
+        model=model,
         overall=overall,
         summary=summary,
         verdict=verdict,
@@ -974,7 +1288,7 @@ def compute_profile_score(
             f"Итог: {overall if overall is not None else '—'}; задача: "
             f"{task_score if task_score is not None else '—'}; компетенции: "
             f"{competencies_score if competencies_score is not None else '—'}; "
-            f"слабых мест: {len(weak_points)}"
+            f"слабых мест: {len(weak_points)}; модель: {model[1] or model[0]}"
             + ("; " + "; ".join(outcome.messages) if outcome.messages else "")
         ),
         user_id=actor.id if actor else None,
@@ -992,6 +1306,8 @@ def _store(
     competencies: tuple[Decimal | None, str | None, list],
     overall: Decimal | None,
     summary: str | None,
+    checklists: tuple[list | None, list | None] = (None, None),
+    model: tuple[str | None, str | None] = (None, None),
     verdict: str,
     weak_points: list[dict],
     strategy: dict | None,
@@ -1024,6 +1340,10 @@ def _store(
         competencies_score=competencies[0],
         competencies_comment=competencies[1],
         competencies_evidence=competencies[2],
+        task_checklist=checklists[0],
+        competencies_checklist=checklists[1],
+        ai_provider=model[0],
+        ai_model=model[1],
         overall_score=overall,
         summary=summary,
         verdict=verdict,
@@ -1071,6 +1391,7 @@ def serialize(db: Session, score: AiProfileScore) -> dict:
     """
 
     from app.models.ai_profile import SEVERITY_LABELS
+    from app.services.ai_provider_service import PROVIDER_LABELS
 
     weak_points = [
         {
@@ -1109,6 +1430,11 @@ def serialize(db: Session, score: AiProfileScore) -> dict:
         "competencies_score": score.competencies_score,
         "competencies_comment": score.competencies_comment,
         "competencies_evidence": score.competencies_evidence or [],
+        "task_checklist": score.task_checklist,
+        "competencies_checklist": score.competencies_checklist,
+        "ai_provider": score.ai_provider,
+        "ai_provider_label": PROVIDER_LABELS.get(score.ai_provider or ""),
+        "ai_model": score.ai_model,
         "overall_score": score.overall_score,
         "summary": score.summary,
         "verdict": score.verdict,

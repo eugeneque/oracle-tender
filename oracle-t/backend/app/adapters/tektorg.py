@@ -1,31 +1,31 @@
 """Адаптер ТЭК-Торг (tektorg.ru) — раздел 4.1 (источник №5), 5.1 ТЗ.
 
-Поиск процедур (`/procedures?name=...`) — Next.js-приложение (Pages Router) на styled-
-components: карточки результатов, как и на Фабрикант (`app/adapters/fabrikant.py`), подгружаются
-клиентским кодом, а не присутствуют в исходном серверном HTML. У площадки нашёлся также
-`/_next/data/<buildId>/ru/procedures.json?name=...` — но `<buildId>` меняется при каждом
-редеплое площадки, поэтому URL не воспроизводится напрямую (httpx), а получается через
-Playwright: открывает страницу поиска с ключевым словом в query-параметре и разбирает
-отрисованную HTML-разметку.
+Поиск процедур (`/procedures?name=...&page=N`) — Next.js-приложение (Pages Router), и выдача
+приходит уже в серверном HTML: в теге `<script id="__NEXT_DATA__">`, в
+`props.pageProps.initialReduxState.listingProcedures` — записи страницы (`data`), общее число
+найденного (`total`) и страниц (`totalPages`). Браузер для этого не нужен, хватает httpx.
 
-Верстка не использует смысловые (BEM) классы — только автосгенерированные styled-components
-(`sc-<hash>-<n>`), которые тоже могут смениться при переразвёртывании фронтенда площадки. Более
-устойчивой альтернативы не нашлось (нет ни `data-*` атрибутов, ни семантических классов), поэтому
-подписи полей карточки ("Организатор", "Начальная цена" и т.д.) ищутся по их видимому тексту, а
-не по классу — это переживёт смену хеша класса, но не смену самого текста подписи на площадке.
-Класс карточки-контейнера (`sc-6c01eeae-0`) — общий для всех разновидностей карточек (закупки,
-продажа имущества), несмотря на разную внутреннюю раскладку полей.
+До 28.09.2026 адаптер открывал страницу в Playwright и читал отрисованные карточки по
+автосгенерированным классам styled-components (`sc-6c01eeae-0` и т.п.). Площадка
+пересобрала фронтенд, хэши сменились, и опрос по всем ключевым словам стал отдавать
+«Результаты поиска не найдены» — при 178 закупках по одному только «АИИС КУЭ». JSON
+состояния от вёрстки не зависит. Ссылка на карточку в нём не лежит, но раздел в пути
+(`/223-fz/`, `/inter_rao/`, `/market/`) из `sectionAlias` выводится не один к одному, поэтому
+берём её из `<a href>` той же страницы по id процедуры, а таблица разделов — запасной путь.
+
+Если JSON выдачи на странице не нашёлся, это не «пустая выдача», а «страница не
+распознана» — ошибка пишется другим текстом, чтобы смену разметки было видно в журнале.
 """
 
 from __future__ import annotations
 
 import json
 from datetime import datetime
+import re
 from urllib.parse import quote, urljoin
 
 import httpx
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 
 from app.adapters.eis_documents import fetch_eis_documents
 from app.adapters.base import (
@@ -37,15 +37,14 @@ from app.adapters.base import (
     TenderSummary,
 )
 from app.adapters.http_utils import DEFAULT_USER_AGENT, fetch_with_retry, resolve_verify
-from app.adapters.parsing_utils import element_text, parse_price
+from app.adapters.parsing_utils import parse_price
 
 BASE_URL = "https://www.tektorg.ru"
 SEARCH_PATH = "/procedures"
-CARD_SELECTOR = "div.sc-6c01eeae-0"
-ID_SELECTOR = ".sc-375e6608-4"
-TITLE_LINK_SELECTOR = ".sc-6c01eeae-7"
-STATUS_SELECTOR = ".sc-3e697cd2-2"
-CATEGORY_SELECTOR = ".sc-375e6608-6 span"
+
+# Раздел площадки → сегмент пути карточки, где они не совпадают (снято с выдачи 28.09.2026).
+# Нужен, только если `<a href>` на карточку не нашёлся на странице.
+_SECTION_PATHS = {"zakupki": "223-fz", "interrao": "inter_rao"}
 
 # Защитный предел обхода страниц выдачи — тот же принцип, что и в остальных адаптерах
 # (см. app/adapters/eis.py): не уходить в бесконечный цикл, если площадка перестанет
@@ -64,6 +63,12 @@ DEFAULT_SEARCH_KEYWORDS = [
 # продажа объекта, а не закупка приборов. Для тендерного отдела (раздел 3 ТЗ) это шум,
 # причём заметный — в наблюдаемой выдаче таких карточек была четверть.
 _EXCLUDED_URL_SECTIONS = ("/sale/",)
+_EXCLUDED_SECTION_ALIASES = {"sale", "sale178", "sale_arrest", "arrested_sale", "rosneft_selling"}
+
+
+class UnrecognizedPageError(RuntimeError):
+    """На странице выдачи нет JSON со списком процедур — сменилась разметка площадки или
+    вместо выдачи пришла заглушка (капча, блокировка по IP)."""
 
 # Формулировки статуса собраны по выборке при разработке (сортировка «По актуальности» на самом
 # сайте отдавала все эти статусы на первой странице выдачи). Нераспознанная формулировка статус
@@ -84,32 +89,45 @@ def _parse_status(text: str | None) -> str | None:
     return _STATUS_TO_STATUS.get(text.strip().lower())
 
 
-def _field_value(card, label: str):
-    """Сосед подписи поля по её видимому тексту (см. докстринг модуля — площадка не даёт более
-    устойчивой зацепки, чем сам текст подписи). Возвращает сам тег-сосед, а не его текст, — для
-    полей с датой (`<time datetime="...">`) вызывающий код читает атрибут `datetime`, а не текст."""
-
-    for label_el in card.find_all("div"):
-        if element_text(label_el) == label:
-            return label_el.find_next_sibling()
-    return None
-
-
-def _field_text(card, label: str) -> str | None:
-    return element_text(_field_value(card, label))
-
-
-def _field_datetime(card, label: str) -> datetime | None:
-    value_el = _field_value(card, label)
-    if value_el is None or value_el.name != "time":
-        return None
-    raw = value_el.get("datetime")
+def _parse_datetime(raw: str | None) -> datetime | None:
     if not raw:
         return None
     try:
         return datetime.fromisoformat(raw)
     except ValueError:
         return None
+
+
+def _next_data(html: str) -> dict | None:
+    script = BeautifulSoup(html, "lxml").select_one("script#__NEXT_DATA__")
+    if script is None or not script.string:
+        return None
+    try:
+        return json.loads(script.string)
+    except json.JSONDecodeError:
+        return None
+
+
+def parse_listing(html: str) -> tuple[list[dict], int, dict[int, str]]:
+    """Записи страницы выдачи, число страниц и ссылки на карточки по id процедуры."""
+
+    payload = _next_data(html)
+    listing = (
+        ((payload or {}).get("props") or {})
+        .get("pageProps", {})
+        .get("initialReduxState", {})
+        .get("listingProcedures")
+    )
+    if not isinstance(listing, dict) or not isinstance(listing.get("data"), list):
+        raise UnrecognizedPageError(
+            "страница выдачи не распознана: нет списка процедур в __NEXT_DATA__ "
+            "(сменилась разметка площадки или пришла заглушка вместо выдачи)"
+        )
+    hrefs = {
+        int(match.group(2)): match.group(1)
+        for match in re.finditer(r'href="(/[^"#?]+/procedures/(\d+))"', html)
+    }
+    return listing["data"], int(listing.get("totalPages") or 0), hrefs
 
 
 def _document_client() -> httpx.Client:
@@ -124,14 +142,8 @@ def _document_client() -> httpx.Client:
 def _parse_next_data_documents(html: str) -> list[DocumentRef]:
     """Документы процедуры из состояния Next.js на странице карточки."""
 
-    soup = BeautifulSoup(html, "lxml")
-    script = soup.select_one("script#__NEXT_DATA__")
-    if script is None or not script.string:
-        return []
-
-    try:
-        payload = json.loads(script.string)
-    except json.JSONDecodeError:
+    payload = _next_data(html)
+    if payload is None:
         return []
 
     procedure = (
@@ -168,90 +180,80 @@ class TektorgAdapter(SourceAdapter):
         url = f"{BASE_URL}{SEARCH_PATH}?name={quote(keyword)}"
         if page_number > 1:
             url = f"{url}&page={page_number}"
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch()
-            try:
-                page = browser.new_page(user_agent=DEFAULT_USER_AGENT)
-                page.goto(url, wait_until="networkidle", timeout=30000)
-                try:
-                    page.wait_for_selector(CARD_SELECTOR, timeout=10000)
-                except Exception:
-                    pass  # по этому ключевому слову может не быть результатов — не фатально
-                return page.content()
-            finally:
-                browser.close()
+        with _document_client() as client:
+            response = fetch_with_retry(client, "GET", url, headers={"Accept": "text/html"})
+        response.raise_for_status()
+        return response.text
 
     def _search_pages(self, keyword: str):
-        """Страницы выдачи по ключевому слову. Площадка отдаёт по 15 карточек и не показывает
-        общее число найденного, а адаптер раньше читал только первую страницу — то есть по
-        каждому запросу терялось всё, что не поместилось в первые 15 позиций. Признак конца
-        выдачи — пустая страница или повтор уже виденных карточек: за последней страницей
-        площадка отдаёт её же содержимое, а не пустой список."""
+        """Страницы выдачи по ключевому слову: по 15 записей, до `totalPages` из самой
+        выдачи. Поле `currentPage` в JSON всегда 1 — на него не опираемся; повтор уже
+        виденных id тоже считается концом, на случай если площадка перестанет отдавать
+        число страниц."""
 
-        seen_ids: set[str] = set()
+        seen_ids: set[int] = set()
         for page_number in range(1, MAX_SEARCH_PAGES + 1):
-            html = self._search_html(keyword, page_number)
-            soup = BeautifulSoup(html, "lxml")
-            cards = soup.select(CARD_SELECTOR)
-            if not cards:
-                break
-
-            page_ids = {
-                element_text(card.select_one(ID_SELECTOR)) or ""
-                for card in cards
-            }
-            if page_ids and page_ids <= seen_ids:
+            items, total_pages, hrefs = parse_listing(self._search_html(keyword, page_number))
+            page_ids = {item.get("id") for item in items}
+            if not items or page_ids <= seen_ids:
                 break
             seen_ids |= page_ids
-            yield cards
+            yield items, hrefs
+            if page_number >= total_pages:
+                break
 
-    def _parse_card(self, card, errors: list[PollError]) -> TenderSummary | None:
-        id_el = card.select_one(ID_SELECTOR)
-        link = card.select_one(TITLE_LINK_SELECTOR)
-        if id_el is None or link is None:
-            return None
-        external_id = element_text(id_el)
+    def _parse_item(
+        self, item: dict, hrefs: dict[int, str], errors: list[PollError]
+    ) -> TenderSummary | None:
+        external_id = (item.get("registryNumber") or "").lstrip("№").strip()
         if not external_id:
             return None
-        external_id = external_id.lstrip("№").strip()
 
         try:
-            href = link.get("href") or ""
-            source_url = urljoin(BASE_URL, href) if href else f"{BASE_URL}{SEARCH_PATH}"
-
-            if any(section in source_url for section in _EXCLUDED_URL_SECTIONS):
+            section = item.get("sectionAlias") or ""
+            if section in _EXCLUDED_SECTION_ALIASES:
                 return None  # торги по продаже имущества — не закупка, см. _EXCLUDED_URL_SECTIONS
 
-            publish_dt = _field_datetime(card, "Дата публикации")
+            procedure_id = item.get("id")
+            path = hrefs.get(procedure_id) or (
+                f"/{_SECTION_PATHS.get(section, section)}/procedures/{procedure_id}"
+            )
+            source_url = urljoin(BASE_URL, path)
+            if any(excluded in source_url for excluded in _EXCLUDED_URL_SECTIONS):
+                return None
+
+            dates = item.get("dates") or {}
+            publish_dt = _parse_datetime(dates.get("datePublished"))
+            organizer = (item.get("organizerName") or "").strip() or None
 
             return TenderSummary(
                 external_id=external_id,
-                title=element_text(link) or "(без наименования)",
+                title=(item.get("title") or "").strip() or "(без наименования)",
                 source_url=source_url,
-                customer_name=_field_text(card, "Организатор"),
-                organizer_name=_field_text(card, "Организатор"),
-                procurement_method=element_text(card.select_one(CATEGORY_SELECTOR)),
-                status=_parse_status(element_text(card.select_one(STATUS_SELECTOR))),
-                price=parse_price(_field_text(card, "Начальная цена")),
+                customer_name=organizer,
+                organizer_name=organizer,
+                procurement_method=(item.get("typeName") or "").strip() or None,
+                status=_parse_status(item.get("statusName")),
+                price=parse_price(item.get("sumPrice")),
                 currency="RUB",
                 publish_date=publish_dt.date() if publish_dt else None,
-                application_end=_field_datetime(card, "Дата окончания приема заявок"),
+                application_end=_parse_datetime(dates.get("dateEndRegistration")),
             )
-        except Exception as exc:  # noqa: BLE001 - ошибка одной карточки не должна прервать разбор
-            errors.append(PollError(external_id, f"Не удалось разобрать карточку: {exc}"))
+        except Exception as exc:  # noqa: BLE001 - ошибка одной записи не должна прервать разбор
+            errors.append(PollError(external_id, f"Не удалось разобрать запись выдачи: {exc}"))
             return None
 
     def list_new_tenders(self, since: datetime | None) -> PollOutcome:
         outcome = PollOutcome()
         seen: dict[str, TenderSummary] = {}
 
+        # Пустая выдача по слову — законный ответ, а не ошибка: признак поломки разбора —
+        # `UnrecognizedPageError` из `parse_listing`, он уходит в журнал своим текстом.
         for keyword in self.search_keywords:
-            found_any = False
             try:
-                for cards in self._search_pages(keyword):
-                    found_any = True
-                    for card in cards:
-                        summary = self._parse_card(card, outcome.errors)
+                for items, hrefs in self._search_pages(keyword):
+                    for item in items:
+                        summary = self._parse_item(item, hrefs, outcome.errors)
                         if summary is not None:
                             self._collect(seen, summary)
             except Exception as exc:  # noqa: BLE001 - ошибка одного ключевого слова не должна прервать остальные
@@ -259,11 +261,6 @@ class TektorgAdapter(SourceAdapter):
                     PollError(None, f"Не удалось получить выдачу по '{keyword}': {exc}")
                 )
                 continue
-
-            if not found_any:
-                outcome.errors.append(
-                    PollError(None, f"Результаты поиска не найдены по '{keyword}'")
-                )
 
         outcome.tenders = list(seen.values())
         return outcome
@@ -285,8 +282,7 @@ class TektorgAdapter(SourceAdapter):
         есть читаемое имя и `httpLink` на открытое API площадки
         (`api.tektorg.ru/open-api/documents/...`), которое отдаёт файл без авторизации.
 
-        Поэтому Playwright, нужный реестру (список процедур дорисовывается скриптом), здесь
-        не требуется: достаточно забрать HTML карточки и прочитать из него JSON.
+        Достаточно забрать HTML карточки и прочитать из него JSON — так же, как выдачу.
 
         Протоколы (`protocols[].documents`) берём тоже: в них публикуются итоги и разъяснения,
         которые для анализа требований не менее полезны, чем сама документация.

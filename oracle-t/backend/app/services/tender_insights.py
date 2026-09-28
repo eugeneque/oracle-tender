@@ -30,7 +30,7 @@ from app.models.tender_card import TenderCard
 from app.models.tender_document import DocumentClass, TenderDocument
 from app.models.user import User
 from app.services.audit import log_action
-from app.services.ai_client import run_structured
+from app.services.ai_client import AiQuotaExceededError, run_structured
 
 # Сколько текста документации уходит в разбор разделов «Дополнительно». Больше — рвётся
 # ответ; меньше — не доходит до технических приложений, где и лежат условия исполнения.
@@ -88,6 +88,11 @@ EXTRA_SECTIONS: dict[str, str] = {
 # Studio: на схему с необязательным полем сервис отвечает
 # «Invalid JSON Schema: all fields must be required». Пустой список модель возвращает явно —
 # и это к лучшему: «сказать нечего» и «модель забыла раздел» перестают выглядеть одинаково.
+
+
+class ExtraSectionsError(RuntimeError):
+    """Ни одна пачка разделов не получена из-за сбоя модели. Текст — причина сбоя: раньше
+    эндпоинт подменял её фразой «модель не вернула ни одного раздела»."""
 
 
 class SectionsBatchOne(pydantic.BaseModel):
@@ -185,7 +190,9 @@ def build_extra_sections(
     """Извлекает девять разделов вкладки «Дополнительно» двумя вызовами модели.
 
     Неудача одной пачки не отменяет вторую: пять разделов лучше, чем ноль, а карточка честно
-    покажет, что остальные не разобраны.
+    покажет, что остальные не разобраны. Исключение — денежный отказ провайдера: вторая пачка
+    упрётся в тот же лимит, и без разделов поднимается `AiQuotaExceededError`. Если обе пачки
+    упали по другим причинам — `ExtraSectionsError` с первой из них.
     """
 
     context = (
@@ -195,6 +202,7 @@ def build_extra_sections(
 
     sections: dict[str, list[str]] = {}
     failures: list[str] = []
+    quota_error: AiQuotaExceededError | None = None
     for hint, model in ((_BATCH_ONE_HINT, SectionsBatchOne), (_BATCH_TWO_HINT, SectionsBatchTwo)):
         try:
             result = run_structured(
@@ -204,6 +212,10 @@ def build_extra_sections(
                 response_model=model,
                 temperature=0.1,
             )
+        except AiQuotaExceededError as exc:
+            quota_error = exc
+            failures.append(str(exc))
+            break
         except Exception as exc:  # noqa: BLE001 - пачки независимы
             logger.warning(
                 f"Разделы «Дополнительно» ({model.__name__}) для {tender.external_id} "
@@ -226,6 +238,11 @@ def build_extra_sections(
         user_id=actor.id if actor else None,
     )
     db.commit()
+    if not sections:
+        if quota_error is not None:
+            raise quota_error
+        if failures:
+            raise ExtraSectionsError(failures[0])
     return sections
 
 

@@ -1,131 +1,143 @@
-"""Юнит-тесты разбора HTML ТЭК-Торг — без сети. Фикстуры — реальные карточки `div.sc-6c01eeae-0`,
-снятые со страницы поиска (`/procedures?name=...`) при разработке: площадка отдаёт закупки и
-продажу имущества в одной и той же выдаче, но с разной внутренней раскладкой — в частности,
-статус закупки лежит прямо в шапке карточки, а у имущества — в отдельном поле «Статус» внутри
-тела карточки (см. докстринг адаптера). Оба варианта должны парситься одинаково, так как статус
-ищется по классу бейджа, а не по позиции в дереве."""
+"""Юнит-тесты разбора выдачи ТЭК-Торг — без сети. Фикстура повторяет форму состояния Next.js
+со страницы поиска (`/procedures?name=...`), снятую 28.09.2026: записи лежат в
+`listingProcedures.data`, ссылки на карточки — только в `<a href>` той же страницы. Закупки и
+продажа имущества приходят в одной выдаче и различаются разделом (`sectionAlias`)."""
 
-from bs4 import BeautifulSoup
+import json
 
-from app.adapters.tektorg import TektorgAdapter
+import pytest
 
-CARD_PROCUREMENT_HTML = """
-<div class="sc-6c01eeae-0 jtfzxc">
-  <div class="sc-6c01eeae-1 fOviDm">
-    <div class="sc-6c01eeae-2 ha-dteW">
-      <div class="sc-6c01eeae-6 ehGqSP">
-        <div class="sc-375e6608-2 kddgYv">
-          <span class="sc-375e6608-4 eBkrKS">№ ЗП6081898</span>
-          <div class="sc-3e697cd2-0 gVvBeH"><div><span class="sc-3e697cd2-1 iQgLDt"></span><span class="sc-3e697cd2-2 iLrznN">Приём заявок</span></div></div>
-          <div class="sc-375e6608-6 eBBRCr">
-            <div class="sc-375e6608-3 fwLZwN"><svg></svg></div>
-            <span>223-ФЗ и Коммерческие закупки</span>
-          </div>
-        </div>
-        <a href="/223-fz/procedures/19730908" class="sc-6c01eeae-7 gccepd">Поставка приборов учета электрической энергии</a>
-      </div>
-      <div class="sc-6c01eeae-4 ipEIhq">
-        <div class="sc-6c01eeae-8 pXQhH">
-          <div class="sc-6c01eeae-9 jiywsu">Организатор</div>
-          <div class="sc-6c01eeae-10 hqcmWX">Акционерное общество "Пятигорские электрические сети"</div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="sc-6c01eeae-5 hlHUjB">
-    <div class="sc-6c01eeae-11 bQBzuc">
-      <div class="sc-6c01eeae-9 jiywsu">Начальная цена</div>
-      <div class="sc-a6b34174-0 cLruXa">7&nbsp;112&nbsp;386 ₽</div>
-      <a href="/223-fz/procedures/19730908#lots" class="sc-6c01eeae-23 estfyA">Узнать стоимость участия</a>
-    </div>
-    <div class="sc-6c01eeae-17 etfHgc">
-      <div class="sc-6c01eeae-18 kxxgLZ">
-        <div class="sc-6c01eeae-9 jiywsu">Дата публикации</div>
-        <time datetime="2026-08-25T09:14:02+03:00" class="sc-7909e12c-2 hriSQm"><span class="sc-7909e12c-0 glSvLE">25.08.2026</span></time>
-      </div>
-      <div class="sc-6c01eeae-18 kxxgLZ">
-        <div class="sc-6c01eeae-9 jiywsu">Дата окончания приема заявок</div>
-        <time datetime="2026-09-02T08:00:00+03:00" class="sc-7909e12c-2 fIvbdF"><span class="sc-7909e12c-0 glSvLE">02.09.2026</span></time>
-      </div>
-    </div>
-  </div>
-</div>
-"""
+from app.adapters.tektorg import TektorgAdapter, UnrecognizedPageError, parse_listing
 
-CARD_PROPERTY_SALE_HTML = """
-<div class="sc-6c01eeae-0 jtfzxc">
-  <div class="sc-6c01eeae-1 fOviDm">
-    <div class="sc-6c01eeae-2 ha-dteW">
-      <div class="sc-6c01eeae-6 ehGqSP">
-        <div class="sc-375e6608-2 kddgYv">
-          <span class="sc-375e6608-4 eBkrKS">№ ПИ607124</span>
-          <div class="sc-375e6608-6 eBBRCr">
-            <div class="sc-375e6608-3 fwLZwN"><svg></svg></div>
-            <span>Продажа имущества</span>
-          </div>
-        </div>
-        <a href="/sale/procedures/19399408" class="sc-6c01eeae-7 gccepd">Продажа автозаправочной станции №63</a>
-      </div>
-      <div class="sc-6c01eeae-4 ipEIhq">
-        <div class="sc-6c01eeae-8 pXQhH">
-          <div class="sc-6c01eeae-9 jiywsu">Организатор</div>
-          <div class="sc-6c01eeae-10 hqcmWX">ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "РН-КРАСНОЯРСКНЕФТЕПРОДУКТ"</div>
-        </div>
-        <div class="sc-6c01eeae-12 btrzJI">
-          <div class="sc-6c01eeae-13 kFfcas">
-            <div class="sc-6c01eeae-9 jiywsu">Тип процедуры</div>
-            <div class="sc-6c01eeae-14 dZtlRj">Тендер с онлайн подачей ценовых предложений (на повышение)</div>
-          </div>
-          <div class="sc-6c01eeae-15 bmgRAC">
-            <div class="sc-6c01eeae-9 jiywsu">Статус</div>
-            <div class="sc-3e697cd2-0 gVvBeH"><div><span class="sc-3e697cd2-1 ittKsi"></span><span class="sc-3e697cd2-2 dIgRPO">Работа комиссии</span></div></div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="sc-6c01eeae-3 ivetsx">
-    <div class="sc-6c01eeae-11 bQBzuc">
-      <div class="sc-6c01eeae-9 jiywsu">Начальная цена</div>
-      <div class="sc-a6b34174-0 cLruXa">977&nbsp;525 ₽</div>
-    </div>
-    <div class="sc-6c01eeae-17 etfHgc">
-      <div class="sc-6c01eeae-18 kxxgLZ">
-        <div class="sc-6c01eeae-9 jiywsu">Дата публикации</div>
-        <time datetime="2026-08-03T08:00:00+03:00" class="sc-7909e12c-2 hriSQm"><span class="sc-7909e12c-0 glSvLE">03.08.2026</span></time>
-      </div>
-    </div>
-  </div>
-</div>
-"""
+PROCUREMENT = {
+    "id": 19815106,
+    "registryNumber": "ЗП609927",
+    "title": "Техническое обслуживание АИИСКУЭ ЦОТУиЭ ВЭС",
+    "statusName": "Приём заявок",
+    "typeName": "Запрос предоставления ценовой информации",
+    "organizerName": 'Публичное акционерное общество "Форвард Энерго"',
+    "dates": {
+        "datePublished": "2026-09-10T11:38:55+03:00",
+        "dateEndRegistration": "2026-09-21T15:35:00+03:00",
+    },
+    "sectionAlias": "zakupki",
+    "sumPrice": "1271275.88 ₽",
+}
+
+WITHOUT_LINK = {
+    **PROCUREMENT,
+    "id": 19545375,
+    "registryNumber": "ИР607359",
+    "sectionAlias": "interrao",
+    "sumPrice": "НМЦ не установлена",
+}
+
+PROPERTY_SALE = {
+    **PROCUREMENT,
+    "id": 13908574,
+    "registryNumber": "ПИ607124",
+    "title": "Продажа бывш. АЗС (сарай-склад, счетчик электрической энергии)",
+    "sectionAlias": "sale",
+}
 
 
-def _parse(html: str):
-    soup = BeautifulSoup(html, "lxml")
-    card = soup.select_one("div.sc-6c01eeae-0")
-    adapter = TektorgAdapter()
+def _page(items: list[dict], total_pages: int = 1, links: str = "") -> str:
+    state = {
+        "props": {
+            "pageProps": {
+                "initialReduxState": {
+                    "listingProcedures": {
+                        "data": items,
+                        "total": len(items),
+                        "totalPages": total_pages,
+                        "currentPage": 1,
+                    }
+                }
+            }
+        }
+    }
+    return (
+        f"<html><body>{links}"
+        f'<script id="__NEXT_DATA__" type="application/json">{json.dumps(state)}</script>'
+        "</body></html>"
+    )
+
+
+def _parse(item: dict, links: str = ""):
+    _items, _pages, hrefs = parse_listing(_page([item], links=links))
     errors: list = []
-    summary = adapter._parse_card(card, errors)
+    summary = TektorgAdapter()._parse_item(item, hrefs, errors)
     assert errors == []
     return summary
 
 
-def test_parse_procurement_card():
-    summary = _parse(CARD_PROCUREMENT_HTML)
-    assert summary.external_id == "ЗП6081898"
+def test_parse_procurement_record():
+    summary = _parse(
+        PROCUREMENT,
+        links='<a href="/223-fz/procedures/19815106">x</a>'
+        '<a href="/223-fz/procedures/19815106#lots">x</a>',
+    )
+    assert summary.external_id == "ЗП609927"
     assert summary.status == "collecting_bids"
-    assert summary.organizer_name == 'Акционерное общество "Пятигорские электрические сети"'
-    assert summary.procurement_method == "223-ФЗ и Коммерческие закупки"
-    assert str(summary.price) == "7112386"
-    assert summary.publish_date.isoformat() == "2026-08-25"
-    assert summary.application_end.isoformat() == "2026-09-02T08:00:00+03:00"
-    assert summary.source_url == "https://www.tektorg.ru/223-fz/procedures/19730908"
+    assert summary.organizer_name == 'Публичное акционерное общество "Форвард Энерго"'
+    assert summary.procurement_method == "Запрос предоставления ценовой информации"
+    assert str(summary.price) == "1271275.88"
+    assert summary.publish_date.isoformat() == "2026-09-10"
+    assert summary.application_end.isoformat() == "2026-09-21T15:35:00+03:00"
+    assert summary.source_url == "https://www.tektorg.ru/223-fz/procedures/19815106"
 
 
-def test_property_sale_card_is_skipped():
-    """Торги по продаже имущества лежат в той же выдаче, что и закупки, и стабильно попадают
-    в неё по ключевым словам: «Продажа бывш. АЗС (сарай-склад, счетчик электрической
-    энергии…)» содержит нужные слова в описании объекта. Для тендерного отдела это шум —
-    такие карточки отсеиваются по разделу в ссылке (`/sale/`)."""
+def test_link_falls_back_to_section_path():
+    """Раздел `interrao` живёт по пути `/inter_rao/` — если ссылки на странице нет,
+    путь собирается по таблице разделов."""
 
-    assert _parse(CARD_PROPERTY_SALE_HTML) is None
+    summary = _parse(WITHOUT_LINK)
+    assert summary.source_url == "https://www.tektorg.ru/inter_rao/procedures/19545375"
+    assert summary.price is None
+
+
+def test_property_sale_is_skipped():
+    """Торги по продаже имущества стабильно попадают в выдачу по ключевым словам: «Продажа
+    бывш. АЗС (сарай-склад, счетчик электрической энергии…)». Для тендерного отдела это шум."""
+
+    assert _parse(PROPERTY_SALE) is None
+
+
+def test_empty_listing_is_not_an_error(monkeypatch):
+    adapter = TektorgAdapter(search_keywords=["нет такого"])
+    monkeypatch.setattr(adapter, "_search_html", lambda keyword, page_number=1: _page([], 0))
+    outcome = adapter.list_new_tenders(since=None)
+    assert outcome.tenders == []
+    assert outcome.errors == []
+
+
+def test_unrecognized_page_is_reported(monkeypatch):
+    """Страница без JSON выдачи — это смена разметки или заглушка, а не «ничего не найдено»:
+    28.09.2026 смена классов styled-components полторы недели маскировалась под пустую выдачу."""
+
+    adapter = TektorgAdapter(search_keywords=["АИИС КУЭ"])
+    monkeypatch.setattr(
+        adapter, "_search_html", lambda keyword, page_number=1: "<html>captcha</html>"
+    )
+    outcome = adapter.list_new_tenders(since=None)
+    assert len(outcome.errors) == 1
+    assert "не распознана" in outcome.errors[0].message
+
+
+def test_pages_stop_at_total_pages(monkeypatch):
+    adapter = TektorgAdapter(search_keywords=["АИИС КУЭ"])
+    requested: list[int] = []
+
+    def fake_html(keyword, page_number=1):
+        requested.append(page_number)
+        return _page([{**PROCUREMENT, "id": page_number, "registryNumber": f"N{page_number}"}], 2)
+
+    monkeypatch.setattr(adapter, "_search_html", fake_html)
+    outcome = adapter.list_new_tenders(since=None)
+    assert requested == [1, 2]
+    assert {t.external_id for t in outcome.tenders} == {"N1", "N2"}
+
+
+def test_parse_listing_rejects_page_without_state():
+    with pytest.raises(UnrecognizedPageError):
+        parse_listing("<html></html>")

@@ -108,6 +108,8 @@ const COMPLIANCE_SOURCE_LABELS: Record<string, string> = {
   ai_semantic: "Вывод ИИ по смыслу",
   upper_software: "Список ПО верхнего уровня",
   admission_registry: "Запись в реестре допуска",
+  astra_catalog: "Каталог «Ready for Astra»",
+  expert_rule: "Правило тендерного отдела",
 };
 
 /** Источник вердикта — три шага сопоставления раздела 5.5 ТЗ. */

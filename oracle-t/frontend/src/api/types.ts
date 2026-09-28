@@ -193,6 +193,8 @@ export interface Product {
   // способы установки (модель может подходить под несколько). null / [] — не определено.
   phases: 1 | 3 | null;
   mountings: ProductMounting[];
+  /** Типы прибора из одиннадцати (файл «Параметры для ПУ»); [] — не определено. */
+  meter_kinds: string[];
   created_at: string;
   updated_at: string;
 }
@@ -549,6 +551,8 @@ export interface Tender {
   source: TenderSourceRef;
   // Поля этапов 5-6: до запуска анализа документации остаются пустыми.
   tender_type: TenderTypeCode | null;
+  /** Типы закупаемых приборов учёта (коды `METER_KINDS`); null — не определено. */
+  meter_kinds: string[] | null;
   region_organizer_code: string | null;
   region_delivery_code: string | null;
   federal_district_code: number | null;
@@ -607,7 +611,9 @@ export type ComplianceSourceCode =
   | "user_manual_fallback"
   | "ai_semantic"
   | "upper_software"
-  | "admission_registry";
+  | "admission_registry"
+  | "astra_catalog"
+  | "expert_rule";
 
 export type RequirementKind = "product" | "service" | "participant";
 
@@ -620,6 +626,9 @@ export interface Requirement {
   /** К чему требование: товар (идёт в матрицу), работы/услуги или участник (18.09.2026). */
   kind: RequirementKind;
   category: string | null;
+  /** Параметр файла «Параметры для ПУ» (1–39) и его название; null — не отнесено. */
+  parameter_no: number | null;
+  parameter_name: string | null;
   verified_by_user: boolean;
   created_at: string;
 }
@@ -644,8 +653,12 @@ export interface WinPercentageRow {
   reason_summary: string | null;
   requirements_total: number;
   requirements_scored: number;
+  /** Проходит ли прибор производителя; null — расчёт до 25.09.2026. */
+  verdict: WinVerdictCode | null;
   calculated_at: string;
 }
+
+export type WinVerdictCode = "passes" | "caveats" | "fails" | "unknown";
 
 export interface ComplianceMatrix {
   requirements: Requirement[];
@@ -1017,6 +1030,17 @@ export interface RecommendedStrategy {
 
 /** Оценка целиком. `history_score === null` — «недостаточно данных», а НЕ ноль: измерение
  * исключается из итога, а не штрафует его (раздел 5.5.1 ТЗ). */
+export interface ChecklistItem {
+  title: string;
+  status: "met" | "partial" | "not_met" | "unknown" | "not_applicable" | string;
+  status_label: string;
+  comment: string;
+  /** Вес критерия «Задачи». */
+  weight: number | null;
+  /** Обязательность требования «Компетенций». */
+  mandatory: boolean | null;
+}
+
 export interface AiProfileScore {
   id: string;
   tender_id: string;
@@ -1029,6 +1053,14 @@ export interface AiProfileScore {
   competencies_score: string | null;
   competencies_comment: string | null;
   competencies_evidence: EvidenceItem[];
+  /** Пункты, из статусов которых код посчитал число (25.09.2026). `null` — оценка старше
+   * чек-листов; `[]` у «Компетенций» — требований к участнику нет, измерение не применимо. */
+  task_checklist: ChecklistItem[] | null;
+  competencies_checklist: ChecklistItem[] | null;
+  /** Какая модель посчитала оценку; `null` у оценок до 25.09.2026. */
+  ai_provider: string | null;
+  ai_provider_label: string | null;
+  ai_model: string | null;
   overall_score: string | null;
   summary: string | null;
   verdict: VerdictCode | null;

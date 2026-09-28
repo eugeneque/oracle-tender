@@ -74,7 +74,7 @@ from app.services.manual_request_service import (
     create_manual_request,
 )
 from app.services.document_service import get_storage_root, sync_tender_documents
-from app.services.ai_client import AiNotConfiguredError
+from app.services.ai_client import AiNotConfiguredError, AiQuotaExceededError
 from app.services.tender_service import (
     DEFAULT_SORT,
     TenderFilters,
@@ -105,6 +105,7 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
     region: list[str] | None = Query(default=None, description="Коды регионов (заказчика или поставки)"),
     federal_district: list[int] | None = Query(default=None),
     tender_type: list[str] | None = Query(default=None),
+    meter_kind: list[str] | None = Query(default=None, description="Типы приборов учёта (METER_KINDS)"),
     tender_status: list[str] | None = Query(default=None),
     relevance_status: list[str] | None = Query(default=None),
     stage: list[str] | None = Query(default=None, description="Этапы внутреннего пайплайна"),
@@ -137,6 +138,7 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
         region_codes=region or [],
         federal_district_codes=federal_district or [],
         tender_types=tender_type or [],
+        meter_kinds=meter_kind or [],
         statuses=tender_status or [],
         relevance_statuses=relevance_status or [],
         stages=stage or [],
@@ -822,6 +824,13 @@ def build_extra_sections(
         sections = tender_insights.build_extra_sections(db, tender, card, actor=user)
     except AiNotConfiguredError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except AiQuotaExceededError as exc:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc)) from exc
+    except tender_insights.ExtraSectionsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Модель не ответила: {exc}",
+        ) from exc
 
     if not sections:
         raise HTTPException(

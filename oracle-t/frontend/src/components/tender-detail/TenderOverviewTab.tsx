@@ -4,6 +4,7 @@ import { Check, ExternalLink, Loader2, Pencil, Sparkles, X } from "lucide-react"
 import { api } from "../../api/client";
 import type { FederalDistrict, Region, Tender, TenderUpdate } from "../../api/types";
 import { ConfidenceBar } from "../ConfidenceBar";
+import { meterKindsSummary } from "../../utils/meterKinds";
 import {
   formatDate,
   formatDateTime,
@@ -208,6 +209,7 @@ export function TenderOverviewTab({
         <MetaItem label="Срок подачи заявок" value={formatDateTime(tender.application_end)} />
         <MetaItem label="Код ОКПД2" value={tender.okpd2_code} />
         <MetaItem label="Тип конкурса" value={tenderTypeLabel(tender.tender_type)} />
+        <MetaItem label="Тип прибора учёта" value={meterKindsSummary(tender.meter_kinds)} />
         <MetaItem label="Регион заказчика" value={regionName(tender.region_organizer_code)} />
         <MetaItem label="Регион поставки" value={regionName(tender.region_delivery_code)} />
         <MetaItem label="Федеральный округ" value={districtName} />

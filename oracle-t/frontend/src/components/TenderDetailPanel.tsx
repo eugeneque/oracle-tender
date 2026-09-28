@@ -87,6 +87,14 @@ const JOB_POLL_MS = 2_000;
 // первого, а третий без первого считал вслепую, и человек должен был знать порядок.
 type JobKindKey = "review" | "analyze" | "evaluate" | "ai-score";
 
+/** Вид фоновой задачи → кнопка карточки, которая её запускает. */
+const JOB_KIND_KEYS: Partial<Record<BackgroundJob["kind"], JobKindKey>> = {
+  tender_full_review: "review",
+  tender_analysis: "analyze",
+  tender_evaluation: "evaluate",
+  ai_profile_score: "ai-score",
+};
+
 /** Что делает «Разобрать закупку» — подсказка на кнопке и в пустых состояниях вкладок. */
 const REVIEW_HINT =
   "Анализ документов, матрица соответствия и AI-оценка по профилю одной задачей";
@@ -460,22 +468,55 @@ export function TenderDetailPanel({
 
   useEffect(() => {
     let cancelled = false;
-    api
-      .get<AiProfileScore | null>(`/tenders/${tender.id}/ai-score`)
-      .then((data) => {
-        if (cancelled) return;
-        setScore(data);
-        if (data === null && autoScoreRef.current !== tender.id) {
-          autoScoreRef.current = tender.id;
-          // Без требований оценка считалась бы «только по карточке, точность ниже» — так
-          // и получались 34% по закупке, ТЗ которой никто не читал. Поэтому первый заход
-          // в карточку запускает полный разбор; если требования уже есть — только оценку.
-          void startJob(tender.requirements_count > 0 ? "ai-score" : "review");
-        }
-      })
-      .catch(() => {
+    void (async () => {
+      let data: AiProfileScore | null;
+      let active: BackgroundJob[];
+      try {
+        [data, active] = await Promise.all([
+          api.get<AiProfileScore | null>(`/tenders/${tender.id}/ai-score`),
+          api.get<BackgroundJob[]>(`/jobs?tender_id=${tender.id}&active_only=true&limit=1`),
+        ]);
+      } catch {
         // Отсутствие оценки — обычное состояние; ошибку показываем только при расчёте.
-      });
+        return;
+      }
+      if (cancelled) return;
+      setScore(data);
+
+      // Разбор идёт минуту-две, и за это время человек успевает переключиться на другую
+      // закупку: карточка пересоздаётся, опрос задачи умирает вместе с прежней (жалоба
+      // 25.09.2026 — оценка 63% есть, а в шапке «не считалась» и в списке нет галочки).
+      // Вернувшись, продолжаем следить за той же задачей, а не запускаем вторую.
+      const running = active[0];
+      const runningKind = running ? JOB_KIND_KEYS[running.kind] : undefined;
+      if (running && runningKind) {
+        autoScoreRef.current = tender.id;
+        setRunningAction(runningKind);
+        setJobId(running.id);
+        setJobProgress(running.message);
+        return;
+      }
+
+      if (data === null) {
+        if (autoScoreRef.current === tender.id) return;
+        autoScoreRef.current = tender.id;
+        // Без требований оценка считалась бы «только по карточке, точность ниже» — так
+        // и получались 34% по закупке, ТЗ которой никто не читал. Поэтому первый заход
+        // в карточку запускает полный разбор; если требования уже есть — только оценку.
+        void startJob(tender.requirements_count > 0 ? "ai-score" : "review");
+        return;
+      }
+
+      // Тендер пришёл из списка, загруженного до конца разбора: шапка и знак решения
+      // отстали бы от панели оценки. Перечитываем — и список получит свежую строку.
+      if (
+        percentValue(tender.ai_score) !== percentValue(data.overall_score) ||
+        tender.ai_decision !== data.decision
+      ) {
+        const updated = await api.get<Tender>(`/tenders/${tender.id}`);
+        if (!cancelled) applyTender(updated);
+      }
+    })();
     void api
       .get<CompanyProfile | null>("/company-profile")
       .then((data) => {
@@ -485,8 +526,8 @@ export function TenderDetailPanel({
     return () => {
       cancelled = true;
     };
-    // requirements_count намеренно не в зависимостях: он меняется после разбора, а
-    // повторно решать про автозапуск уже не нужно — оценка к тому моменту есть.
+    // requirements_count, ai_score и ai_decision намеренно не в зависимостях: они меняются
+    // после разбора, а решать про автозапуск и сверять шапку нужно один раз — при открытии.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tender.id, startJob]);
 
@@ -507,6 +548,11 @@ export function TenderDetailPanel({
       }
       setActionMessage(job.message);
       applyTender(await api.get<Tender>(`/tenders/${tender.id}`));
+      if (job.kind === "tender_full_review" || job.kind === "tender_analysis") {
+        // Анализ сам скачивает документацию с площадки — без перечитывания вкладка
+        // «Документы» до перезагрузки страницы показывала бы «Документов нет».
+        setDocuments(await api.get<TenderDocument[]>(`/tenders/${tender.id}/documents`));
+      }
       if (job.kind === "tender_full_review") {
         // Обновляется всё, что разбор мог изменить; вкладка не переключается — итог
         // (оценка и знак решения) виден на «Основном», где человек и находится.
@@ -933,7 +979,9 @@ export function TenderDetailPanel({
           <TenderExtraTab
             data={extra}
             isLoading={isExtraLoading}
-            isRunning={isExtraRunning || runningAction === "ai-score"}
+            isRunning={
+              isExtraRunning || runningAction === "ai-score" || runningAction === "review"
+            }
             onRun={() => void runExtraSections()}
             error={extraError}
           />

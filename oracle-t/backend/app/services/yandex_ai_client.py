@@ -32,6 +32,12 @@ from app.services.yandex_ai_service import _SINGLETON_ID
 DEFAULT_MODEL = "yandexgpt"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 
+# Предел длины ответа. Без него действует умолчание платформы, и длинный JSON обрывается
+# посреди строки («EOF while parsing», ~9 тыс. символов): на ТЗ с десятками параметров кусок
+# документации терялся после трёх попыток (25.09.2026, закупка 32616309303). 8000 —
+# потолок ответа моделей YandexGPT.
+MAX_OUTPUT_TOKENS = 8000
+
 # Повторные попытки при сбое обращения к модели (раздел 5.9 ТЗ). Сбои здесь двух видов:
 # сетевые/квотные (лечатся повтором) и «модель вернула не тот JSON» (лечится тоже — при
 # temperature=0 повтор чаще всего даёт валидный ответ, потому что обрыв по лимиту токенов
@@ -85,7 +91,7 @@ def run_structured(
 
     sdk = AIStudio(folder_id=folder_id, auth=api_key)
     model = sdk.models.completions(model_name).configure(
-        temperature=temperature, response_format=response_model
+        temperature=temperature, response_format=response_model, max_tokens=MAX_OUTPUT_TOKENS
     )
 
     last_error: Exception | None = None

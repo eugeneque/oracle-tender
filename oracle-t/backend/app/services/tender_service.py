@@ -156,6 +156,11 @@ def _upsert_tender(
         from app.services.tender_gaps_service import fill_type_from_title
 
         fill_type_from_title(tender)
+        # Тип прибора (11 видов файла «Параметры для ПУ») — тоже с момента сбора, по
+        # наименованию; после разбора документации уточняется по требованиям.
+        from app.services.meter_kind import tender_kinds
+
+        tender.meter_kinds = tender_kinds(tender.title)
         # Профиль релевантности применяется сразу при сборе — до скачивания документации и
         # до вызова модели (раздел 5.1.1 ТЗ). Не прошедший тендер не удаляется: он помечен
         # и виден в списке при снятии фильтра, потому что профиль настраивают люди и он
@@ -412,6 +417,9 @@ class TenderFilters:
     region_codes: list[str] = field(default_factory=list)
     federal_district_codes: list[int] = field(default_factory=list)
     tender_types: list[str] = field(default_factory=list)
+    # Типы приборов учёта (11 видов файла «Параметры для ПУ»): закупка проходит, если
+    # среди её типов есть хотя бы один выбранный.
+    meter_kinds: list[str] = field(default_factory=list)
     statuses: list[str] = field(default_factory=list)
     relevance_statuses: list[str] = field(default_factory=list)
     # Этап внутреннего пайплайна (раздел 5.6 ТЗ). Отдельно от `statuses`: состояние закупки
@@ -575,6 +583,8 @@ def _build_conditions(filters: TenderFilters) -> list:
         conditions.append(Tender.federal_district_code.in_(filters.federal_district_codes))
     if filters.tender_types:
         conditions.append(Tender.tender_type.in_(filters.tender_types))
+    if filters.meter_kinds:
+        conditions.append(Tender.meter_kinds.overlap(filters.meter_kinds))
     if filters.statuses:
         conditions.append(Tender.status.in_(filters.statuses))
     if filters.relevance_statuses:

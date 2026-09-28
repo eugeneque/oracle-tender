@@ -53,7 +53,13 @@ NOTIFICATIONS_PATH = "/NotificationEx"
 
 # Кнопка «Вперед» серверной пагинации грида; на последней странице грид перестаёт
 # обновляться (класс `disabled` площадка проставляет не всегда — см. `_search_pages`).
-NEXT_PAGE_SELECTOR = "a.pager-button-next"
+# До сентября 2026 это была `a.pager-button-next`, после обновления грида площадки — `div`
+# с обработчиком `UpdateList_GotoPageNext…()`. Старый селектор оставлен запасным.
+NEXT_PAGE_SELECTOR = "div.orm-filter-pager-arrow-ctrl.next, a.pager-button-next"
+# Таблица выдачи. 28.09.2026 площадка сменила класс `reporttable` на
+# `orm-grid-table-registry`, колонки остались прежними — и опрос по всем словам писал
+# «Таблица результатов не найдена», хотя выдача была.
+GRID_SELECTOR = "table.orm-grid-table-registry, table.reporttable"
 # Защитный предел обхода — тот же принцип, что и в остальных адаптерах (см. app/adapters/eis.py).
 MAX_SEARCH_PAGES = 20
 
@@ -65,7 +71,7 @@ def _grid_signature(html: str) -> str:
     новой."""
 
     soup = BeautifulSoup(html, "lxml")
-    table = soup.select_one("table.reporttable")
+    table = soup.select_one(GRID_SELECTOR)
     if table is None:
         return ""
     return "|".join(element_text(cell) or "" for cell in table.select("tr td:nth-of-type(3)"))
@@ -254,11 +260,13 @@ class ZakazrfAdapter(SourceAdapter):
         outcome = PollOutcome()
         seen: dict[str, TenderSummary] = {}
 
+        # Пустая выдача по слову — законный ответ, а не ошибка. Ошибка — отсутствие самой
+        # таблицы: значит, сменилась разметка или вместо реестра пришла заглушка.
         for keyword in self.search_keywords:
             found_table = False
             try:
                 for html in self._search_pages(keyword):
-                    table = BeautifulSoup(html, "lxml").select_one("table.reporttable")
+                    table = BeautifulSoup(html, "lxml").select_one(GRID_SELECTOR)
                     if table is None:
                         break
                     found_table = True
@@ -281,7 +289,11 @@ class ZakazrfAdapter(SourceAdapter):
 
             if not found_table:
                 outcome.errors.append(
-                    PollError(None, f"Таблица результатов не найдена в выдаче по '{keyword}'")
+                    PollError(
+                        None,
+                        f"Страница выдачи по '{keyword}' не распознана: нет таблицы реестра "
+                        "(сменилась разметка площадки или пришла заглушка вместо выдачи)",
+                    )
                 )
 
         outcome.tenders = list(seen.values())

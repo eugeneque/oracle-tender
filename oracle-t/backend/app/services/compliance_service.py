@@ -57,12 +57,24 @@ from app.models.analysis import (
     Requirement,
     RequirementKind,
     WinPercentage,
+    WinVerdict,
 )
 from app.models.log import LogLevel
 from app.models.manufacturer import Manufacturer, Product, ProductCharacteristic, SiType
 from app.models.tender import Tender
 from app.models.user import User
 from app.services.audit import log_action
+from app.seed.meter_parameters import (
+    GISP_PP719_URL,
+    PARAMETERS_BY_NO,
+    RULE_ASTRA,
+    RULE_MANUAL_CHECK,
+    RULE_ONLY_MANUFACTURERS,
+    THREE_POSITION_RELAY_BRANDS,
+    detect_parameter,
+    parameter_hint,
+)
+from app.services.meter_kind import kind_group, kind_labels, kinds_from_text, product_kinds
 from app.services.product_relevance import select_products_for_context
 from app.services.ai_client import run_structured
 
@@ -124,6 +136,8 @@ _SYSTEM_PROMPT = """Ты сопоставляешь требования зак�
 - [software] — официальный список поддерживаемого оборудования на сайте разработчика ПО \
 верхнего уровня (АСКУЭ/ИСУ: «Пирамида», «Энфорс», «Энергосфера», «яЭнергетик», \
 «АльфаЦЕНТР», «Некта», «ЛЭРС УЧЁТ»);
+- [astra] — выписка из официального каталога совместимого ПО «Ready for Astra» (astra.ru) \
+по производителю;
 - [registry] — запись о допуске модели в реестре: реестр промышленной продукции (ПП РФ \
 № 719, ГИСП Минпромторга), заключение аттестационной комиссии ПАО «Россети» (ЗАК), реестр \
 российского ПО. Состояние записи (действует / истекает / истекла / проверено, что записи \
@@ -138,8 +152,8 @@ _SYSTEM_PROMPT = """Ты сопоставляешь требования зак�
    - no_data — в карточке НЕТ данных, чтобы судить.
 3. Не додумывай. Отсутствие упоминания — это no_data, а НЕ not_meets. Это важно: \
 not_meets означает «прибор точно не подходит», и ставить его из-за неполноты данных нельзя.
-4. `source` — откуда взят решающий факт: si_type, catalog, manual или software. Если данных \
-не было, укажи пустую строку.
+4. `source` — откуда взят решающий факт: si_type, catalog, manual, software, registry или \
+astra. Если данных не было, укажи пустую строку.
 5. `explanation` — ОДНО короткое предложение по-русски (до 150 символов): какой факт из \
 карточки привёл к вердикту; для no_data — чего именно не хватает. Не пересказывай карточку.
 6. `confidence` — 0.0-1.0, насколько ты уверен. Точное совпадение числового параметра — \
@@ -159,6 +173,27 @@ confidence 0.7-0.85; поддержка только по протоколу б�
 not_meets; для этих вердиктов confidence 0.9-1.0, source — registry. Если фактов [registry] \
 по нужному реестру нет — no_data. Наличие в Госреестре СИ — не реестр допуска, оно \
 оценивается по [si_type].
+9. У требования может стоять подпись [параметр N: …; правило: …] — это параметр из \
+перечня тендерного отдела «Параметры для приборов учёта» и указание, как его трактовать. \
+Правило обязательно к исполнению.
+10. Тип прибора. У моделей в карточке указан тип — один из одиннадцати видов (фазность × \
+включение × крепление, либо высоковольтный прибор учёта). Требование к типу прибора, \
+количеству фаз, номинальному напряжению, токам и способу крепления сверяй с моделью ТОГО \
+ЖЕ типа, что требует закупка. Если у производителя в карточке есть только модели другого \
+типа, это no_data (справочник может быть неполным), а не not_meets.
+11. Габариты (параметр 3) сравнивай по сторонам: ширина — сторона b, длина — сторона a, \
+высота — сторона c (глубина корпуса). Порядок чисел в ТЗ и у производителя может \
+различаться — сопоставляй по смыслу сторон. «Не более» выполняется, если каждая сторона \
+прибора не больше требуемой.
+12. Графический ЖКИ (параметр 32): требование к индикаторному устройству (выносному \
+дисплею) выполняют только сплит-исполнения и ВПУ; к встроенному индикатору — остальные.
+13. Поддержка Astra Linux (параметр 39) оценивается ТОЛЬКО по фактам [astra] — выписке из \
+официального каталога совместимого ПО «Ready for Astra». Если в выписке есть конфигуратор \
+или иная программа производителя для работы с приборами учёта (настройка, считывание) — \
+meets, source astra. Если найдено только постороннее ПО (другой фирмы с похожим названием, \
+серверная СУБД) или в выписке прямо сказано, что ПО производителя в каталоге нет, — \
+not_meets, confidence 0.6-0.7 (производитель мог заявить совместимость без сертификата). \
+Если фактов [astra] нет — no_data.
 """
 
 
@@ -213,6 +248,8 @@ _SOURCE_BY_TAG = {
     "manual": ComplianceSource.USER_MANUAL_FALLBACK.value,
     "software": ComplianceSource.UPPER_SOFTWARE.value,
     "registry": ComplianceSource.ADMISSION_REGISTRY.value,
+    "astra": ComplianceSource.ASTRA_CATALOG.value,
+    "rule": ComplianceSource.EXPERT_RULE.value,
 }
 _STATUS_VALUES = {s.value for s in ComplianceStatus}
 
@@ -276,6 +313,9 @@ def build_manufacturer_context(
         if not characteristics:
             continue
         lines = []
+        kinds = product_kinds(product, characteristics)
+        if kinds:
+            lines.append(f"[catalog] {product.model_name}: тип прибора — {'; '.join(kind_labels(kinds))}")
         for characteristic in characteristics:
             if not characteristic.value:
                 continue
@@ -305,14 +345,65 @@ def build_manufacturer_context(
 
         blocks.extend(registry_facts(db, manufacturer, requirements))
 
-    return "\n".join(blocks), primary_product_id
+    # Каталог «Ready for Astra» — только когда закупка спрашивает об Astra Linux.
+    if requirements and any(_parameter_of(item) == 39 for item in requirements):
+        blocks.extend(astra_facts(manufacturer))
+
+    return _cap_context(blocks), primary_product_id
+
+
+# Предел длины карточки производителя. Окно YandexGPT — 32 768 токенов на запрос; проход с
+# руководствами у Пульсара давал 87 тыс. символов и отказ «number of input tokens must be no
+# more than 32768» на всех трёх попытках (25.09.2026). Хвост отрезается по целым строкам:
+# в начале карточки — описание типа и каталог, главные источники.
+MAX_CONTEXT_CHARS = 70_000
+
+
+def _cap_context(blocks: list[str]) -> str:
+    text = "\n".join(blocks)
+    if len(text) <= MAX_CONTEXT_CHARS:
+        return text
+    cut = text.rfind("\n", 0, MAX_CONTEXT_CHARS)
+    return text[: cut if cut > 0 else MAX_CONTEXT_CHARS]
+
+
+def _parameter_of(requirement: Requirement) -> int | None:
+    """Параметр файла «Параметры для ПУ»: проставленный при извлечении, а для старых
+    требований — узнанный по формулировке (только параметры с правилами кода)."""
+
+    return requirement.parameter_no or detect_parameter(
+        f"{requirement.text or ''} {requirement.normalized_text or ''}"
+    )
+
+
+def astra_facts(manufacturer: Manufacturer) -> list[str]:
+    """Строки `[astra]`: что производитель имеет в каталоге «Ready for Astra». Каталог
+    недоступен — строк нет, и требование честно останется «нет данных»."""
+
+    from app.adapters.astra_compatible import PAGE_URL, load_catalog
+
+    catalog = load_catalog()
+    if catalog is None:
+        return []
+    brand = manufacturer.brand_name or manufacturer.legal_name
+    found = catalog.find(brand)
+    if not found:
+        return [
+            f"[astra] В каталоге совместимого ПО «Ready for Astra» ({PAGE_URL}, "
+            f"{len(catalog.items)} позиций) ПО производителя «{brand}» НЕ найдено"
+        ]
+    return [
+        f"[astra] Каталог «Ready for Astra» ({PAGE_URL}): {item.describe()}" for item in found
+    ]
+
 
 
 def _requirements_block(requirements: list[Requirement]) -> str:
     lines = []
     for index, requirement in enumerate(requirements, start=1):
         text = requirement.normalized_text or requirement.text
-        lines.append(f"{index}. {text}")
+        hint = parameter_hint(_parameter_of(requirement))
+        lines.append(f"{index}. {text}" + (f" {hint}" if hint else ""))
     return "\n".join(lines)
 
 
@@ -468,7 +559,153 @@ def _evaluate_manufacturer(
         verdicts.setdefault(
             index, _no_data_verdict(index, "Модель не вернула вердикт по этому требованию", 0.0)
         )
+    # Типы каталога считаются, только когда есть «не соответствует» по типу/фазности:
+    # это запрос по всем моделям производителя, а нужен он редко.
+    needs_kinds = any(
+        _parameter_of(requirement) in TYPE_PARAMETERS
+        and verdicts[index].status == ComplianceStatus.NOT_MEETS.value
+        for index, requirement in enumerate(requirements, start=1)
+    )
+    apply_expert_rules(
+        manufacturer,
+        requirements,
+        verdicts,
+        made_kinds=manufacturer_kind_groups(db, manufacturer) if needs_kinds else None,
+    )
     return verdicts
+
+
+def _apply_astra_rule(
+    manufacturer: Manufacturer, index: int, verdicts: dict[int, RequirementVerdict]
+) -> None:
+    """Astra Linux (параметр 39): если ПО производителя в каталоге «Ready for Astra» нет,
+    вердикт — «не соответствует», что бы ни ответила модель. На живом прогоне 25.09.2026
+    модель поставила «соответствует» Ленэлектро, которого в каталоге нет. Если ПО найдено,
+    решает модель: только она отличит конфигуратор от чужой программы с похожим названием."""
+
+    from app.adapters.astra_compatible import load_catalog
+
+    catalog = load_catalog()
+    if catalog is None:
+        return
+    if catalog.find(manufacturer.brand_name or manufacturer.legal_name):
+        return
+    verdicts[index] = RequirementVerdict(
+        number=index,
+        status=ComplianceStatus.NOT_MEETS.value,
+        source="astra",
+        explanation=(
+            "ПО производителя нет в каталоге совместимого ПО «Ready for Astra»; совместимость "
+            "могла быть заявлена без сертификата — уточнить у производителя"
+        ),
+        confidence=0.65,
+    )
+
+
+# Параметры «тип прибора» и «количество фаз» — по ним модель чаще всего сравнивает позицию
+# спецификации с моделью другого типа, попавшей в карточку.
+TYPE_PARAMETERS = frozenset({1, 2})
+
+
+def manufacturer_kind_groups(db: Session, manufacturer: Manufacturer) -> set[str]:
+    """Группы типов (фазность × включение, либо ВПУ), в которых у производителя есть хотя
+    бы одна модель в каталоге."""
+
+    products = list(db.scalars(select(Product).where(Product.manufacturer_id == manufacturer.id)))
+    if not products:
+        return set()
+    by_product: dict[uuid.UUID, list[ProductCharacteristic]] = {}
+    for item in db.scalars(
+        select(ProductCharacteristic).where(
+            ProductCharacteristic.product_id.in_([product.id for product in products])
+        )
+    ):
+        by_product.setdefault(item.product_id, []).append(item)
+    return {
+        kind_group(code)
+        for product in products
+        for code in product_kinds(product, by_product.get(product.id, []))
+    }
+
+
+def _brand_matches(manufacturer: Manufacturer, brands: tuple[str, ...]) -> bool:
+    names = f"{manufacturer.brand_name or ''} {manufacturer.legal_name or ''}".lower()
+    return any(brand in names for brand in brands)
+
+
+def apply_expert_rules(
+    manufacturer: Manufacturer,
+    requirements: list[Requirement],
+    verdicts: dict[int, RequirementVerdict],
+    *,
+    made_kinds: set[str] | None = None,
+) -> None:
+    """Правила из комментариев файла «Параметры для ПУ», которые выполняет код поверх
+    вердикта модели. Модель знает правило из подписи требования, но решение, от которого
+    зависит «проходит / не проходит», не должно зависеть от того, прочитала ли она его.
+
+    Трёхпозиционный переключатель реле (параметр 26): «соответствуют только три
+    производителя (Энергомера, Тайпит, Пульсар)». У остальных — «не соответствует».
+    У этих троих вердикт модели по фактам сохраняется; если фактов не нашлось —
+    «соответствует» по правилу тендерного отдела."""
+
+    for index, requirement in enumerate(requirements, start=1):
+        parameter = _parameter_of(requirement)
+        current = verdicts.get(index)
+        # Тип прибора / фазность: «не соответствует», когда у производителя в каталоге ЕСТЬ
+        # прибор требуемого типа, — это сравнение с моделью другого типа, попавшей в карточку,
+        # а не свойство производителя (CRITERIA.md, п. 3.6). Остаётся «нет данных».
+        if (
+            parameter in TYPE_PARAMETERS
+            and made_kinds
+            and current is not None
+            and current.status == ComplianceStatus.NOT_MEETS.value
+        ):
+            wanted = {
+                kind_group(code)
+                for code in kinds_from_text(f"{requirement.text or ''} {requirement.normalized_text or ''}")
+            }
+            if wanted & made_kinds:
+                verdicts[index] = RequirementVerdict(
+                    number=index,
+                    status=ComplianceStatus.NO_DATA.value,
+                    source="rule",
+                    explanation=(
+                        "У производителя есть приборы этого типа "
+                        f"({'; '.join(kind_labels(sorted(wanted & made_kinds)))}), но в "
+                        "сравнение попала модель другого типа — проверить исполнение"
+                    )[:300],
+                    confidence=0.5,
+                )
+                continue
+        item = PARAMETERS_BY_NO.get(parameter or 0)
+        if item is not None and item.rule == RULE_ASTRA:
+            _apply_astra_rule(manufacturer, index, verdicts)
+            continue
+        if item is None or item.rule != RULE_ONLY_MANUFACTURERS:
+            continue
+        if not _brand_matches(manufacturer, THREE_POSITION_RELAY_BRANDS):
+            verdicts[index] = RequirementVerdict(
+                number=index,
+                status=ComplianceStatus.NOT_MEETS.value,
+                source="rule",
+                explanation=(
+                    "Трёхпозиционный переключатель реле есть только у Энергомеры, Тайпит "
+                    "и Пульсара (правило тендерного отдела)"
+                ),
+                confidence=0.9,
+            )
+        elif current is None or current.status == ComplianceStatus.NO_DATA.value:
+            verdicts[index] = RequirementVerdict(
+                number=index,
+                status=ComplianceStatus.MEETS.value,
+                source="rule",
+                explanation=(
+                    "Производитель входит в тройку с трёхпозиционным переключателем реле "
+                    "(правило тендерного отдела); исполнение модели проверить"
+                ),
+                confidence=0.75,
+            )
 
 
 def _ask_in_batches(
@@ -556,6 +793,17 @@ def _save_entries(
             confidence < LOW_CONFIDENCE_THRESHOLD
             and verdict.status != ComplianceStatus.NO_DATA.value
         )
+        explanation = verdict.explanation or ""
+        # ПП 719 (параметр 35): «подтягивать с комментарием, чтобы пользователь проверил —
+        # много нюансов» (баллы локализации, год соответствия, исполнения). Любой вердикт
+        # по нему уходит на проверку человеком, со ссылкой на реестр.
+        item = PARAMETERS_BY_NO.get(_parameter_of(requirement) or 0)
+        if item is not None and item.rule == RULE_MANUAL_CHECK:
+            needs_review = True
+            explanation = (
+                f"{explanation} Проверьте запись вручную в реестре ГИСП ({GISP_PP719_URL}): "
+                "баллы и соответствие требованиям текущего года."
+            ).strip()
         if needs_review:
             outcome.needs_review += 1
 
@@ -570,7 +818,7 @@ def _save_entries(
 
         entry.product_id = None
         entry.status = verdict.status
-        entry.explanation = verdict.explanation or None
+        entry.explanation = explanation or None
         entry.source = _SOURCE_BY_TAG.get(verdict.source, ComplianceSource.AI_SEMANTIC.value)
         entry.confidence = Decimal(f"{confidence:.3f}")
         entry.needs_human_review = needs_review
@@ -643,6 +891,12 @@ def _calculate_percentage(
             f"Оценка ненадёжна: данных хватило лишь на {scored} из {total} требований. " + reason
         )
 
+    verdict, verdict_reason = decide_verdict(requirements, verdicts)
+    # «Не проходит» уже названо выше перечнем критичных требований; оговорки и нехватку
+    # данных добавляем, иначе итог в списке производителей было бы нечем объяснить.
+    if verdict in (WinVerdict.CAVEATS.value, WinVerdict.UNKNOWN.value):
+        reason = f"{reason}. {verdict_reason}"
+
     # Пересчёт не правит прежнюю строку, а гасит её и добавляет новую (решение 03.09.2026,
     # раздел 7 ТЗ): каталог пополняется, процент от этого меняется, и без истории пересчётов
     # объяснить скачок с 46% до 88% нечем. Погашение идёт до вставки — «текущая» запись по
@@ -666,10 +920,71 @@ def _calculate_percentage(
             reason_summary=reason,
             requirements_total=len(requirements),
             requirements_scored=scored,
+            verdict=verdict,
             is_current=True,
         )
     )
     db.flush()
+
+
+# Какая доля критичных требований без данных делает итог неопределённым.
+UNKNOWN_CRITICAL_RATIO = 0.5
+
+
+def decide_verdict(
+    requirements: list[Requirement], verdicts: dict[int, RequirementVerdict]
+) -> tuple[str, str]:
+    """Проходит ли прибор производителя (раздел 5а CRITERIA.md) и почему — одной фразой.
+
+    * не проходит — хотя бы одно критичное требование не выполнено: заявку отклонят,
+      сколько бы остального ни совпало;
+    * не хватает данных — ничего не оценено, либо без данных больше половины критичных;
+    * с оговорками — критичные не нарушены, но есть невыполненные важные/второстепенные,
+      частичное выполнение критичного или критичное без данных;
+    * проходит — всё остальное."""
+
+    def text_of(requirement: Requirement) -> str:
+        return (requirement.normalized_text or requirement.text or "")[:90]
+
+    failed_critical: list[str] = []
+    failed_other: list[str] = []
+    unclear_critical: list[str] = []
+    critical_total = 0
+    scored = 0
+    for index, requirement in enumerate(requirements, start=1):
+        verdict = verdicts.get(index)
+        status = verdict.status if verdict else ComplianceStatus.NO_DATA.value
+        critical = requirement.criticality == Criticality.CRITICAL.value
+        critical_total += critical
+        if status != ComplianceStatus.NO_DATA.value:
+            scored += 1
+        if status == ComplianceStatus.NOT_MEETS.value:
+            (failed_critical if critical else failed_other).append(text_of(requirement))
+        elif critical and status in (ComplianceStatus.NO_DATA.value, ComplianceStatus.PARTIAL.value):
+            unclear_critical.append(text_of(requirement))
+
+    if failed_critical:
+        return WinVerdict.FAILS.value, "Не проходит: " + "; ".join(failed_critical[:3])
+    unknown_critical = sum(
+        1
+        for index, requirement in enumerate(requirements, start=1)
+        if requirement.criticality == Criticality.CRITICAL.value
+        and (verdicts.get(index) is None or verdicts[index].status == ComplianceStatus.NO_DATA.value)
+    )
+    if scored == 0 or (critical_total and unknown_critical > critical_total * UNKNOWN_CRITICAL_RATIO):
+        return WinVerdict.UNKNOWN.value, (
+            f"Не хватает данных: без ответа {unknown_critical} из {critical_total} критичных требований"
+            if critical_total
+            else "Не хватает данных"
+        )
+    if failed_other or unclear_critical:
+        parts = []
+        if failed_other:
+            parts.append("не выполнено: " + "; ".join(failed_other[:2]))
+        if unclear_critical:
+            parts.append("проверить: " + "; ".join(unclear_critical[:2]))
+        return WinVerdict.CAVEATS.value, "С оговорками — " + "; ".join(parts)
+    return WinVerdict.PASSES.value, "Проходит"
 
 
 def _log(

@@ -95,3 +95,27 @@ def test_parse_row_handles_implicit_tbody_from_rendered_dom():
     table = soup.select_one("table.reporttable")
     rows = [r for r in table.find_all("tr") if "orm-grid-table-header" not in (r.get("class") or [])]
     assert len(rows) == 1
+
+
+def test_current_grid_markup_is_recognised(monkeypatch):
+    """28.09.2026 площадка сменила класс таблицы `reporttable` на `orm-grid-table-registry`
+    при прежних колонках — строки должны разбираться по-прежнему."""
+
+    html = ROW_44FZ.replace(
+        'class="reporttable"', 'class="orm-grid-table orm-grid-table-registry"'
+    )
+    adapter = ZakazrfAdapter(search_keywords=["электрические испытания"])
+    monkeypatch.setattr(adapter, "_search_pages", lambda keyword: iter([html]))
+    outcome = adapter.list_new_tenders(since=None)
+    assert outcome.errors == []
+    assert [t.external_id for t in outcome.tenders] == ["0711200008326000266"]
+
+
+def test_page_without_grid_is_reported_as_unrecognised(monkeypatch):
+    """Страница без таблицы — смена разметки или заглушка, а не «ничего не найдено»."""
+
+    adapter = ZakazrfAdapter(search_keywords=["АИИС КУЭ"])
+    monkeypatch.setattr(adapter, "_search_pages", lambda keyword: iter(["<html>captcha</html>"]))
+    outcome = adapter.list_new_tenders(since=None)
+    assert len(outcome.errors) == 1
+    assert "не распознана" in outcome.errors[0].message

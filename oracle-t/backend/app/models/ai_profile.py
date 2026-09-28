@@ -61,6 +61,33 @@ SEVERITY_ORDER: dict[str, int] = {
 }
 
 
+class CheckStatus(str, enum.Enum):
+    """Статус пункта чек-листа измерения (замечание 25.09.2026).
+
+    С этой правки число «Задачи» и «Компетенций» считает код, а модель только проставляет
+    статусы пунктам: один и тот же тендер у Claude и YandexGPT давал 0 и 50 за одно
+    измерение, потому что шкала из трёх опорных точек оставляла модели слишком широкий
+    выбор. Статус пункта — узкий вопрос, на нём модели расходятся заметно реже.
+    """
+
+    MET = "met"
+    PARTIAL = "partial"
+    NOT_MET = "not_met"
+    # Только для «Компетенций»: профиль требование не подтверждает и не опровергает.
+    UNKNOWN = "unknown"
+    # Только для «Задачи»: критерий к этой закупке не относится и исключается из расчёта.
+    NOT_APPLICABLE = "not_applicable"
+
+
+CHECK_STATUS_LABELS: dict[str, str] = {
+    CheckStatus.MET.value: "выполнено",
+    CheckStatus.PARTIAL.value: "частично",
+    CheckStatus.NOT_MET.value: "не выполнено",
+    CheckStatus.UNKNOWN.value: "не подтверждено",
+    CheckStatus.NOT_APPLICABLE.value: "не применимо",
+}
+
+
 class EvidenceType(str, enum.Enum):
     """На что может ссылаться обоснование числа (раздел 5.5.1 ТЗ, «Прослеживаемость»)."""
 
@@ -93,10 +120,16 @@ class AiProfileScore(Base):
     task_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     task_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     task_evidence: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # [{title, status, status_label, comment, weight, mandatory}] — пункты, из которых код
+    # посчитал число измерения (25.09.2026). `null` — оценка посчитана до чек-листов.
+    task_checklist: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
     competencies_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     competencies_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     competencies_evidence: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    competencies_checklist: Mapped[list | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
 
     overall_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
 
@@ -115,6 +148,12 @@ class AiProfileScore(Base):
     # Копия профиля компании на момент расчёта: без неё старые оценки нельзя ни объяснить,
     # ни проверить по `*_evidence` после того, как профиль поправили.
     company_profile_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # Какая модель считала оценку (25.09.2026): выбор модели персональный, и без этой
+    # пометки расхождение двух оценок одного тендера нельзя отличить от смены провайдера.
+    # `null` — оценка посчитана до правки.
+    ai_provider: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    ai_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     calculated_at: Mapped[datetime] = mapped_column(

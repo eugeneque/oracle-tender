@@ -229,3 +229,53 @@ def test_ai_score_range_filter(client, admin_token):
     assert response.status_code == 200
     ids = {item["id"] for item in response.json()["items"]}
     assert high_id in ids and low_id not in ids
+
+
+def test_extra_sections_show_spending_limit_instead_of_retry_hint(client, admin_token, monkeypatch):
+    """Денежный отказ провайдера доходит до карточки своим текстом, а не фразой «модель не
+    вернула ни одного раздела — попробуйте ещё раз» (28.09.2026)."""
+
+    from app.services import tender_insights
+    from app.services.ai_provider_service import AiQuotaExceededError
+
+    calls: list[int] = []
+
+    def refuse(*args, **kwargs):
+        calls.append(1)
+        raise AiQuotaExceededError("RouterAI отказал: исчерпан лимит расходов ключа")
+
+    monkeypatch.setattr(tender_insights, "run_structured", refuse)
+
+    db = SessionLocal()
+    try:
+        tender_id = str(_make_tender(db).id)
+    finally:
+        db.close()
+
+    response = client.post(
+        f"/tenders/{tender_id}/extra-sections", headers=_auth_headers(admin_token)
+    )
+    assert response.status_code == 402
+    assert "лимит расходов" in response.json()["detail"]
+    assert calls == [1]  # вторая пачка упёрлась бы в тот же лимит — её не зовём
+
+
+def test_extra_sections_failure_shows_the_cause(client, admin_token, monkeypatch):
+    from app.services import tender_insights
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("HTTP 500: gateway timeout")
+
+    monkeypatch.setattr(tender_insights, "run_structured", broken)
+
+    db = SessionLocal()
+    try:
+        tender_id = str(_make_tender(db).id)
+    finally:
+        db.close()
+
+    response = client.post(
+        f"/tenders/{tender_id}/extra-sections", headers=_auth_headers(admin_token)
+    )
+    assert response.status_code == 502
+    assert "gateway timeout" in response.json()["detail"]

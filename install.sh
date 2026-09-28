@@ -311,16 +311,22 @@ detect_platform() {
 }
 
 # Лучший доступный интерпретатор: сначала явные 3.13/3.12/3.11, потом системный python3.
+# Ищем и проверяем от имени SERVICE_USER (через run_as), а не текущего пользователя:
+# install.sh на сервере часто запускают из-под root, и в PATH root там может найтись
+# свой python3.12 (например, /root/.local/bin/python3.12 из pip --user/pyenv/uv), который
+# недоступен пользователю службы — venv на шаге 5/9 падает с «command not found». Резолвя
+# через run_as, мы сразу берём интерпретатор, который реально сможет запустить SERVICE_USER.
 find_python() {
-  local candidate ver minor
+  local candidate ver minor resolved
   for candidate in python3.13 python3.12 python3.11 python3; do
-    have "$candidate" || continue
-    ver="$("$candidate" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+    resolved="$(run_as sh -c "command -v $candidate" 2>/dev/null || true)"
+    [ -n "$resolved" ] || continue
+    ver="$(run_as "$resolved" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
     [ -n "$ver" ] || continue
     minor="${ver#*.}"
     [ "${ver%%.*}" = "3" ] || continue
     if [ "$minor" -ge "$PY_MIN_MINOR" ] 2>/dev/null; then
-      PYTHON="$(command -v "$candidate")"
+      PYTHON="$resolved"
       PYTHON_VER="$ver"
       return 0
     fi
@@ -384,6 +390,15 @@ run_as() {
   else
     sudo -u "$SERVICE_USER" -H "$@"
   fi
+}
+
+# .env создаётся этим же (часто root, если install.sh запущен без sudo от обычного
+# пользователя) процессом, а читают его дальше шаги, выполняемые через run_as от имени
+# SERVICE_USER: без chown файл с правами 600 root:root для него нечитаем
+# (PermissionError на alembic/venv). Молча пропускаем chown, если он не нужен или недоступен.
+own_for_service() {
+  [ "$(id -un)" = "$SERVICE_USER" ] && return 0
+  $SUDO chown "$SERVICE_USER" "$@" 2>/dev/null || true
 }
 
 soft() {
@@ -605,6 +620,7 @@ step_config() {
     chmod 600 "$env_file"
     ok "создан .env, секреты сгенерированы (JWT, пароль БД, пароль администратора)"
   fi
+  own_for_service "$env_file"
 
   # Ключ шифрования паролей от личных кабинетов площадок. В нативной установке его
   # заводит и хранит сам backend в файле .credentials_key рядом с проектом, а в контейнере
@@ -637,6 +653,7 @@ step_config() {
     # своего каталога — держим там копию, как это делает run.sh.
     cp "$env_file" "$BACKEND_DIR/.env"
     chmod 600 "$BACKEND_DIR/.env"
+    own_for_service "$BACKEND_DIR/.env"
     ok "конфигурация разложена: oracle-t/.env и backend/.env"
   fi
   step_end

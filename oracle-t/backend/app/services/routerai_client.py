@@ -25,7 +25,7 @@ import pydantic
 from loguru import logger
 from sqlalchemy.orm import Session
 
-from app.services.ai_provider_service import get_routerai_credentials
+from app.services.ai_provider_service import AiQuotaExceededError, get_routerai_credentials
 
 DEFAULT_TIMEOUT_SECONDS = 180.0
 # Потолок длины ответа. Самые длинные ответы — списки требований из документации (десятки
@@ -36,12 +36,20 @@ MAX_OUTPUT_TOKENS = 16_000
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 3.0
 
+# Признаки денежного отказа в теле ответа. 429 бывает и временным (частота запросов) — его
+# повтор лечит, поэтому 429 считается денежным только с одним из этих слов; 402 — всегда.
+_QUOTA_MARKERS = ("spending limit", "limit exceeded", "insufficient", "balance", "credit", "quota")
+
 ResponseT = TypeVar("ResponseT", bound=pydantic.BaseModel)
 
 
 class RouterAiError(RuntimeError):
     """Шлюз ответил ошибкой. Текст — из тела ответа: там причина (неверный ключ, нет средств,
     модель недоступна), а код статуса сам по себе мало что говорит."""
+
+
+class RouterAiQuotaError(RouterAiError, AiQuotaExceededError):
+    """Лимит расходов ключа или баланс исчерпан — повторять запрос бессмысленно."""
 
 
 def _strict_schema(schema: Any) -> Any:
@@ -116,6 +124,15 @@ def _chat_completion(
             detail = json.dumps(payload.get("error", payload), ensure_ascii=False)[:500]
         except ValueError:
             pass
+        if response.status_code == 402 or (
+            response.status_code == 429
+            and any(marker in detail.lower() for marker in _QUOTA_MARKERS)
+        ):
+            raise RouterAiQuotaError(
+                f"RouterAI отказал: исчерпан лимит расходов ключа или баланс "
+                f"(HTTP {response.status_code}: {detail}). Повтор не поможет — поднимите лимит "
+                f"в кабинете RouterAI или переключитесь на YandexGPT"
+            )
         raise RouterAiError(f"HTTP {response.status_code}: {detail}")
     return response.json()
 
@@ -188,6 +205,8 @@ def run_structured(
             if choice.get("finish_reason") == "length":
                 raise RouterAiError("ответ оборван по лимиту токенов")
             return response_model.model_validate(_coerce_shape(raw_text, response_model))
+        except AiQuotaExceededError:
+            raise
         except (pydantic.ValidationError, ValueError) as exc:
             last_error = exc
             logger.warning(

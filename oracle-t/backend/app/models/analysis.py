@@ -20,6 +20,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -77,6 +78,21 @@ class ComplianceSource(str, enum.Enum):
     # Запись о допуске в реестре (ПП 719/ГИСП, ЗАК Россетей, реестр ПО) — пятый источник,
     # для требований о допуске; факт детерминированный, из `product_registry_records`.
     ADMISSION_REGISTRY = "admission_registry"
+    # Каталог совместимого ПО «Ready for Astra» — параметр 39 файла «Параметры для ПУ».
+    ASTRA_CATALOG = "astra_catalog"
+    # Правило тендерного отдела из комментария файла «Параметры для ПУ», выполненное кодом
+    # (например, трёхпозиционный переключатель реле — только три производителя).
+    EXPERT_RULE = "expert_rule"
+
+
+class WinVerdict(str, enum.Enum):
+    """Проходит ли прибор производителя по ТЗ (файл «Параметры для ПУ», 25.09.2026).
+    Правила — `compliance_service.decide_verdict` и раздел 5а CRITERIA.md."""
+
+    PASSES = "passes"  # критичные и важные требования выполнены
+    CAVEATS = "caveats"  # критичные выполнены, но есть невыполненные важные/второстепенные
+    FAILS = "fails"  # есть невыполненное критичное требование
+    UNKNOWN = "unknown"  # по критичным требованиям не хватает данных
 
 
 class Requirement(Base):
@@ -114,6 +130,9 @@ class Requirement(Base):
     # Поле Приложения C внутри группы. Заполняется, когда требование удалось привязать к
     # конкретной характеристике: тогда сравнение идёт детерминированно, без обращения к модели.
     field_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    # Номер параметра из файла тендерного отдела «Параметры для ПУ» (1-39,
+    # `app/seed/meter_parameters.py`); NULL — требование ни к одному параметру не отнесено.
+    parameter_no: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     verified_by_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -202,6 +221,10 @@ class WinPercentage(Base):
     # требованиям с известным вердиктом, и без этого числа он выглядит увереннее, чем есть.
     requirements_total: Mapped[int] = mapped_column(nullable=False, default=0)
     requirements_scored: Mapped[int] = mapped_column(nullable=False, default=0)
+    # Итог «проходит ли прибор производителя» (`WinVerdict`) — отдельно от процента: число
+    # по методике считается арифметически, а заявку отклоняют по одному критичному
+    # несоответствию, сколько бы остальных требований ни выполнялось.
+    verdict: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     calculated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

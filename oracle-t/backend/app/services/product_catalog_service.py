@@ -24,7 +24,7 @@ from app.models.manufacturer import (
 from app.models.user import User
 from app.schemas.manufacturer import ProductOut, SiTypeOut
 from app.seed.characteristics_data import is_known_field
-from app.services import product_form_factor, si_type_linking
+from app.services import meter_kind, product_form_factor, si_type_linking
 from app.services.audit import log_action
 
 
@@ -322,10 +322,13 @@ def list_products_out(db: Session, manufacturer_id: uuid.UUID) -> list[ProductOu
     интерфейс раскладывает модели по столбцам. Характеристики трёх нужных полей берутся
     одним запросом на производителя, а не по одному на модель: у Энергомеры 220 моделей."""
     products = list_products(db, manufacturer_id)
-    fields = (
-        product_form_factor.FIELD_PHASES,
-        product_form_factor.FIELD_MOUNTING,
-        product_form_factor.FIELD_BODY,
+    fields = tuple(
+        {
+            product_form_factor.FIELD_PHASES,
+            product_form_factor.FIELD_MOUNTING,
+            product_form_factor.FIELD_BODY,
+            *meter_kind.PRODUCT_FIELDS,
+        }
     )
     rows = db.execute(
         select(
@@ -352,6 +355,9 @@ def list_products_out(db: Session, manufacturer_id: uuid.UUID) -> list[ProductOu
         out = ProductOut.model_validate(product)
         out.phases = form.phases
         out.mountings = form.mountings
+        out.meter_kinds = meter_kind.product_kinds_from_values(
+            product, by_product.get(product.id, {})
+        )
         result.append(out)
     return result
 

@@ -9,6 +9,7 @@ import {
   percentTextClass,
   percentValue,
 } from "../../utils/format";
+import { VERDICT_CLASSES, VERDICT_LABELS } from "../../utils/meterKinds";
 
 const STATUS_CLASSES: Record<string, string> = {
   meets: "bg-emerald-500/15 text-emerald-300",
@@ -70,12 +71,57 @@ function WinPercentageCard({
         </span>
         <span className={`text-lg font-semibold ${percentTextClass(percent)}`}>{percent}%</span>
       </div>
+      {row.verdict && (
+        <span
+          className={`mt-1 inline-block rounded-md px-1.5 py-0.5 text-[11px] ${VERDICT_CLASSES[row.verdict]}`}
+        >
+          {VERDICT_LABELS[row.verdict]}
+        </span>
+      )}
       <div className="mt-1 text-[11px] text-zinc-600">
         Учтено {row.requirements_scored} из {row.requirements_total} требований ({coverage}%)
       </div>
       {row.reason_summary && (
         <p className="mt-1.5 text-[11px] leading-snug text-zinc-500">{row.reason_summary}</p>
       )}
+    </div>
+  );
+}
+
+const VERDICT_ORDER = ["passes", "caveats", "fails", "unknown"] as const;
+
+/** Итог по производителям — ответ на вопрос тендерного отдела «чьи приборы проходят по ТЗ,
+ * а чьи нет» (файл «Параметры для ПУ», 25.09.2026). Не проходит — есть невыполненное
+ * критичное требование; с оговорками — критичные выполнены, но не всё; не хватает данных —
+ * по критичным требованиям нечего сравнить (пополнить справочник и пересчитать). */
+function VerdictSummary({ rows }: { rows: ComplianceMatrix["win_percentages"] }) {
+  const groups = VERDICT_ORDER.map((verdict) => ({
+    verdict,
+    rows: rows.filter((row) => row.verdict === verdict),
+  })).filter((group) => group.rows.length > 0);
+  if (groups.length === 0) return null;
+  return (
+    <div className="mb-4 rounded-xl border border-white/[0.08] bg-white/[0.02] p-3">
+      <div className="mb-2 text-xs font-medium text-zinc-400">Итог по производителям</div>
+      <div className="space-y-1.5">
+        {groups.map((group) => (
+          <div key={group.verdict} className="flex flex-wrap items-baseline gap-1.5 text-[13px]">
+            <span className={`rounded-md px-1.5 py-0.5 text-[11px] ${VERDICT_CLASSES[group.verdict]}`}>
+              {VERDICT_LABELS[group.verdict]}
+            </span>
+            {group.rows.map((row, index) => (
+              <span
+                key={row.manufacturer_id}
+                className={row.is_mirtek ? "text-indigo-300" : "text-zinc-300"}
+                title={row.reason_summary ?? undefined}
+              >
+                {row.manufacturer_name}
+                {index < group.rows.length - 1 ? "," : ""}
+              </span>
+            ))}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -130,6 +176,18 @@ function MethodologyHint() {
           <li>
             <span className="text-zinc-300">Уверенность</span> ниже 0,6 — вердикт помечен как
             требующий проверки человеком.
+          </li>
+          <li>
+            <span className="text-zinc-300">Параметры для ПУ</span> (значок «П№» у требования) —
+            перечень тендерного отдела из 39 параметров с правилами трактовки: тип прибора по
+            напряжению, токам и креплению; трёхпозиционный переключатель реле — только
+            Энергомера, Тайпит, Пульсар; ПП 719 — всегда ручная проверка в ГИСП; Astra Linux —
+            по каталогу «Ready for Astra».
+          </li>
+          <li>
+            <span className="text-zinc-300">Итог:</span> не проходит — невыполнено критичное
+            требование; с оговорками — критичные выполнены, но не всё; не хватает данных — без
+            ответа больше половины критичных.
           </li>
         </ul>
       )}
@@ -214,6 +272,8 @@ export function TenderComplianceTab({
 
   return (
     <div>
+      <VerdictSummary rows={matrix.win_percentages} />
+
       <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
         {matrix.win_percentages.map((row) => (
           <WinPercentageCard key={row.manufacturer_id} row={row} />
@@ -267,6 +327,14 @@ export function TenderComplianceTab({
                           }`}
                         />
                         <span className="text-zinc-300">{requirement.text}</span>
+                        {requirement.parameter_no && (
+                          <span
+                            className="shrink-0 rounded bg-indigo-500/10 px-1 text-[10px] text-indigo-300"
+                            title={`Параметр ${requirement.parameter_no} файла «Параметры для ПУ»: ${requirement.parameter_name ?? ""}`}
+                          >
+                            П{requirement.parameter_no}
+                          </span>
+                        )}
                         <CriticalityBadge value={requirement.criticality} />
                       </div>
                     </td>

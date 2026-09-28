@@ -140,6 +140,14 @@ export function TenderRequirementsTab({
             <p className="text-sm leading-snug text-zinc-200">{requirement.text}</p>
             <div className="flex shrink-0 items-center gap-1.5">
               <KindBadge value={requirement.kind} />
+              {requirement.parameter_no && (
+                <span
+                  className="shrink-0 rounded bg-indigo-500/10 px-1 text-[10px] text-indigo-300"
+                  title={`Параметр ${requirement.parameter_no} файла «Параметры для ПУ»: ${requirement.parameter_name ?? ""}`}
+                >
+                  П{requirement.parameter_no}
+                </span>
+              )}
               <CriticalityBadge value={requirement.criticality} />
             </div>
           </div>
