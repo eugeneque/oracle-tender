@@ -26,6 +26,8 @@ oracle-t/frontend/dist/
 
 # --- Данные и артефакты рантайма ---
 install.log
+update.log
+backups/
 logs/
 storage/
 oracle-t/backend/logs/

@@ -13,8 +13,10 @@
 #      ./install.sh --dry-run        показать план, ничего не менять
 #      ./install.sh --help           остальные ключи
 #
-#  Скрипт идемпотентен: повторный запуск переиспользует уже созданные venv, базу и .env,
-#  поэтому его же можно запускать после `git pull` как обновление.
+#  Скрипт идемпотентен: повторный запуск переиспользует уже созданные venv, базу и .env.
+#  Для обновления до новой версии — ./update.sh (забирает код с GitHub и вызывает
+#  «install.sh --update»: зависимости, миграции, сборка, перезапуск — без переписывания
+#  конфига nginx, где может стоять HTTPS от certbot).
 
 set -euo pipefail
 
@@ -47,6 +49,7 @@ STEP=0
 STEP_TOTAL=0
 WARNINGS=0
 FRESH_ENV=0
+UPDATE=0
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Оформление
@@ -239,6 +242,9 @@ Sova Scanner — установщик.
   --http-port N        порт веб-интерфейса (по умолчанию 80; для docker и server)
   --backend-port N     порт API (по умолчанию 8000)
   --skip-playwright    не ставить браузер Playwright (~400 МБ; часть источников станет недоступна)
+  --update             обновить уже установленную систему: зависимости, миграции, сборка,
+                       перезапуск backend. Режим определяется по установке; nginx, .env и
+                       данные не трогаются. Обычно вызывается из ./update.sh
   --ascii              оформление без псевдографики
   -h, --help           эта справка
 
@@ -256,6 +262,7 @@ parse_args() {
       --dry-run) DRY_RUN=1; shift ;;
       --ascii) FORCE_ASCII=1; shift ;;
       --skip-playwright) SKIP_PLAYWRIGHT=1; shift ;;
+      --update) UPDATE=1; ASSUME_YES=1; shift ;;
       --http-port) HTTP_PORT="${2:-}"; shift 2 ;;
       --http-port=*) HTTP_PORT="${1#*=}"; shift ;;
       --backend-port) BACKEND_PORT="${2:-}"; shift 2 ;;
@@ -842,10 +849,7 @@ UNIT
 }
 
 write_nginx_site() {
-  $SUDO mkdir -p "$WEB_ROOT"
-  $SUDO rm -rf "${WEB_ROOT:?}/"*
-  $SUDO cp -R "$FRONTEND_DIR/dist/." "$WEB_ROOT/"
-  $SUDO chmod -R a+rX "$WEB_ROOT"
+  publish_static
 
   local conf_dir
   if [ -d /etc/nginx/sites-available ]; then
@@ -925,10 +929,58 @@ open_firewall() {
   return 0
 }
 
+# Порты берём из действующей установки, а не из значений по умолчанию: систему могли
+# поставить с --http-port/--backend-port, и проверка после обновления стучалась бы не туда.
+read_installed_ports() {
+  local unit="/etc/systemd/system/$SERVICE_NAME.service" site port
+  if [ -f "$unit" ]; then
+    port="$(sed -n 's/.*--port \([0-9][0-9]*\).*/\1/p' "$unit" | head -1)"
+    [ -n "$port" ] && BACKEND_PORT="$port"
+  fi
+  for site in "/etc/nginx/sites-available/$NGINX_SITE.conf" "/etc/nginx/conf.d/$NGINX_SITE.conf"; do
+    [ -f "$site" ] || continue
+    port="$(sed -n 's/^[[:space:]]*listen[[:space:]]\{1,\}\([0-9][0-9]*\).*/\1/p' "$site" | head -1)"
+    [ -n "$port" ] && HTTP_PORT="$port"
+    break
+  done
+}
+
+detect_installed_mode() {
+  [ -n "$MODE" ] && return 0
+  if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ]; then
+    MODE="server"
+  elif [ "$(get_env POSTGRES_HOST "$APP_DIR/.env" || true)" = "db" ]; then
+    MODE="docker"
+  elif [ -f "$APP_DIR/.env" ]; then
+    MODE="local"
+  else
+    die "Установка не найдена (нет службы $SERVICE_NAME и oracle-t/.env) — сначала поставьте систему: sudo ./install.sh"
+  fi
+}
+
+publish_static() {
+  $SUDO mkdir -p "$WEB_ROOT"
+  $SUDO rm -rf "${WEB_ROOT:?}/"*
+  $SUDO cp -R "$FRONTEND_DIR/dist/." "$WEB_ROOT/"
+  $SUDO chmod -R a+rX "$WEB_ROOT"
+}
+
+# Обновление: новая статика и перезапуск backend. Юнит systemd и сайт nginx не
+# переписываются — в сайте может стоять HTTPS, который certbot дописал в тот же файл.
+step_services_update() {
+  step "Перезапуск"
+  task "новая статика интерфейса ($WEB_ROOT)" publish_static
+  task "перезапуск backend" $SUDO systemctl restart "$SERVICE_NAME"
+  step_end
+}
+
 step_services() {
   step "Службы: systemd и nginx"
   task "юнит systemd ($SERVICE_NAME.service)" write_systemd_unit
-  task "запуск backend" $SUDO systemctl enable --now "$SERVICE_NAME"
+  # restart, а не «enable --now»: на уже работающей службе «enable --now» ничего не делает,
+  # и после повторного запуска установщика backend продолжал бы крутить старый код.
+  task "автозапуск backend" $SUDO systemctl enable "$SERVICE_NAME"
+  task "перезапуск backend" $SUDO systemctl restart "$SERVICE_NAME"
   soft "разрешение SELinux на проксирование" selinux_allow_proxy
   task "сайт nginx ($WEB_ROOT)" write_nginx_site
   task "перезапуск nginx" $SUDO systemctl enable --now nginx
@@ -1149,16 +1201,16 @@ summary() {
     server)
       printf '    systemctl status %s\n' "$SERVICE_NAME"
       printf '    journalctl -u %s -f\n' "$SERVICE_NAME"
-      printf '    %sобновление: git pull && ./install.sh --mode server -y%s\n' "$C_DIM" "$C_OFF"
+      printf '    %sобновление: sudo ./update.sh · автообновление: sudo ./update.sh --enable-auto%s\n' "$C_DIM" "$C_OFF"
       ;;
     docker)
       printf '    cd oracle-t && %s ps\n' "$COMPOSE"
       printf '    cd oracle-t && %s logs -f backend\n' "$COMPOSE"
-      printf '    %sобновление: git pull && ./install.sh --mode docker -y%s\n' "$C_DIM" "$C_OFF"
+      printf '    %sобновление: sudo ./update.sh · автообновление: sudo ./update.sh --enable-auto%s\n' "$C_DIM" "$C_OFF"
       ;;
     *)
       printf '    ./oracle-t/run.sh          %s— поднять backend и frontend%s\n' "$C_DIM" "$C_OFF"
-      printf '    %sобновление: git pull && ./install.sh --mode local -y%s\n' "$C_DIM" "$C_OFF"
+      printf '    %sобновление: ./update.sh%s\n' "$C_DIM" "$C_OFF"
       ;;
   esac
   printf '\n'
@@ -1213,6 +1265,10 @@ main() {
 
   banner
   detect_platform
+  if [ "$UPDATE" = 1 ]; then
+    detect_installed_mode
+    read_installed_ports
+  fi
   choose_mode
 
   # От чьего имени будет работать программа. Под sudo это тот, кто вызвал sudo, а не root:
@@ -1229,6 +1285,22 @@ main() {
     server) STEP_TOTAL=9 ;;
     local)  STEP_TOTAL=8 ;;
   esac
+
+  # Обновление: без системных пакетов и без переписывания юнита и сайта nginx. Новые
+  # системные зависимости (редкость) ставит полный повторный запуск install.sh.
+  if [ "$UPDATE" = 1 ] && [ "$MODE" != "docker" ]; then
+    STEP_TOTAL=6
+    [ "$MODE" = "server" ] && STEP_TOTAL=7
+    step_preflight
+    step_config
+    step_python_env
+    step_migrations
+    step_frontend
+    [ "$MODE" = "server" ] && step_services_update
+    step_verify
+    printf '\n  %s%s обновление установлено%s\n\n' "$C_GREEN$C_B" "$G_OK" "$C_OFF"
+    return 0
+  fi
 
   if [ "$MODE" = "docker" ]; then
     step_preflight
