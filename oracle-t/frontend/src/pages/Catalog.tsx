@@ -109,6 +109,16 @@ function readManufacturerSort(): ManufacturerSort {
   }
 }
 
+// Скрывать ли снятые с производства в таблице моделей (29.09.2026). Настройка одна на все
+// производителей и запоминается в браузере: кто её включил, смотрит только действующий ряд.
+function readHideDiscontinued(): boolean {
+  try {
+    return localStorage.getItem("catalog.hideDiscontinued") === "1";
+  } catch {
+    return false;
+  }
+}
+
 const manufacturerTitle = (m: Manufacturer) => m.brand_name ?? m.legal_name;
 
 // Автозаполнение каталога (28.09.2026): сервер раз в сутки опрашивает все источники по
@@ -209,6 +219,7 @@ export function CatalogPage() {
   const [openProductId, setOpenProductId] = useState<string | null>(null);
   const [step, setStep] = useState<StepKey>(readStep);
   const [manufacturerSort, setManufacturerSort] = useState<ManufacturerSort>(readManufacturerSort);
+  const [hideDiscontinued, setHideDiscontinued] = useState(readHideDiscontinued);
 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -271,6 +282,11 @@ export function CatalogPage() {
   // «не электросчётчики» — факты реестра, подтверждение их не меняет.
   const siTypesNeedingReview = useMemo(() => siTypes.filter((s) => siTypeGroup(s) === "pending").length, [siTypes]);
   const activeProducts = useMemo(() => products.filter((p) => p.status !== "discontinued").length, [products]);
+  const discontinuedProducts = products.length - activeProducts;
+  const visibleProducts = useMemo(
+    () => (hideDiscontinued ? products.filter((p) => p.status !== "discontinued") : products),
+    [products, hideDiscontinued],
+  );
   const productsNeedingReview = useMemo(() => products.filter((p) => p.review_status === "needs_review").length, [products]);
 
   const run = async (key: string, action: () => Promise<void>) => {
@@ -375,6 +391,15 @@ export function CatalogPage() {
       localStorage.setItem("catalog.manufacturerSort", next);
     } catch {
       // без сохранения — порядок просто не запомнится
+    }
+  };
+
+  const toggleHideDiscontinued = (next: boolean) => {
+    setHideDiscontinued(next);
+    try {
+      localStorage.setItem("catalog.hideDiscontinued", next ? "1" : "0");
+    } catch {
+      // Приватный режим — настройка просто не запомнится.
     }
   };
 
@@ -893,12 +918,27 @@ export function CatalogPage() {
                       </div>
                     )}
                     <div className="px-5 py-3">
+                      {products.length > 0 && (
+                        <label className="mb-3 flex w-fit cursor-pointer items-center gap-2 text-xs text-zinc-400 hover:text-zinc-200">
+                          <input
+                            type="checkbox"
+                            checked={hideDiscontinued}
+                            onChange={(e) => toggleHideDiscontinued(e.target.checked)}
+                          />
+                          Скрыть снятые с производства
+                          <span className="tabular-nums text-zinc-600">{discontinuedProducts}</span>
+                        </label>
+                      )}
                       {products.length === 0 ? (
                         <p className="text-xs text-zinc-500">
                           Моделей пока нет — обойдите сайт производителя или заведите исполнения из реестра на шаге «Обучение».
                         </p>
+                      ) : visibleProducts.length === 0 ? (
+                        <p className="text-xs text-zinc-500">
+                          Все модели производителя сняты с производства — снимите галочку, чтобы их увидеть.
+                        </p>
                       ) : (
-                        <ProductMatrix products={products} siTypes={siTypes} selectedProductId={openProductId} onSelect={setOpenProductId} />
+                        <ProductMatrix products={visibleProducts} siTypes={siTypes} selectedProductId={openProductId} onSelect={setOpenProductId} />
                       )}
                     </div>
                   </div>

@@ -502,6 +502,11 @@ export interface AiProviderStatus {
   default_provider: AiProviderKey;
   default_label: string;
   configured_providers: AiProviderKey[];
+  /** Что выбрал пользователь (или умолчание); если она отключена, `active_provider` — замена. */
+  requested_provider?: AiProviderKey | null;
+  /** Модели, отключённые администратором намертво (29.09.2026). */
+  disabled_providers?: AiProviderKey[];
+  disabled_info?: Partial<Record<AiProviderKey, { at: string | null; by: string | null }>>;
 }
 
 export interface RouterAiSettings {
@@ -735,7 +740,8 @@ export interface BackgroundJob {
     | "tender_full_review"
     | "sources_poll"
     | "ai_feedback";
-  status: "queued" | "running" | "success" | "error";
+  /** `cancelled` — остановлена: администратор отключил модель, через которую она шла. */
+  status: "queued" | "running" | "success" | "error" | "cancelled";
   tender_id: string | null;
   created_at: string;
   started_at: string | null;
@@ -746,6 +752,35 @@ export interface BackgroundJob {
   /** Задача без тендера (опрос площадок): входные данные и итог по каждой площадке.
    * У полного разбора — итог каждого шага: `analysis`, `evaluation`, `score`. */
   payload: Record<string, unknown> | null;
+  /** Почему задача ждёт: `own` — перед ней разборы того же пользователя, `slot` — сервер
+   * занят разборами других; `queue_ahead` — сколько их. */
+  queue_reason?: "own" | "slot" | null;
+  queue_ahead?: number | null;
+}
+
+/** Задача в очереди разборов — «Мои разборы» и страница «Логирование». */
+export interface JobQueueItem {
+  id: string;
+  kind: BackgroundJob["kind"];
+  kind_label: string;
+  status: BackgroundJob["status"];
+  tender_id: string | null;
+  tender_title: string | null;
+  tender_external_id: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  message: string | null;
+  queue_reason: "own" | "slot" | null;
+  queue_ahead: number | null;
+}
+
+/** Очередь одного пользователя; `user_id` пустой — задачи расписания. */
+export interface UserJobQueue {
+  user_id: string | null;
+  user_name: string;
+  running: JobQueueItem[];
+  queued: JobQueueItem[];
 }
 
 export interface TenderPage {

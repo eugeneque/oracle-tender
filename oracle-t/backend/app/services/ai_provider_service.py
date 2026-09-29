@@ -18,7 +18,9 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from loguru import logger
@@ -73,6 +75,12 @@ class AiQuotaExceededError(RuntimeError):
     писала «модель не вернула ни одного раздела — попробуйте ещё раз»)."""
 
 
+class AiModelDisabledError(AiNotConfiguredError):
+    """Модель выключена администратором, а замены ей нет — все остальные тоже выключены или
+    не настроены. Наследник `AiNotConfiguredError`: вызывающий код уже показывает его текст
+    пользователю как есть."""
+
+
 def _get_or_create(db: Session) -> AiProviderSettings:
     settings = db.get(AiProviderSettings, _SINGLETON_ID)
     if settings is None:
@@ -93,12 +101,45 @@ def get_default_provider(db: Session) -> str:
     return settings.active_provider
 
 
-def resolve_provider(db: Session, user: User | None) -> tuple[str, str]:
-    """Провайдер для конкретного пользователя и откуда он взялся: `("claude", "user")` —
-    личный выбор, `("yandex", "default")` — системный. Личный выбор, у которого пропали
-    учётные данные (администратор очистил ключ уже после выбора), не роняет пользователя:
-    он молча получает модель по умолчанию, а в лог уходит предупреждение — в интерфейсе
-    это же видно по статусу «не настроено»."""
+def get_disabled_providers(db: Session) -> dict[str, dict]:
+    """Модели, выключенные администратором: провайдер → `{"at": ISO, "by": ФИО}`."""
+
+    # Столбец отдельным SELECT, а не `db.get`: сессия фоновой задачи живёт десятки минут, и
+    # закэшированный в ней объект не увидел бы выключения, сделанного администратором.
+    raw = (
+        db.execute(
+            select(AiProviderSettings.disabled_providers).where(
+                AiProviderSettings.id == _SINGLETON_ID
+            )
+        ).scalar_one_or_none()
+        or {}
+    )
+    return {key: value for key, value in raw.items() if key in PROVIDER_LABELS}
+
+
+def is_provider_enabled(db: Session, provider: str) -> bool:
+    return provider not in get_disabled_providers(db)
+
+
+def disabled_since(db: Session, provider: str) -> datetime | None:
+    """Когда модель выключили; `None` — включена."""
+
+    info = get_disabled_providers(db).get(provider)
+    if info is None:
+        return None
+    try:
+        return datetime.fromisoformat(info["at"])
+    except (KeyError, TypeError, ValueError):
+        # Метка без времени — выключена «всегда»: задачи с ней останавливаются.
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def requested_provider(db: Session, user: User | None) -> tuple[str, str]:
+    """Какую модель пользователь хочет — без учёта выключенных администратором:
+    `("claude", "user")` — личный выбор, `("yandex", "default")` — системный. Личный выбор,
+    у которого пропали учётные данные (администратор очистил ключ уже после выбора), не
+    роняет пользователя: он молча получает модель по умолчанию, а в лог уходит
+    предупреждение — в интерфейсе это же видно по статусу «не настроено»."""
 
     if user is not None and user.ai_provider in PROVIDER_LABELS:
         if _is_configured(db, user.ai_provider):
@@ -108,6 +149,27 @@ def resolve_provider(db: Session, user: User | None) -> tuple[str, str]:
             "но её учётные данные не заполнены — используется модель по умолчанию"
         )
     return get_default_provider(db), "default"
+
+
+def resolve_provider(db: Session, user: User | None) -> tuple[str, str]:
+    """Провайдер, который обслужит запросы пользователя, и откуда он взялся.
+
+    Выключенная администратором модель (29.09.2026) не обслуживает никого: вместо неё —
+    модель по умолчанию, а если выключена и она — первая включённая и настроенная. Если
+    не осталось ни одной, возвращается запрошенная: сам вызов модели откажет с
+    `AiModelDisabledError` и понятным текстом."""
+
+    provider, source = requested_provider(db, user)
+    disabled = get_disabled_providers(db)
+    if provider not in disabled:
+        return provider, source
+    default = get_default_provider(db)
+    if default not in disabled and _is_configured(db, default):
+        return default, "default"
+    for key in PROVIDER_LABELS:
+        if key not in disabled and _is_configured(db, key):
+            return key, "default"
+    return provider, source
 
 
 def get_active_provider(db: Session) -> str:
@@ -169,6 +231,7 @@ def get_status(db: Session, user: User | None) -> AiProviderStatus:
 
     provider, source = resolve_provider(db, user)
     default_provider = get_default_provider(db)
+    disabled = get_disabled_providers(db)
     return AiProviderStatus(
         active_provider=provider,
         label=PROVIDER_LABELS[provider],
@@ -178,6 +241,11 @@ def get_status(db: Session, user: User | None) -> AiProviderStatus:
         default_provider=default_provider,
         default_label=PROVIDER_LABELS[default_provider],
         configured_providers=[key for key in PROVIDER_LABELS if _is_configured(db, key)],
+        requested_provider=requested_provider(db, user)[0],
+        disabled_providers=[key for key in PROVIDER_LABELS if key in disabled],
+        disabled_info={
+            key: {"at": value.get("at"), "by": value.get("by")} for key, value in disabled.items()
+        },
     )
 
 
@@ -188,6 +256,10 @@ def _ensure_switchable(db: Session, provider: str) -> None:
 
     if provider not in PROVIDER_LABELS:
         raise ValueError(f"Неизвестный провайдер: {provider}")
+    if not is_provider_enabled(db, provider):
+        raise AiModelDisabledError(
+            f"{PROVIDER_LABELS[provider]} отключена администратором — выберите другую модель."
+        )
     if not _is_configured(db, provider):
         raise AiNotConfiguredError(
             f"Нельзя переключиться на {PROVIDER_LABELS[provider]}: учётные данные не заполнены."
@@ -211,6 +283,52 @@ def switch_default_provider(db: Session, provider: str, *, actor: User) -> AiPro
         result="success",
         level=LogLevel.INFO,
         details=f"{PROVIDER_LABELS.get(previous, previous)} → {PROVIDER_LABELS[provider]}",
+        user_id=actor.id,
+    )
+    db.commit()
+    return get_status(db, actor)
+
+
+def set_provider_enabled(
+    db: Session, provider: str, enabled: bool, *, actor: User
+) -> AiProviderStatus:
+    """Включает или выключает модель для всех (администратор, 29.09.2026).
+
+    Выключение — намертво: ни пользователи с личным выбором, ни задачи по расписанию в неё
+    больше не ходят (их запросы обслуживает другая модель, см. `resolve_provider`), а
+    фоновые задачи, начатые до выключения, останавливаются на следующем обращении к модели
+    (`ai_client.run_structured`). Личный выбор пользователей не стирается: после включения
+    каждый вернётся к своей модели."""
+
+    if provider not in PROVIDER_LABELS:
+        raise ValueError(f"Неизвестный провайдер: {provider}")
+    settings = _get_or_create(db)
+    disabled = dict(settings.disabled_providers or {})
+    if enabled == (provider not in disabled):
+        return get_status(db, actor)
+    if enabled:
+        disabled.pop(provider, None)
+    else:
+        disabled[provider] = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "by": actor.full_name,
+        }
+    # Новый словарь, а не правка на месте: JSONB без MutableDict изменений внутри не видит.
+    settings.disabled_providers = disabled
+    settings.updated_by_id = actor.id
+
+    log_action(
+        db,
+        component="integrations",
+        action="enable_ai_provider" if enabled else "disable_ai_provider",
+        result="success",
+        level=LogLevel.INFO if enabled else LogLevel.WARNING,
+        details=(
+            f"{PROVIDER_LABELS[provider]} включена"
+            if enabled
+            else f"{PROVIDER_LABELS[provider]} отключена: новые запросы в неё не отправляются, "
+            "начатые задачи останавливаются"
+        ),
         user_id=actor.id,
     )
     db.commit()

@@ -31,6 +31,7 @@ from app.services import (
     notification_service,
     tender_card_service,
     tender_insights,
+    tender_twins,
 )
 from app.services.ai_profile_service import compute_profile_score
 from app.services.ai_provider_service import PROVIDER_LABELS, get_active_provider
@@ -443,9 +444,41 @@ def _run_sources_poll(db: Session, job: BackgroundJob, actor: User | None) -> st
     return summary
 
 
-register_handler(JobKind.TENDER_ANALYSIS, _run_analysis_job)
+def _shared_with_twins(handler):
+    """После разбора поля, заполненные им (тип конкурса, ОКПД2, регион…), переносятся на
+    остальные записи той же закупки — иначе запись из Госплана выпадала бы из фильтров,
+    хотя закупка разобрана (29.09.2026, см. `tender_twins`). Сбой переноса разбор не
+    отменяет."""
+
+    def run(db: Session, tender: Tender, actor: User | None) -> str:
+        message = handler(db, tender, actor)
+        try:
+            tender_twins.share_fields(db, tender)
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 - перенос полей вторичен
+            db.rollback()
+            logger.warning(f"Поля разбора {tender.external_id} не перенесены на двойников: {exc}")
+        return message
+
+    return run
+
+
+def _full_review_shared(db: Session, job: BackgroundJob, actor: User | None) -> str:
+    tender = db.get(Tender, job.tender_id) if job.tender_id else None
+    message = _run_full_review(db, job, actor)
+    if tender is not None:
+        try:
+            tender_twins.share_fields(db, tender)
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 - перенос полей вторичен
+            db.rollback()
+            logger.warning(f"Поля разбора {tender.external_id} не перенесены на двойников: {exc}")
+    return message
+
+
+register_handler(JobKind.TENDER_ANALYSIS, _shared_with_twins(_run_analysis_job))
 register_job_handler(JobKind.SOURCES_POLL, _run_sources_poll)
-register_handler(JobKind.AI_PROFILE_SCORE, _run_profile_score)
-register_handler(JobKind.AI_FEEDBACK, _run_feedback)
+register_handler(JobKind.AI_PROFILE_SCORE, _shared_with_twins(_run_profile_score))
+register_handler(JobKind.AI_FEEDBACK, _shared_with_twins(_run_feedback))
 register_handler(JobKind.TENDER_EVALUATION, _run_evaluation_job)
-register_job_handler(JobKind.TENDER_FULL_REVIEW, _run_full_review)
+register_job_handler(JobKind.TENDER_FULL_REVIEW, _full_review_shared)

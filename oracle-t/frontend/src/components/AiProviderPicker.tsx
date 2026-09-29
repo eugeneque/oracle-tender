@@ -110,6 +110,7 @@ export function AiProviderPicker({ status }: { status: AiProviderStatus }) {
           </p>
           {AI_PROVIDERS.map((item) => {
             const isConfigured = status.configured_providers.includes(item.key);
+            const isDisabled = status.disabled_providers?.includes(item.key) ?? false;
             const isCurrent = status.active_provider === item.key;
             return (
               <button
@@ -117,7 +118,7 @@ export function AiProviderPicker({ status }: { status: AiProviderStatus }) {
                 type="button"
                 role="option"
                 aria-selected={isCurrent}
-                disabled={isBusy || !isConfigured}
+                disabled={isBusy || !isConfigured || isDisabled}
                 onClick={() => void choose(item.key)}
                 className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-white/5 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
               >
@@ -125,7 +126,11 @@ export function AiProviderPicker({ status }: { status: AiProviderStatus }) {
                 <span className="flex-1 leading-tight">
                   <span className="block font-medium">{item.label}</span>
                   <span className="block text-[10px] text-zinc-500">
-                    {isConfigured ? item.hint : "не настроено администратором"}
+                    {isDisabled
+                      ? "отключена администратором"
+                      : isConfigured
+                        ? item.hint
+                        : "не настроено администратором"}
                   </span>
                 </span>
                 {isCurrent && <Check size={13} className="text-emerald-400" />}

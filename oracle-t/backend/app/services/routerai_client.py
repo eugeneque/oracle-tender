@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from app.services.ai_provider_service import (
     PROVIDER_CLAUDE,
+    PROVIDER_DEEPSEEK,
     PROVIDER_LABELS,
     AiQuotaExceededError,
     get_routerai_credentials,
@@ -44,6 +45,17 @@ RETRY_BACKOFF_SECONDS = 3.0
 # Признаки денежного отказа в теле ответа. 429 бывает и временным (частота запросов) — его
 # повтор лечит, поэтому 429 считается денежным только с одним из этих слов; 402 — всегда.
 _QUOTA_MARKERS = ("spending limit", "limit exceeded", "insufficient", "balance", "credit", "quota")
+
+# Дополнительные поля тела запроса по провайдеру (29.09.2026). DeepSeek V4 Pro по умолчанию
+# «размышляет»: на куске документации в 14 тыс. знаков ~7 тыс. токенов рассуждений, 126 с
+# на ответ (без них — 38 с), и при тайм-ауте 180 с часть кусков уходила на повтор — шаг
+# «анализ документов» шёл 10+ минут. `effort: low` шлюз не соблюдает, помогает только
+# `enabled: false`. Извлечение по схеме рассуждений не требует.
+_PROVIDER_EXTRA_BODY: dict[str, dict[str, Any]] = {
+    PROVIDER_DEEPSEEK: {"reasoning": {"enabled": False}},
+}
+# Ответ дольше этого пишется в журнал — чтобы «долго идёт разбор» было видно без замеров.
+SLOW_CALL_SECONDS = 60.0
 
 ResponseT = TypeVar("ResponseT", bound=pydantic.BaseModel)
 
@@ -106,12 +118,14 @@ def _chat_completion(
     max_tokens: int,
     response_format: dict[str, Any] | None,
     timeout: float,
+    extra_body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        **(extra_body or {}),
     }
     if response_format is not None:
         body["response_format"] = response_format
@@ -197,6 +211,7 @@ def run_structured(
     last_error: Exception | None = None
     raw_text = ""
     for attempt in range(1, RETRY_ATTEMPTS + 1):
+        started = time.monotonic()
         try:
             payload = _chat_completion(
                 api_key=api_key,
@@ -207,7 +222,14 @@ def run_structured(
                 max_tokens=MAX_OUTPUT_TOKENS,
                 response_format=response_format,
                 timeout=DEFAULT_TIMEOUT_SECONDS,
+                extra_body=_PROVIDER_EXTRA_BODY.get(provider),
             )
+            elapsed = time.monotonic() - started
+            if elapsed > SLOW_CALL_SECONDS:
+                logger.info(
+                    f"{name} отвечал {elapsed:.0f} с ({response_model.__name__}, "
+                    f"использование: {payload.get('usage')})"
+                )
             choice = payload["choices"][0]
             raw_text = _strip_fences(_message_text(choice.get("message") or {}))
             if choice.get("finish_reason") == "length":

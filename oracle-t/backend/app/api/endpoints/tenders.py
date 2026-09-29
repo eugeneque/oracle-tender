@@ -69,6 +69,7 @@ from app.services import (
     similarity_service,
     tender_card_service,
     tender_insights,
+    tender_twins,
 )
 from app.services.company_profile_service import CompanyProfileError
 from app.services.manual_request_service import (
@@ -259,6 +260,18 @@ def _get_tender_or_404(db: Session, tender_id: uuid.UUID) -> Tender:
     return tender
 
 
+def _get_subject_or_404(db: Session, tender_id: uuid.UUID) -> Tender:
+    """Запись, у которой хранится разбор закупки (29.09.2026): у записей одной закупки из
+    ЕИС, с площадки и из Госплана документы, требования, матрица и заключение ИИ общие —
+    кто бы из пользователей какую запись ни открыл, он видит один и тот же разбор, а
+    новый разбор не запускается второй раз с нуля (см. `app/services/tender_twins.py`)."""
+
+    subject = tender_twins.link(db, _get_tender_or_404(db, tender_id))
+    if db.dirty:
+        db.commit()
+    return subject
+
+
 def _read_uploads(uploads: list[UploadFile]) -> list[UploadedFile]:
     """Читает multipart-файлы в память. Пустые слоты формы (браузер отправляет `files` без
     выбранного файла как поле с пустым именем) пропускаются, а не превращаются в ошибку."""
@@ -424,7 +437,7 @@ def get_tender_documents(
     (раздел 5.2 ТЗ), при повторных — отдаёт уже сохранённые записи мгновенно (см. докстринг
     `app/services/document_service.sync_tender_documents`)."""
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     return [_document_out(document) for document in sync_tender_documents(db, tender)]
 
 
@@ -446,7 +459,7 @@ def upload_tender_documents(
     его только при пустом списке, и загруженный раньше времени файл иначе навсегда
     отменил бы скачивание документации самой закупки."""
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     sync_tender_documents(db, tender)
     uploads = _read_uploads(files)
     if not uploads:
@@ -469,7 +482,7 @@ def download_tender_document(
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ):
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     documents = sync_tender_documents(db, tender)
     document = next((d for d in documents if d.id == document_id), None)
     if document is None or not document.storage_path:
@@ -497,7 +510,7 @@ def get_tender_requirements(
     """Требования, извлечённые из документации (раздел 5.4 ТЗ). Только чтение — просмотр
     карточки не должен запускать обращения к модели."""
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     return list_requirements(db, tender.id)
 
 
@@ -509,7 +522,7 @@ def get_tender_compliance(
 ) -> ComplianceMatrixOut:
     """Матрица соответствия и проценты победителя (раздел 5.5 ТЗ)."""
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     return get_compliance_matrix(db, tender)
 
 
@@ -530,7 +543,7 @@ def analyze(
     Ненастроенное подключение к ИИ-провайдеру — ошибка конфигурации, а не сбой сервера:
     её текст окажется в `message` задачи, туда же смотрит интерфейс."""
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     job = enqueue(db, kind=JobKind.TENDER_ANALYSIS, tender=tender, actor=user)
     return BackgroundJobOut.model_validate(job, from_attributes=True)
 
@@ -544,7 +557,7 @@ def evaluate(
     """Этап 6: матрица соответствия и расчёт процента победителя — тоже фоновой задачей
     (перебор всех производителей по всем требованиям заведомо дольше анализа)."""
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     job = enqueue(db, kind=JobKind.TENDER_EVALUATION, tender=tender, actor=user)
     return BackgroundJobOut.model_validate(job, from_attributes=True)
 
@@ -559,7 +572,7 @@ def review(
     AI-оценка по профилю (18.09.2026). Раздельные `/analyze`, `/evaluate` и `/ai-score`
     остаются для интеграций и точечного пересчёта; карточка запускает этот."""
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     job = enqueue(db, kind=JobKind.TENDER_FULL_REVIEW, tender=tender, actor=user)
     return BackgroundJobOut.model_validate(job, from_attributes=True)
 
@@ -701,7 +714,7 @@ def get_ai_score(
     тендера, и карточка на него отвечает кнопкой «Рассчитать», а не сообщением об ошибке.
     """
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     score = ai_profile_service.get_current(db, tender.id)
     return ai_profile_service.serialize(db, score) if score is not None else None
 
@@ -715,7 +728,7 @@ def get_ai_score_history(
     """Все пересчёты оценки, свежие первыми: после правки профиля компании цифры меняются,
     и карточка должна показывать, что именно изменилось и когда."""
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     return [
         ai_profile_service.serialize(db, score)
         for score in ai_profile_service.list_history(db, tender.id)
@@ -737,7 +750,7 @@ def compute_ai_score(
     увидел бы упавшую фоновую задачу вместо понятной подсказки «заполните профиль».
     """
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     try:
         company_profile_service.require_filled(db)
     except CompanyProfileError as exc:
@@ -756,7 +769,7 @@ def get_ai_feedback(
 ):
     """Ответы специалистов на заключение ИИ по закупке — свежие первыми. Видны всем."""
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     return ai_feedback_service.list_for_tender(db, tender)
 
 
@@ -774,7 +787,7 @@ def create_ai_feedback(
     """Согласие или несогласие с заключением ИИ (28.09.2026). Несогласие сразу ставит
     задачу пересмотра — ответ приходит с ней, карточка опрашивает её, как любую другую."""
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     try:
         feedback, job = ai_feedback_service.create(
             db, tender, kind=payload.kind, text=payload.text, actor=user
@@ -859,7 +872,7 @@ def get_extra_sections(
 ) -> TenderExtraSectionsOut:
     """Сохранённые девять разделов вкладки «Дополнительно»."""
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     return _extra_sections_out(tender_insights.get_stored_extra_sections(db, tender))
 
 
@@ -871,7 +884,7 @@ def build_extra_sections(
 ) -> TenderExtraSectionsOut:
     """Извлекает разделы заново (два обращения к модели, раздел 5.6 ТЗ)."""
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     card = tender_card_service.sync_card(db, tender, actor=user)
     try:
         sections = tender_insights.build_extra_sections(db, tender, card, actor=user)
@@ -911,7 +924,7 @@ def get_niche_statistics(
     лучше, чем пустая вкладка.
     """
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     if not tender.okpd2_code:
         return None
 
@@ -938,7 +951,7 @@ def get_similar_tenders(
     «недостаточно данных», что и измерение History, а не молчаливую пустоту.
     """
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     rows = db.execute(
         select(SimilarTender.similarity_score, Tender)
         .join(Tender, Tender.id == SimilarTender.similar_tender_id)
@@ -971,7 +984,7 @@ def refresh_similar_tenders(
     не минуты, в отличие от разбора документации.
     """
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     try:
         similarity_service.refresh_similar(db, tender, actor=user)
     except AiNotConfiguredError as exc:
@@ -994,7 +1007,7 @@ def update_document_flags(
     могло не дойти до анализа.
     """
 
-    tender = _get_tender_or_404(db, tender_id)
+    tender = _get_subject_or_404(db, tender_id)
     document = db.get(TenderDocument, document_id)
     if document is None or document.tender_id != tender.id:
         raise HTTPException(

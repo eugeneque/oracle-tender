@@ -8,6 +8,8 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.integration import ApiClientCreate, ApiClientCreated, ApiClientOut
 from app.schemas.integration_setting import (
+    AiProviderEnabledUpdate,
+    AiProviderKey,
     AiProviderStatus,
     AiProviderSwitch,
     RouterAiSettingsOut,
@@ -79,6 +81,19 @@ def switch_default_ai_provider(
         )
     except AiNotConfiguredError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.put("/ai-provider/{provider}/enabled", response_model=AiProviderStatus)
+def set_ai_provider_enabled(
+    provider: AiProviderKey,
+    payload: AiProviderEnabledUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> AiProviderStatus:
+    """Включает или выключает модель для всех (29.09.2026). Выключенная модель не получает
+    ни одного запроса, а начатые через неё задачи останавливаются."""
+
+    return ai_provider_service.set_provider_enabled(db, provider, payload.enabled, actor=admin)
 
 
 @router.get("/routerai", response_model=RouterAiSettingsOut)

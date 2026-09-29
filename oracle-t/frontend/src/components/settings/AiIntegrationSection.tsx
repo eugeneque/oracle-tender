@@ -5,7 +5,7 @@ import { ApiError, api } from "../../api/client";
 import type { YandexAiStudioSettings } from "../../api/types";
 import { refreshAiProvider, useAiProvider } from "../../hooks/useAiProvider";
 import { formatDateTime } from "../../utils/format";
-import { AiProviderSwitcher, ProviderCard, RouterAiCard } from "./AiProviderControls";
+import { AiModelAvailability, AiProviderSwitcher, ProviderCard, RouterAiCard } from "./AiProviderControls";
 
 /**
  * Блок «Искусственный интеллект» страницы «Интеграции»: переключатель активной модели и
@@ -111,6 +111,7 @@ export function AiIntegrationSection() {
           )}
 
           <AiProviderSwitcher scope="default" />
+          <AiModelAvailability />
 
           <div className="mt-5 grid gap-4 lg:grid-cols-2">
             <ProviderCard

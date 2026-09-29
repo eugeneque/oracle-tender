@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Clock, PlayCircle } from "lucide-react";
+import { CheckCircle2, Clock, PlayCircle, Power } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
 import type { AiProviderKey, RouterAiSettings } from "../../api/types";
@@ -7,6 +7,7 @@ import {
   chooseDefaultAiProvider,
   chooseMyAiProvider,
   refreshAiProvider,
+  setAiProviderEnabled,
   useAiProvider,
 } from "../../hooks/useAiProvider";
 import { formatDateTime } from "../../utils/format";
@@ -63,6 +64,19 @@ export function AiProviderSwitcher({ scope }: { scope: "me" | "default" }) {
 
   const caption = (() => {
     if (!status) return null;
+    if (scope === "default" && status.disabled_providers?.includes(status.default_provider)) {
+      return `${status.default_label} отключена администратором — задачи по расписанию и пользователи без своего выбора идут через другую включённую модель, пока её не включат.`;
+    }
+    const requested = status.requested_provider;
+    if (
+      scope === "me" &&
+      requested &&
+      requested !== status.active_provider &&
+      status.disabled_providers?.includes(requested)
+    ) {
+      const label = AI_PROVIDERS.find((item) => item.key === requested)?.label ?? requested;
+      return `${label} отключена администратором — запросы идут через ${status.label}. Когда её включат, ваш выбор вернётся сам.`;
+    }
     if (scope === "default") {
       return `Действует для задач по расписанию и пользователей без собственного выбора. Свою модель каждый выбирает в учётной записи или прямо в карточке тендера.`;
     }
@@ -86,6 +100,7 @@ export function AiProviderSwitcher({ scope }: { scope: "me" | "default" }) {
           {AI_PROVIDERS.map((item) => {
             const isActive = current === item.key;
             const isConfigured = status?.configured_providers.includes(item.key) ?? false;
+            const isDisabled = status?.disabled_providers?.includes(item.key) ?? false;
             const activeClasses = AI_PROVIDER_ACCENT[item.key].segment;
             return (
               <button
@@ -93,8 +108,14 @@ export function AiProviderSwitcher({ scope }: { scope: "me" | "default" }) {
                 type="button"
                 role="radio"
                 aria-checked={isActive}
-                disabled={!status || isSwitching !== null || !isConfigured}
-                title={isConfigured ? undefined : `${item.label}: учётные данные не заполнены`}
+                disabled={!status || isSwitching !== null || !isConfigured || isDisabled}
+                title={
+                  isDisabled
+                    ? `${item.label} отключена администратором`
+                    : isConfigured
+                      ? undefined
+                      : `${item.label}: учётные данные не заполнены`
+                }
                 onClick={() => handleSwitch(item.key)}
                 className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-default ${
                   isActive
@@ -106,7 +127,7 @@ export function AiProviderSwitcher({ scope }: { scope: "me" | "default" }) {
                 <span className="flex flex-col items-start leading-tight">
                   <span>{isSwitching === item.key ? "Переключаю…" : item.label}</span>
                   <span className="text-[10px] font-normal opacity-70">
-                    {isConfigured ? item.hint : "не настроено"}
+                    {isDisabled ? "отключена" : isConfigured ? item.hint : "не настроено"}
                   </span>
                 </span>
               </button>
@@ -355,5 +376,99 @@ export function RouterAiCard() {
         </div>
       )}
     </ProviderCard>
+  );
+}
+
+/**
+ * Отключение моделей администратором (29.09.2026) — «намертво»: в отключённую модель не
+ * уходит ни одного запроса ни от кого, разборы, начатые через неё, останавливаются на
+ * следующем обращении к модели (их ответы не используются), а новые идут через замену —
+ * модель по умолчанию или первую включённую. Личный выбор пользователей сохраняется: после
+ * включения каждый вернётся к своей модели.
+ */
+export function AiModelAvailability() {
+  const status = useAiProvider();
+  const [busy, setBusy] = useState<AiProviderKey | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = async (provider: AiProviderKey, enable: boolean) => {
+    const label = AI_PROVIDERS.find((item) => item.key === provider)?.label ?? provider;
+    if (
+      !enable &&
+      !window.confirm(
+        `Отключить ${label} для всех?\n\nРазборы, которые сейчас идут через неё, будут остановлены, новые запросы в неё отправляться не будут.`,
+      )
+    ) {
+      return;
+    }
+    setError(null);
+    setBusy(provider);
+    try {
+      await setAiProviderEnabled(provider, enable);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось изменить доступность модели");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const disabled = status?.disabled_providers ?? [];
+  const allOff = status !== null && AI_PROVIDERS.every((item) => disabled.includes(item.key));
+
+  return (
+    <div className="mt-5 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+      <div className="flex items-center gap-2 text-sm font-medium text-zinc-200">
+        <Power size={15} className="text-zinc-400" />
+        Доступность моделей
+      </div>
+      <p className="mt-1 text-xs text-zinc-500">
+        Отключённая модель не получает запросов ни от кого: идущие через неё разборы
+        останавливаются, новые идут через другую включённую модель.
+      </p>
+      <div className="mt-3 divide-y divide-white/[0.06]">
+        {AI_PROVIDERS.map((item) => {
+          const isOff = disabled.includes(item.key);
+          const info = status?.disabled_info?.[item.key];
+          return (
+            <div key={item.key} className="flex items-center gap-3 py-2.5">
+              <AiProviderIcon provider={item.key} size={18} />
+              <div className="min-w-0 flex-1">
+                <p className={`text-sm ${isOff ? "text-zinc-500 line-through" : "text-zinc-200"}`}>{item.label}</p>
+                <p className="text-[11px] text-zinc-500">
+                  {isOff
+                    ? `отключена${info?.at ? ` ${formatDateTime(info.at)}` : ""}${info?.by ? `, ${info.by}` : ""}`
+                    : "включена"}
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={!isOff}
+                aria-label={`${item.label}: ${isOff ? "включить" : "отключить"}`}
+                disabled={!status || busy !== null}
+                onClick={() => void toggle(item.key, isOff)}
+                className={`relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-50 ${
+                  isOff ? "bg-zinc-700" : "bg-emerald-500"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 h-4 w-4 rounded-full bg-snow transition-all ${
+                    isOff ? "left-0.5" : "left-[18px]"
+                  }`}
+                />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      {allOff && (
+        <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+          Все модели отключены — разбор закупок и заключения ИИ недоступны.
+        </div>
+      )}
+      {error && (
+        <div className="mt-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>
+      )}
+    </div>
   );
 }

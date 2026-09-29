@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
+  ArrowDown,
+  ArrowUp,
   Building2,
   ChevronLeft,
   ChevronRight,
@@ -1513,6 +1515,8 @@ export function TendersPage() {
             })}
           </div>
 
+          <DateSortControl sort={sort} onChange={changeSort} />
+
           <button
             onClick={() => {
               setIsFiltersOpen((v) => !v);
@@ -1859,5 +1863,57 @@ export function TendersPage() {
         />
       )}
     </AppShell>
+  );
+}
+
+/** Сортировка списка по датам (29.09.2026) — прямо в панели над списком, а не в
+ *  «Фильтрах»: это порядок строк, а не сужение выдачи, и нужна она во всех видах, а не
+ *  только в таблице, где сортируют щелчком по заголовку. Повторный щелчок по выбранной
+ *  дате меняет направление. Первый щелчок — самое полезное направление: свежие
+ *  размещения сверху, ближайшие окончания подачи сверху. */
+const DATE_SORTS: { key: "publish_date" | "application_end"; label: string; first: SortDirection }[] = [
+  { key: "publish_date", label: "Размещение", first: "desc" },
+  { key: "application_end", label: "Окончание", first: "asc" },
+];
+
+function DateSortControl({
+  sort,
+  onChange,
+}: {
+  sort: { key: SortKey; direction: SortDirection };
+  onChange: (key: SortKey, direction: SortDirection) => void;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label="Сортировка по дате"
+      className="flex h-9 items-center gap-0.5 rounded-lg border border-white/[0.08] bg-white/[0.03] p-1"
+    >
+      <span className="px-1.5 text-xs text-zinc-500">Дата:</span>
+      {DATE_SORTS.map((item) => {
+        const isActive = sort.key === item.key;
+        const Arrow = isActive && sort.direction === "asc" ? ArrowUp : ArrowDown;
+        const next = isActive ? (sort.direction === "asc" ? "desc" : "asc") : item.first;
+        return (
+          <button
+            key={item.key}
+            type="button"
+            aria-pressed={isActive}
+            onClick={() => onChange(item.key, next)}
+            title={
+              isActive
+                ? `Сейчас: ${sort.direction === "asc" ? "сначала ранние" : "сначала поздние"} — нажмите, чтобы развернуть`
+                : `Сортировать по дате ${item.key === "publish_date" ? "размещения" : "окончания подачи"}`
+            }
+            className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs transition-colors ${
+              isActive ? "bg-white/10 text-white" : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            {item.label}
+            {isActive && <Arrow size={12} />}
+          </button>
+        );
+      })}
+    </div>
   );
 }

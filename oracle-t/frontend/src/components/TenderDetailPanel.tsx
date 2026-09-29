@@ -54,6 +54,7 @@ import { TenderOverviewTab } from "./tender-detail/TenderOverviewTab";
 import { TenderRequirementsTab } from "./tender-detail/TenderRequirementsTab";
 import { TagChip } from "./tags/TagChip";
 import { TagPicker } from "./tags/TagPicker";
+import { queueText } from "../utils/jobQueue";
 import {
   percentValue,
   scoreBadgeClass,
@@ -94,6 +95,13 @@ const JOB_KIND_KEYS: Partial<Record<BackgroundJob["kind"], JobKindKey>> = {
   ai_profile_score: "ai-score",
   ai_feedback: "ai-feedback",
 };
+
+/** Ход задачи для строки в карточке. Ожидающая задача хода не пишет — вместо безымянного
+ *  «модель разбирает закупку» полчаса (29.09.2026) говорим, сколько задач перед ней. */
+function jobProgressText(job: BackgroundJob): string | null {
+  if (job.status === "queued") return queueText(job.queue_reason, job.queue_ahead) ?? job.message;
+  return job.message;
+}
 
 /** Что делает «Разобрать закупку» — подсказка на кнопке и в пустых состояниях вкладок. */
 const REVIEW_HINT =
@@ -466,6 +474,10 @@ export function TenderDetailPanel({
       setActionMessage(null);
       try {
         const job = await api.post<BackgroundJob>(`/tenders/${tender.id}/${kind}`);
+        // По закупке уже идёт разбор другого вида (оценка входит в полный разбор) — сервер
+        // вернул его, и индикатор должен говорить о нём, а не о нажатой кнопке.
+        setRunningAction(JOB_KIND_KEYS[job.kind] ?? kind);
+        setJobProgress(jobProgressText(job));
         setJobId(job.id);
       } catch (err) {
         const message = err instanceof ApiError ? err.message : "Не удалось запустить операцию";
@@ -506,7 +518,7 @@ export function TenderDetailPanel({
         autoScoreRef.current = tender.id;
         setRunningAction(runningKind);
         setJobId(running.id);
-        setJobProgress(running.message);
+        setJobProgress(jobProgressText(running));
         return;
       }
 
@@ -552,7 +564,7 @@ export function TenderDetailPanel({
       setRunningAction(null);
       setJobId(null);
       setJobProgress(null);
-      if (job.status === "error") {
+      if (job.status === "error" || job.status === "cancelled") {
         // Сбой расчёта оценки показывается в её блоке: он запускается сам при открытии, и
         // общая строка ошибок карточки над вкладками для него — сообщение «ни о чём».
         if (job.kind === "ai_profile_score" || job.kind === "ai_feedback") {
@@ -616,7 +628,7 @@ export function TenderDetailPanel({
         const job = jobs.find((item) => item.id === jobId);
         if (cancelled || !job) return;
         if (job.status === "queued" || job.status === "running") {
-          setJobProgress(job.message);
+          setJobProgress(jobProgressText(job));
           return;
         }
         clearInterval(interval);
@@ -1091,9 +1103,13 @@ export function TenderDetailPanel({
             {/* Главная метрика — выше данных источника: с неё начинается решение об участии. */}
             <TenderAiScorePanel
               score={score}
-              isRunning={runningAction === "ai-score"}
+              // Полный разбор заканчивается той же оценкой: пока он идёт, заключение занято,
+              // иначе «Разобрать» здесь звало вторую задачу поверх него (29.09.2026).
+              isRunning={runningAction === "ai-score" || runningAction === "review"}
               isReviewing={runningAction === "ai-feedback"}
-              progress={runningAction === "ai-score" ? jobProgress : null}
+              progress={
+                runningAction === "ai-score" || runningAction === "review" ? jobProgress : null
+              }
               onRun={() => void startJob("ai-score")}
               error={scoreError}
               feedback={feedback}

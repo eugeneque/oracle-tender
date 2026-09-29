@@ -53,6 +53,19 @@ export async function chooseDefaultAiProvider(
   return next;
 }
 
+/** Администратор отключает или включает модель для всех (29.09.2026). Отключённая модель не
+ * получает ни одного запроса, начатые через неё разборы останавливаются. */
+export async function setAiProviderEnabled(
+  provider: AiProviderKey,
+  enabled: boolean,
+): Promise<AiProviderStatus> {
+  const next = await api.put<AiProviderStatus>(`/integrations/ai-provider/${provider}/enabled`, {
+    enabled,
+  });
+  setAiProvider(next);
+  return next;
+}
+
 export function refreshAiProvider(): Promise<void> {
   if (!inflight) {
     inflight = api

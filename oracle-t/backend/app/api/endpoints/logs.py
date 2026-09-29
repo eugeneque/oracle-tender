@@ -3,18 +3,19 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.jobs import queue_info
 from app.db.session import get_db
 from app.models.job import BackgroundJob
-from app.models.user import User
-from app.schemas.job import BackgroundJobOut
+from app.models.user import User, UserRole
+from app.schemas.job import BackgroundJobOut, JobQueueItem, UserJobQueue
 from app.schemas.log import LogFacets, LogPage
-from app.services import log_service
+from app.services import job_queue_service, log_service, tender_twins
 
 router = APIRouter(tags=["logs"])
 
@@ -110,7 +111,10 @@ def get_jobs(
 
     query = select(BackgroundJob)
     if tender_id is not None:
-        query = query.where(BackgroundJob.tender_id == tender_id)
+        # Задачи разбора идут по записи, где хранится разбор закупки (tender_twins): карточка
+        # записи из Госплана должна видеть разбор, запущенный с записи из ЕИС.
+        subject_id = tender_twins.subject_ids(db, [tender_id]).get(tender_id, tender_id)
+        query = query.where(BackgroundJob.tender_id.in_({tender_id, subject_id}))
     if kind is not None:
         # Несколько видов через запятую: анализ документов выполняется и отдельной задачей,
         # и шагом полного разбора, а карточке нужен последний из них.
@@ -121,4 +125,54 @@ def get_jobs(
     rows = (
         db.execute(query.order_by(BackgroundJob.created_at.desc()).limit(limit)).scalars().all()
     )
-    return [BackgroundJobOut.model_validate(job, from_attributes=True) for job in rows]
+    info = queue_info(db, list(rows))
+    return [
+        BackgroundJobOut.model_validate(job, from_attributes=True).model_copy(
+            update=(
+                {"queue_reason": info[job.id][0], "queue_ahead": info[job.id][1]}
+                if job.id in info
+                else {}
+            )
+        )
+        for job in rows
+    ]
+
+
+@router.get("/jobs/queue", response_model=list[UserJobQueue])
+def get_job_queues(
+    scope: Literal["mine", "all"] = Query(default="mine"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[UserJobQueue]:
+    """Очереди разборов (29.09.2026): у каждого пользователя разбирается одна закупка за раз,
+    остальные ждут. `mine` — своя очередь (любой пользователь), `all` — очереди всех
+    (администратор, страница «Логирование»)."""
+
+    if scope == "all":
+        _require_admin(user)
+    return job_queue_service.user_queues(db, user_id=user.id, everyone=scope == "all")
+
+
+@router.get("/jobs/launched", response_model=list[JobQueueItem])
+def get_launched_jobs(
+    user_id: uuid.UUID | None = Query(default=None),
+    system: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[JobQueueItem]:
+    """Что запускал пользователь — последние задачи любого статуса. Свои — любой
+    пользователь; чужие и задачи расписания (`system=true`) — администратор."""
+
+    target = None if system else (user_id or user.id)
+    if target != user.id:
+        _require_admin(user)
+    return job_queue_service.launched_by(db, target, limit=limit)
+
+
+def _require_admin(user: User) -> None:
+    if user.role != UserRole.ADMIN.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Очереди других пользователей видит только администратор",
+        )

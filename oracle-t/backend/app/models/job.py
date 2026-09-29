@@ -40,6 +40,8 @@ class JobStatus(str, enum.Enum):
     RUNNING = "running"
     SUCCESS = "success"
     ERROR = "error"
+    # Остановлена: модель, через которую шла задача, выключил администратор (29.09.2026).
+    CANCELLED = "cancelled"
 
 
 class BackgroundJob(Base):

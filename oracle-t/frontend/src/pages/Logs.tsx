@@ -2,7 +2,9 @@ import { ScrollText } from "lucide-react";
 
 import { AppShell } from "../components/AppShell";
 import { PageHeader } from "../components/PageHeader";
+import { JobQueuesSection } from "../components/settings/JobQueuesSection";
 import { LogsSection } from "../components/settings/LogsSection";
+import { useAuth } from "../context/useAuth";
 
 /**
  * «Логирование» — журнал операций системы (раздел 5.9 ТЗ) отдельной страницей в меню
@@ -11,6 +13,7 @@ import { LogsSection } from "../components/settings/LogsSection";
  * в файл. Открыт всем пользователям, как и раньше.
  */
 export function LogsPage() {
+  const { user } = useAuth();
   return (
     <AppShell>
       <div className="mx-auto max-w-6xl px-8 py-8">
@@ -27,6 +30,8 @@ export function LogsPage() {
           Журнал операций: опрос источников, разбор документов, ИИ-анализ, действия
           пользователей. Обновляется автоматически, пока страница открыта.
         </p>
+        {/* Очереди разборов всех пользователей — только администратору (29.09.2026). */}
+        {user?.role === "admin" && <JobQueuesSection />}
         <LogsSection />
       </div>
     </AppShell>

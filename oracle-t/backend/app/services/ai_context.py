@@ -20,6 +20,7 @@ import contextvars
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 
 _current_user_id: contextvars.ContextVar[uuid.UUID | None] = contextvars.ContextVar(
     "ai_current_user_id", default=None
@@ -40,3 +41,34 @@ def acting_as(user_id: uuid.UUID | None) -> Iterator[None]:
         yield
     finally:
         _current_user_id.reset(token)
+
+
+# --- остановка задачи при отключении модели (29.09.2026) ------------------------------
+
+_job_started_at: contextvars.ContextVar[datetime | None] = contextvars.ContextVar(
+    "ai_job_started_at", default=None
+)
+
+
+class JobCancelled(BaseException):
+    """Фоновая задача остановлена: модель, через которую она шла, выключил администратор.
+
+    Именно `BaseException`, как `asyncio.CancelledError`: сервисы разбора изолируют сбой
+    каждого фрагмента через `except Exception` и продолжают со следующим — обычная ошибка
+    превратилась бы в «фрагментов разобрано 0 из 16» и сохранённый пустой результат, а
+    задача должна прекратиться целиком. Ловит её только `run_job`."""
+
+
+def job_started_at() -> datetime | None:
+    """Когда началась выполняемая сейчас фоновая задача; вне задачи — `None`."""
+
+    return _job_started_at.get()
+
+
+@contextmanager
+def running_job(started_at: datetime) -> Iterator[None]:
+    token = _job_started_at.set(started_at)
+    try:
+        yield
+    finally:
+        _job_started_at.reset(token)

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -29,7 +30,7 @@ from app.models.job import BackgroundJob, JobKind, JobStatus
 from app.models.log import LogLevel
 from app.models.tender import Tender
 from app.models.user import User
-from app.services.ai_context import acting_as
+from app.services.ai_context import JobCancelled, acting_as, running_job
 from app.services.audit import log_action
 
 MAX_ATTEMPTS = 2
@@ -37,7 +38,21 @@ MAX_ATTEMPTS = 2
 # мгновенный повтор упёрся бы в ту же ошибку.
 RETRY_DELAY_SECONDS = 5.0
 
-_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="oraclet-job")
+def _new_executor() -> ThreadPoolExecutor:
+    return ThreadPoolExecutor(
+        max_workers=max(1, get_settings().jobs_max_parallel), thread_name_prefix="oraclet-job"
+    )
+
+
+_executor = _new_executor()
+# Оркестрация (29.09.2026): задача уходит в пул не при постановке, а когда до неё дошла
+# очередь — у каждого пользователя разбирается одна закупка за раз, остальные его закупки
+# ждут, пока она не закончится. Раньше пул брал всё подряд: человек открывал пять закупок,
+# и пять его разборов занимали сервер, а разбор соседа ждал за ними полчаса.
+# `_inflight` — отданные в пул задачи и чьи они (id автора или «system» у задач без автора).
+_dispatch_lock = threading.RLock()
+_inflight: dict[uuid.UUID, str] = {}
+SYSTEM_OWNER = "system"
 # Опрос площадок — в своём пуле на один поток (17.09.2026): он идёт 20–25 минут и занял бы
 # половину общего пула, оставив ИИ-анализу один поток; а два одновременных опроса одних и
 # тех же площадок бессмысленны — второй запрос и так возвращает уже идущую задачу.
@@ -180,18 +195,37 @@ def latest_standalone(db: Session, kind: JobKind) -> BackgroundJob | None:
     ).scalar_one_or_none()
 
 
+# Задачи, каждая из которых сама делает анализ документов, достраивает матрицу и считает
+# оценку (`prepare_tender`) — по одному тендеру достаточно одной из них. 29.09.2026:
+# карточка ставила «Полный разбор», человек через 15 секунд жал «Разобрать» в заключении,
+# и оба потока пула по 15 минут делали одно и то же — требования затирали друг друга
+# (54 и 55), лимит RouterAI тратился вдвое, а оценки других закупок ждали по полчаса.
+# Пересмотр по замечанию сюда не входит: он несёт текст замечания, и подмена его идущей
+# оценкой закрыла бы замечание, которое модель не видела.
+_TENDER_AI_KINDS = frozenset(
+    {
+        JobKind.TENDER_FULL_REVIEW.value,
+        JobKind.TENDER_ANALYSIS.value,
+        JobKind.TENDER_EVALUATION.value,
+        JobKind.AI_PROFILE_SCORE.value,
+    }
+)
+
+
 def enqueue(db: Session, *, kind: JobKind, tender: Tender, actor: User | None) -> BackgroundJob:
     """Ставит задачу в очередь и сразу возвращает её — HTTP-ответ не ждёт выполнения.
 
-    Повторный запуск того же вида по тому же тендеру не создаёт вторую задачу: пользователь
-    жмёт кнопку ещё раз, не дождавшись результата, а два параллельных анализа одного тендера
-    затирали бы требования друг друга."""
+    Повторный запуск по тому же тендеру не создаёт вторую задачу: пользователь жмёт кнопку
+    ещё раз, не дождавшись результата, а два параллельных анализа одного тендера затирали бы
+    требования друг друга. Для разбора ИИ это верно и между видами (см. `_TENDER_AI_KINDS`):
+    возвращается уже идущая задача, и карточка следит за ней."""
 
+    kinds = [*_TENDER_AI_KINDS] if kind.value in _TENDER_AI_KINDS else [kind.value]
     existing = db.execute(
         select(BackgroundJob)
         .where(
             BackgroundJob.tender_id == tender.id,
-            BackgroundJob.kind == kind.value,
+            BackgroundJob.kind.in_(kinds),
             BackgroundJob.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
         )
         .order_by(BackgroundJob.created_at.desc())
@@ -219,8 +253,115 @@ def enqueue(db: Session, *, kind: JobKind, tender: Tender, actor: User | None) -
     db.commit()
     db.refresh(job)
 
-    _executor.submit(run_job, job.id)
+    dispatch(db)
     return job
+
+
+def _owner(created_by_id: uuid.UUID | None) -> str:
+    return str(created_by_id) if created_by_id else SYSTEM_OWNER
+
+
+def dispatch(db: Session | None = None) -> None:
+    """Отдаёт в пул задачи, до которых дошла очередь: по порядку постановки, не больше
+    `jobs_max_parallel` сразу и не больше одной на пользователя. Вызывается при постановке,
+    по завершении каждой задачи и после перезапуска сервера.
+
+    `db` — сессия вызывающего, если она есть: только что поставленная задача видна в ней
+    ещё до того, как её увидит новая сессия (в тестах — всегда)."""
+
+    own_session = db is None
+    session = SessionLocal() if own_session else db
+    try:
+        with _dispatch_lock:
+            if _inflight:
+                # Задачи, которых уже нет среди ожидающих и идущих (закончились, удалены
+                # вместе с тендером, откатились в тесте), место в пуле больше не держат.
+                alive = set(
+                    session.scalars(
+                        select(BackgroundJob.id).where(
+                            BackgroundJob.id.in_(list(_inflight)),
+                            BackgroundJob.status.in_(
+                                [JobStatus.QUEUED.value, JobStatus.RUNNING.value]
+                            ),
+                        )
+                    )
+                )
+                for job_id in [job_id for job_id in _inflight if job_id not in alive]:
+                    _inflight.pop(job_id, None)
+
+            limit = max(1, get_settings().jobs_max_parallel)
+            if len(_inflight) >= limit:
+                return
+            waiting = session.execute(
+                select(BackgroundJob.id, BackgroundJob.created_by_id)
+                .where(
+                    BackgroundJob.status == JobStatus.QUEUED.value,
+                    BackgroundJob.kind != JobKind.SOURCES_POLL.value,
+                )
+                .order_by(BackgroundJob.created_at, BackgroundJob.id)
+            ).all()
+            busy = set(_inflight.values())
+            for job_id, created_by_id in waiting:
+                if len(_inflight) >= limit:
+                    break
+                owner = _owner(created_by_id)
+                if job_id in _inflight or owner in busy:
+                    continue
+                _inflight[job_id] = owner
+                busy.add(owner)
+                _executor.submit(_run_dispatched, job_id)
+    finally:
+        if own_session:
+            session.close()
+
+
+def _run_dispatched(job_id: uuid.UUID) -> None:
+    try:
+        run_job(job_id)
+    finally:
+        with _dispatch_lock:
+            _inflight.pop(job_id, None)
+        try:
+            dispatch()
+        except Exception as exc:  # noqa: BLE001 - сбой очереди не должен ронять поток пула
+            logger.exception(f"Очередь фоновых задач не продвинулась: {exc}")
+
+
+def queue_info(db: Session, jobs: list[BackgroundJob]) -> dict[uuid.UUID, tuple[str, int]]:
+    """Почему ожидающая задача ещё не началась и сколько перед ней: `("own", 2)` — сначала
+    закончатся два разбора того же пользователя, запущенные раньше; `("slot", 2)` — его
+    очередь пуста, но сервер уже разбирает столько закупок, сколько может.
+
+    Без этого задача в очереди выглядела в карточке как «модель разбирает закупку» без
+    единой строки хода — полчаса (29.09.2026), и оценку считали «не отдающейся». Опрос
+    площадок идёт в своём пуле и очередь разбора не занимает."""
+
+    waiting = [job for job in jobs if job.status == JobStatus.QUEUED.value]
+    if not waiting:
+        return {}
+    active = db.execute(
+        select(
+            BackgroundJob.id,
+            BackgroundJob.status,
+            BackgroundJob.created_at,
+            BackgroundJob.created_by_id,
+        ).where(
+            BackgroundJob.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+            BackgroundJob.kind != JobKind.SOURCES_POLL.value,
+        )
+    ).all()
+    running = sum(1 for row in active if row.status == JobStatus.RUNNING.value)
+    result: dict[uuid.UUID, tuple[str, int]] = {}
+    for job in waiting:
+        own = sum(
+            1
+            for row in active
+            if row.id != job.id
+            and row.created_by_id == job.created_by_id
+            and (row.status == JobStatus.RUNNING.value or row.created_at < job.created_at)
+        )
+        result[job.id] = ("own", own) if own else ("slot", running)
+    return result
 
 
 def run_job(job_id: uuid.UUID) -> None:
@@ -253,8 +394,12 @@ def run_job(job_id: uuid.UUID) -> None:
             try:
                 # Модель ИИ — та, что выбрал автор задачи (см. app/services/ai_context.py);
                 # у задач без автора (расписание) — системная по умолчанию.
-                with acting_as(actor.id if actor else None):
+                with acting_as(actor.id if actor else None), running_job(job.started_at):
                     message = job_handler(db, job, actor)
+            except JobCancelled as exc:
+                db.rollback()
+                _finish(db, job, JobStatus.CANCELLED, str(exc), actor=actor)
+                return
             except Exception as exc:  # noqa: BLE001 - сбой задачи не должен ронять поток пула
                 db.rollback()
                 logger.exception(f"Фоновая задача {job.kind} завершилась ошибкой")
@@ -276,8 +421,13 @@ def run_job(job_id: uuid.UUID) -> None:
             db.commit()
 
             try:
-                with acting_as(actor.id if actor else None):
+                with acting_as(actor.id if actor else None), running_job(job.started_at):
                     message = handler(db, tender, actor)
+            except JobCancelled as exc:
+                # Модель выключил администратор — повтор ушёл бы в ту же выключенную модель.
+                db.rollback()
+                _finish(db, job, JobStatus.CANCELLED, str(exc), tender=tender, actor=actor)
+                return
             except Exception as exc:  # noqa: BLE001 - сбой задачи не должен ронять поток пула
                 db.rollback()
                 logger.warning(
@@ -314,7 +464,13 @@ def _finish(
         component="jobs",
         action=f"finish:{job.kind}",
         result=status.value,
-        level=LogLevel.INFO if status is JobStatus.SUCCESS else LogLevel.ERROR,
+        level=(
+            LogLevel.INFO
+            if status is JobStatus.SUCCESS
+            else LogLevel.WARNING
+            if status is JobStatus.CANCELLED
+            else LogLevel.ERROR
+        ),
         details=(f"Тендер {tender.external_id}: " if tender else "") + (message or ""),
         user_id=actor.id if actor else None,
     )
@@ -401,10 +557,13 @@ def recover_interrupted_jobs(*, resume: bool | None = None) -> None:
     for job_id, kind in ids:
         if kind in _JOB_HANDLERS and kind != JobKind.TENDER_FULL_REVIEW.value:
             _submit_poll(job_id)
-        else:
-            _executor.submit(run_job, job_id)
+    with _dispatch_lock:
+        _inflight.clear()
+    dispatch()
 
 
 def shutdown() -> None:
+    with _dispatch_lock:
+        _inflight.clear()
     _executor.shutdown(wait=False, cancel_futures=True)
     _poll_executor.shutdown(wait=False, cancel_futures=True)
