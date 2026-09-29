@@ -196,7 +196,13 @@ def facets_from_text(text: str | None) -> MeterFacets:
         return facets
 
     if _HV_WORDS.search(text):
+        # ВПУ — отдельный тип, и всё, что сказано рядом о включении, фазах и креплении,
+        # описывает его самого (29.09.2026): «высоковольтный прибор учёта непосредственного
+        # включения на воздушных линиях 6 кВ» — это ВПУ, который ставится прямо на провод,
+        # а не ещё шесть видов обычных счётчиков прямого включения, как выходило раньше.
+        # Обычные счётчики в той же закупке находятся по своим позициям (`tender_kinds`).
         facets.hv = True
+        return facets
 
     for pattern, phases in _PHASE_WORDS:
         if pattern.search(text):
@@ -282,6 +288,9 @@ def product_facets(
         if value:
             parts.append(f"{name}: {value}")
     facets = facets_from_text(". ".join(parts))
+    if facets.hv:
+        # ВПУ — только ВПУ: фазность из серии дала бы ему ещё и типы обычных счётчиков.
+        return facets
     form = classify(
         model_name=model_name,
         model_code=model_code,
@@ -297,12 +306,44 @@ def product_facets(
     return facets
 
 
+# Упоминание прибора учёта в закупке. Без него «400 В, 3 фазы» и «номинальное напряжение
+# 6 кВ» — характеристики сети объекта, а не счётчика (29.09.2026: закупка кабельных
+# проходов АП123076 получила все одиннадцать типов, ремонт отопления — шесть, замена
+# дверей в общежитии — ВПУ). Серии счётчиков («СЕ 308», «Меркурий 236») тоже считаются.
+_METER_MENTION = re.compile(
+    r"сч[её]тчик|прибор\w*\s+(?:\w+\s+){0,3}?уч[её]т|\bПУ\b|\bВПУ\b|\bАСКУЭ\b|\bАИИС"
+    r"|\bИСУ\b|уч[её]т\w*\s+электр|высоковольтн\w*\s+уч[её]т",
+    re.IGNORECASE,
+)
+
+
+def mentions_meter(pieces: list[str]) -> bool:
+    for piece in pieces:
+        if _METER_MENTION.search(piece):
+            return True
+        series_text = re.sub(r"\b([CС][EЕ])\s+(\d{3})", r"\1\2", piece)
+        if any(pattern.search(series_text) for pattern, _ in _PHASES_BY_SERIES):
+            return True
+    return False
+
+
 def tender_kinds(title: str | None, requirement_texts: list[str] | None = None) -> list[str] | None:
     """Типы приборов закупки по наименованию и требованиям к товару. `None` — не
     определено (в БД NULL, а не пустой массив: фильтр по «пусто» не нужен никому)."""
 
-    text = "\n".join([title or "", *(requirement_texts or [])])
-    return kinds_from_text(text) or None
+    # Позиции про ВПУ разбираются отдельно и дают только ВПУ; остальные, как и раньше,
+    # склеиваются: фазность часто в одном требовании, а крепление — в другом, и тип
+    # складывается только из них вместе. Одним текстом ВПУ из наименования «глушил» бы
+    # обычные счётчики из требований той же закупки.
+    pieces = [piece for piece in [title, *(requirement_texts or [])] if piece]
+    if not mentions_meter(pieces):
+        return None
+    hv = any(_HV_WORDS.search(piece) for piece in pieces)
+    rest = "\n".join(piece for piece in pieces if not _HV_WORDS.search(piece))
+    kinds = set(kinds_from_text(rest))
+    if hv:
+        kinds.add(HV)
+    return [code for code in METER_KINDS if code in kinds] or None
 
 
 def fill_tender_kinds(db, tender) -> bool:

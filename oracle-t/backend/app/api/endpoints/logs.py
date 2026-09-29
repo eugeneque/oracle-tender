@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core import jobs
 from app.core.jobs import queue_info
 from app.db.session import get_db
 from app.models.job import BackgroundJob
@@ -168,6 +169,31 @@ def get_launched_jobs(
     if target != user.id:
         _require_admin(user)
     return job_queue_service.launched_by(db, target, limit=limit)
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=BackgroundJobOut)
+def cancel_job(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> BackgroundJobOut:
+    """Убрать разбор из очереди (29.09.2026). Ожидающий не начнётся, идущий остановится на
+    ближайшем запросе к модели. Свои — любой пользователь; чужие и задачи расписания —
+    администратор."""
+
+    job = db.get(BackgroundJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Задача не найдена")
+    if job.created_by_id != user.id and user.role != UserRole.ADMIN.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Отменить чужой разбор может только администратор",
+        )
+    try:
+        job = jobs.cancel(db, job, user)
+    except jobs.JobNotCancellable as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return BackgroundJobOut.model_validate(job, from_attributes=True)
 
 
 def _require_admin(user: User) -> None:

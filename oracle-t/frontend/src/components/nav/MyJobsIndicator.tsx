@@ -1,8 +1,8 @@
-import { Layers, Loader2 } from "lucide-react";
+import { Layers, Loader2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { JobQueueItem, UserJobQueue } from "../../api/types";
 import { queueText } from "../../utils/jobQueue";
 
@@ -19,6 +19,14 @@ export function MyJobsIndicator() {
   const [queue, setQueue] = useState<UserJobQueue | null>(null);
   const [isOpen, setIsOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+
+  const reload = async () => {
+    try {
+      setQueue((await api.get<UserJobQueue[]>("/jobs/queue?scope=mine"))[0] ?? null);
+    } catch {
+      // Следующий опрос всё равно обновит список.
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -86,7 +94,7 @@ export function MyJobsIndicator() {
             Одновременно разбирается одна ваша закупка, остальные ждут по порядку запуска.
           </p>
           {queue.running.map((item) => (
-            <QueueRow key={item.id} item={item} onOpen={() => setIsOpen(false)} />
+            <QueueRow key={item.id} item={item} onOpen={() => setIsOpen(false)} onCancelled={reload} />
           ))}
           {queue.queued.length > 0 && (
             <p className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-zinc-500">
@@ -94,7 +102,13 @@ export function MyJobsIndicator() {
             </p>
           )}
           {queue.queued.map((item, index) => (
-            <QueueRow key={item.id} item={item} position={index + 1} onOpen={() => setIsOpen(false)} />
+            <QueueRow
+              key={item.id}
+              item={item}
+              position={index + 1}
+              onOpen={() => setIsOpen(false)}
+              onCancelled={reload}
+            />
           ))}
         </div>
       )}
@@ -106,11 +120,16 @@ export function QueueRow({
   item,
   position,
   onOpen,
+  onCancelled,
 }: {
   item: JobQueueItem;
   position?: number;
   onOpen?: () => void;
+  /** Задан — у строки есть кнопка «убрать из очереди» (29.09.2026). */
+  onCancelled?: () => void;
 }) {
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const detail =
     item.status === "queued" ? queueText(item.queue_reason, item.queue_ahead) : item.message;
   const body = (
@@ -127,15 +146,54 @@ export function QueueRow({
           {item.tender_external_id ? ` · № ${item.tender_external_id}` : ""}
         </span>
         {detail && <span className="mt-0.5 block text-[11px] text-indigo-300/80">{detail}</span>}
+        {cancelError && <span className="mt-0.5 block text-[11px] text-red-300">{cancelError}</span>}
       </span>
     </>
   );
-  const className = "flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-white/5";
-  return item.tender_id ? (
-    <Link to={`/tenders/${item.tender_id}`} onClick={onOpen} className={className}>
-      {body}
-    </Link>
-  ) : (
-    <div className={className}>{body}</div>
+
+  const cancel = async () => {
+    setIsCancelling(true);
+    setCancelError(null);
+    try {
+      await api.post(`/jobs/${item.id}/cancel`);
+    } catch (err) {
+      // 409 — задача успела закончиться сама: строка просто исчезнет при обновлении.
+      if (!(err instanceof ApiError && err.status === 409)) {
+        setCancelError(err instanceof ApiError ? err.message : "Не удалось отменить");
+        setIsCancelling(false);
+        return;
+      }
+    }
+    setIsCancelling(false);
+    onCancelled?.();
+  };
+
+  const className = "flex min-w-0 flex-1 items-start gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-white/5";
+  return (
+    <div className="group flex items-start gap-1">
+      {item.tender_id ? (
+        <Link to={`/tenders/${item.tender_id}`} onClick={onOpen} className={className}>
+          {body}
+        </Link>
+      ) : (
+        <div className={className}>{body}</div>
+      )}
+      {onCancelled && (
+        <button
+          type="button"
+          onClick={() => void cancel()}
+          disabled={isCancelling}
+          aria-label={item.status === "running" ? "Остановить разбор" : "Убрать из очереди"}
+          title={
+            item.status === "running"
+              ? "Остановить разбор — он прервётся на ближайшем запросе к модели, сохранённое останется"
+              : "Убрать из очереди"
+          }
+          className="mt-1.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-zinc-500 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50"
+        >
+          {isCancelling ? <Loader2 size={12} className="animate-spin" /> : <X size={13} />}
+        </button>
+      )}
+    </div>
   );
 }

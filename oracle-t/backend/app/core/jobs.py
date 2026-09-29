@@ -30,7 +30,7 @@ from app.models.job import BackgroundJob, JobKind, JobStatus
 from app.models.log import LogLevel
 from app.models.tender import Tender
 from app.models.user import User
-from app.services.ai_context import JobCancelled, acting_as, running_job
+from app.services.ai_context import JobCancelled, acting_as, current_job_id, running_job
 from app.services.audit import log_action
 
 MAX_ATTEMPTS = 2
@@ -111,7 +111,7 @@ def report_progress(message: str) -> None:
         # Строку задачи может держать транзакция обработчика — ждать её ради прогресса
         # нельзя, одно пропущенное обновление не страшно.
         db.execute(text("SET LOCAL lock_timeout = '2s'"))
-        db.execute(
+        updated = db.execute(
             update(BackgroundJob)
             .where(
                 BackgroundJob.id == current[0],
@@ -123,11 +123,77 @@ def report_progress(message: str) -> None:
             )
         )
         db.commit()
+        # Строка не обновилась — задача больше не «выполняется»: её убрали из очереди.
+        stopped = updated.rowcount == 0 and _is_cancelled(db, current[0])
     except Exception as exc:  # noqa: BLE001 - прогресс не должен ронять задачу
         db.rollback()
         logger.debug(f"Прогресс задачи {current[0]} не записан: {exc}")
+        stopped = False
     finally:
         db.close()
+    if stopped:
+        raise JobCancelled(CANCELLED_BY_USER)
+
+
+# Отмена разбора пользователем (29.09.2026). Ожидающая задача просто не уходит в пул.
+# Идущую прервать из другого потока нельзя — ей ставится статус `cancelled`, а сама она
+# замечает это перед следующим запросом к модели (`ai_client.run_structured`), на
+# следующей строке прогресса и между шагами полного разбора и прекращается `JobCancelled`.
+CANCELLED_BY_USER = "Разбор отменён пользователем"
+
+
+def _is_cancelled(db: Session, job_id: uuid.UUID) -> bool:
+    status = db.scalar(select(BackgroundJob.status).where(BackgroundJob.id == job_id))
+    return status == JobStatus.CANCELLED.value
+
+
+def raise_if_cancelled() -> None:
+    """Прекращает текущую фоновую задачу, если её отменили. Отдельной сессией: у
+    обработчика своя транзакция, и строка задачи в ней может быть уже прочитана."""
+
+    job_id = current_job_id()
+    if job_id is None:
+        return
+    db = SessionLocal()
+    try:
+        cancelled = _is_cancelled(db, job_id)
+    finally:
+        db.close()
+    if cancelled:
+        raise JobCancelled(CANCELLED_BY_USER)
+
+
+class JobNotCancellable(Exception):
+    """Задача уже закончилась — отменять нечего."""
+
+
+def cancel(db: Session, job: BackgroundJob, actor: User) -> BackgroundJob:
+    """Убирает задачу из очереди разборов. Ожидающая больше не начнётся; идущая
+    остановится на ближайшем запросе к модели — то, что она успела сохранить, остаётся."""
+
+    if job.status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
+        raise JobNotCancellable("Задача уже завершена")
+    was_running = job.status == JobStatus.RUNNING.value
+    job.status = JobStatus.CANCELLED.value
+    job.finished_at = datetime.now(timezone.utc)
+    job.message = f"{CANCELLED_BY_USER} ({actor.full_name})"
+    tender = db.get(Tender, job.tender_id) if job.tender_id else None
+    log_action(
+        db,
+        component="jobs",
+        action=f"cancel:{job.kind}",
+        result=JobStatus.CANCELLED.value,
+        level=LogLevel.INFO,
+        details=(f"Тендер {tender.external_id}: " if tender else "")
+        + ("остановлена во время выполнения" if was_running else "убрана из очереди"),
+        user_id=actor.id,
+    )
+    db.commit()
+    db.refresh(job)
+    if not was_running:
+        # Место в очереди освободилось — следующая задача того же пользователя может идти.
+        dispatch(db)
+    return job
 
 
 def register_handler(kind: JobKind, handler: Callable[[Session, Tender, User | None], str]) -> None:
@@ -377,6 +443,9 @@ def run_job(job_id: uuid.UUID) -> None:
         if job is None:
             logger.warning(f"Фоновая задача {job_id} не найдена")
             return
+        if job.status != JobStatus.QUEUED.value:
+            # Отменена, пока шла в пул (или уже выполнена) — начинать нечего.
+            return
 
         actor = db.get(User, job.created_by_id) if job.created_by_id else None
         # Поток пула переиспользуется: контекст выставляется на каждую задачу заново.
@@ -394,7 +463,7 @@ def run_job(job_id: uuid.UUID) -> None:
             try:
                 # Модель ИИ — та, что выбрал автор задачи (см. app/services/ai_context.py);
                 # у задач без автора (расписание) — системная по умолчанию.
-                with acting_as(actor.id if actor else None), running_job(job.started_at):
+                with acting_as(actor.id if actor else None), running_job(job.started_at, job.id):
                     message = job_handler(db, job, actor)
             except JobCancelled as exc:
                 db.rollback()
@@ -421,7 +490,7 @@ def run_job(job_id: uuid.UUID) -> None:
             db.commit()
 
             try:
-                with acting_as(actor.id if actor else None), running_job(job.started_at):
+                with acting_as(actor.id if actor else None), running_job(job.started_at, job.id):
                     message = handler(db, tender, actor)
             except JobCancelled as exc:
                 # Модель выключил администратор — повтор ушёл бы в ту же выключенную модель.
@@ -434,7 +503,7 @@ def run_job(job_id: uuid.UUID) -> None:
                     f"Фоновая задача {job.kind} по тендеру {tender.external_id} "
                     f"(попытка {attempt} из {MAX_ATTEMPTS}) завершилась ошибкой: {exc}"
                 )
-                if attempt >= MAX_ATTEMPTS:
+                if attempt >= MAX_ATTEMPTS or _is_cancelled(db, job.id):
                     _finish(db, job, JobStatus.ERROR, str(exc), tender=tender, actor=actor)
                     return
                 time.sleep(RETRY_DELAY_SECONDS)
@@ -456,6 +525,11 @@ def _finish(
     tender: Tender | None = None,
     actor: User | None = None,
 ) -> None:
+    if _is_cancelled(db, job.id):
+        # Отменена пользователем: `cancel` уже записал статус, время и кто отменил —
+        # итог дорабатывавшего обработчика его не затирает; сохранённое им остаётся.
+        db.commit()
+        return
     job.status = status.value
     job.finished_at = datetime.now(timezone.utc)
     job.message = message

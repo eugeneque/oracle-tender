@@ -50,8 +50,14 @@ _job_started_at: contextvars.ContextVar[datetime | None] = contextvars.ContextVa
 )
 
 
+_job_id: contextvars.ContextVar[uuid.UUID | None] = contextvars.ContextVar(
+    "ai_job_id", default=None
+)
+
+
 class JobCancelled(BaseException):
-    """Фоновая задача остановлена: модель, через которую она шла, выключил администратор.
+    """Фоновая задача остановлена: модель, через которую она шла, выключил администратор,
+    или пользователь убрал задачу из очереди (29.09.2026).
 
     Именно `BaseException`, как `asyncio.CancelledError`: сервисы разбора изолируют сбой
     каждого фрагмента через `except Exception` и продолжают со следующим — обычная ошибка
@@ -65,10 +71,18 @@ def job_started_at() -> datetime | None:
     return _job_started_at.get()
 
 
+def current_job_id() -> uuid.UUID | None:
+    """Какая фоновая задача выполняется сейчас; вне задачи — `None`."""
+
+    return _job_id.get()
+
+
 @contextmanager
-def running_job(started_at: datetime) -> Iterator[None]:
+def running_job(started_at: datetime, job_id: uuid.UUID | None = None) -> Iterator[None]:
     token = _job_started_at.set(started_at)
+    id_token = _job_id.set(job_id)
     try:
         yield
     finally:
+        _job_id.reset(id_token)
         _job_started_at.reset(token)
