@@ -103,6 +103,9 @@ function jobProgressText(job: BackgroundJob): string | null {
   return job.message;
 }
 
+/** Начало сообщения задачи, отменённой пользователем (`jobs.CANCELLED_BY_USER`). */
+const CANCELLED_BY_USER = "Разбор отменён пользователем";
+
 /** Что делает «Разобрать закупку» — подсказка на кнопке и в пустых состояниях вкладок. */
 const REVIEW_HINT =
   "Анализ документов, матрица соответствия и AI-оценка по профилю одной задачей";
@@ -210,6 +213,24 @@ export function TenderDetailPanel({
   // Ход полного разбора («Шаг 2 из 3: расчёт соответствия…») — сервер пишет его в
   // `message` идущей задачи, карточка показывает вместо безымянного индикатора.
   const [jobProgress, setJobProgress] = useState<string | null>(null);
+  const [isCancellingJob, setIsCancellingJob] = useState(false);
+
+  // Отмена разбора из карточки (29.09.2026): ожидающий не начнётся, идущий остановится на
+  // ближайшем запросе к модели. Итог подхватит обычный опрос задачи — как у любой другой.
+  const cancelRunningJob = async () => {
+    if (!jobId) return;
+    setIsCancellingJob(true);
+    try {
+      await api.post(`/jobs/${jobId}/cancel`);
+    } catch (err) {
+      // 409 — задача успела закончиться сама; опрос покажет её итог.
+      if (!(err instanceof ApiError && err.status === 409)) {
+        setError(err instanceof ApiError ? err.message : "Не удалось отменить разбор");
+      }
+    } finally {
+      setIsCancellingJob(false);
+    }
+  };
 
   const [card, setCard] = useState<TenderCard | null>(null);
   const [isCardLoading, setIsCardLoading] = useState(true);
@@ -564,6 +585,11 @@ export function TenderDetailPanel({
       setRunningAction(null);
       setJobId(null);
       setJobProgress(null);
+      if (job.status === "cancelled" && job.message?.startsWith(CANCELLED_BY_USER)) {
+        // Отменил сам пользователь (здесь или в «Моих разборах») — это не ошибка.
+        setActionMessage(job.message);
+        return;
+      }
       if (job.status === "error" || job.status === "cancelled") {
         // Сбой расчёта оценки показывается в её блоке: он запускается сам при открытии, и
         // общая строка ошибок карточки над вкладками для него — сообщение «ни о чём».
@@ -1089,6 +1115,18 @@ export function TenderDetailPanel({
                 производителей» вместо безымянного индикатора на десять минут. */}
             {jobProgress ? ` — ${jobProgress.replace(/…$/, "")}.` : "."}
             <span className="text-indigo-300/60">Можно перейти к другой закупке — работа продолжится.</span>
+            {jobId && (
+              <button
+                type="button"
+                onClick={() => void cancelRunningJob()}
+                disabled={isCancellingJob}
+                title="Убрать из очереди; идущий разбор остановится на ближайшем запросе к модели, сохранённое останется"
+                className="ml-auto flex shrink-0 items-center gap-1 rounded-md border border-indigo-400/20 px-2 py-0.5 text-indigo-200 hover:bg-indigo-500/10 disabled:opacity-50"
+              >
+                <X size={12} />
+                {isCancellingJob ? "Отменяю…" : "Отменить"}
+              </button>
+            )}
           </div>
         )}
 

@@ -67,6 +67,7 @@ def run_structured(
     есть: вызывающий сервис сам решает, как логировать и изолировать сбой (раздел 5.9 ТЗ)."""
 
     _stop_if_disabled_during_job(db)
+    _stop_if_cancelled()
     provider = get_active_provider(db)
     if not is_provider_enabled(db, provider):
         raise AiModelDisabledError(
@@ -127,6 +128,16 @@ def _stop_if_disabled_during_job(db: Session) -> None:
             f"{PROVIDER_LABELS[wanted]} отключена администратором во время разбора — "
             "задача остановлена. Запустите разбор заново: он пойдёт через другую модель."
         )
+
+
+def _stop_if_cancelled() -> None:
+    """Пользователь убрал идущую задачу из очереди — следующий запрос к модели не уходит.
+    Проверка перед каждым запросом: разбор — это десятки запросов, и остановка наступает
+    через один ответ модели, а не через 15 минут."""
+
+    from app.core.jobs import raise_if_cancelled  # очередь импортирует сервисы — не на уровне модуля
+
+    raise_if_cancelled()
 
 
 def _discard_if_disabled_meanwhile(db: Session, provider: str, called_at: datetime) -> None:

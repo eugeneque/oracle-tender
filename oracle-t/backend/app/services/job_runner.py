@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.jobs import (
     current_job_created_at,
     enqueue,
+    raise_if_cancelled,
     register_handler,
     register_job_handler,
     report_progress,
@@ -316,6 +317,8 @@ def _run_full_review(db: Session, job: BackgroundJob, actor: User | None) -> str
     failures = 0
 
     def step(number: int, title: str) -> None:
+        # Отменённый пользователем разбор следующий шаг не начинает.
+        raise_if_cancelled()
         job.message = f"Шаг {number} из 3: {title}…"
         db.commit()
 

@@ -812,8 +812,26 @@ npm_install() {
 }
 npm_build() { cd "$FRONTEND_DIR" && run_as npm run build; }
 
+# Файлы, удалённые из репозитория. Если новый архив распаковать поверх старой папки, они
+# остаются на месте, а tsc -b проверяет весь src/ и падает на ссылках на исчезнувшие типы.
+OBSOLETE_FRONTEND_FILES=(
+  src/components/tender-detail/TenderAiPanel.tsx
+  src/pages/Dashboard.tsx
+)
+
+remove_obsolete_frontend_files() {
+  local f
+  for f in "${OBSOLETE_FRONTEND_FILES[@]}"; do
+    if [ -f "$FRONTEND_DIR/$f" ]; then
+      [ "$DRY_RUN" = 1 ] || $SUDO rm -f "$FRONTEND_DIR/$f"
+      ok "удалён устаревший файл от прошлой версии: frontend/$f"
+    fi
+  done
+}
+
 step_frontend() {
   step "Сборка веб-интерфейса"
+  remove_obsolete_frontend_files
   task "npm-зависимости" npm_install
   task "сборка бандла (tsc + vite build)" npm_build
   if [ "$DRY_RUN" != 1 ]; then

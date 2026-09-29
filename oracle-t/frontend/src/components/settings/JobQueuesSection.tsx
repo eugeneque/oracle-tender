@@ -27,6 +27,8 @@ export function JobQueuesSection() {
   const [queues, setQueues] = useState<UserJobQueue[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [reloadKey, setReloadKey] = useState(0);
+
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
@@ -46,7 +48,9 @@ export function JobQueuesSection() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [reloadKey]);
+
+  const reload = () => setReloadKey((value) => value + 1);
 
   return (
     <section className="mb-6 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
@@ -66,7 +70,7 @@ export function JobQueuesSection() {
       )}
       <div className="mt-3 space-y-3">
         {queues?.map((queue) => (
-          <UserQueueCard key={queue.user_id ?? "system"} queue={queue} />
+          <UserQueueCard key={queue.user_id ?? "system"} queue={queue} onCancelled={reload} />
         ))}
       </div>
       <LaunchedLookup queues={queues ?? []} />
@@ -74,7 +78,7 @@ export function JobQueuesSection() {
   );
 }
 
-function UserQueueCard({ queue }: { queue: UserJobQueue }) {
+function UserQueueCard({ queue, onCancelled }: { queue: UserJobQueue; onCancelled: () => void }) {
   const [isOpen, setIsOpen] = useState(false);
   return (
     <div className="rounded-lg border border-white/[0.06] bg-black/10 p-3">
@@ -94,10 +98,10 @@ function UserQueueCard({ queue }: { queue: UserJobQueue }) {
       </div>
       <div className="mt-2">
         {queue.running.map((item) => (
-          <QueueRow key={item.id} item={item} />
+          <QueueRow key={item.id} item={item} onCancelled={onCancelled} />
         ))}
         {queue.queued.map((item, index) => (
-          <QueueRow key={item.id} item={item} position={index + 1} />
+          <QueueRow key={item.id} item={item} position={index + 1} onCancelled={onCancelled} />
         ))}
       </div>
       {isOpen && <LaunchedList userId={queue.user_id} />}
