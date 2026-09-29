@@ -51,6 +51,16 @@ class AiProviderStatus(BaseModel):
     default_provider: AiProviderKey
     default_label: str
     configured_providers: list[AiProviderKey]
+    # Отключение моделей администратором (29.09.2026). `requested_provider` — что выбрал
+    # пользователь (или умолчание); если она выключена, `active_provider` — её замена.
+    requested_provider: AiProviderKey | None = None
+    disabled_providers: list[AiProviderKey] = []
+    # Кто и когда выключил: `{"deepseek": {"at": ISO, "by": ФИО}}`.
+    disabled_info: dict[str, dict] = {}
+
+
+class AiProviderEnabledUpdate(BaseModel):
+    enabled: bool
 
 
 class AiProviderSwitch(BaseModel):

@@ -170,6 +170,13 @@ def attach_analysis_fields(
     ).all():
         tags_by_tender[tender_id].append(tag)
 
+    # Разбор закупки — один на все её записи (ЕИС, площадка, Госплан; 29.09.2026): оценка,
+    # процент и число требований берутся у записи, где он хранится.
+    from app.services.tender_twins import subject_ids
+
+    subject_of = subject_ids(db, ids)
+    ids = list({*ids, *subject_of.values()})
+
     percentages: dict[uuid.UUID, Decimal] = dict(
         db.execute(
             select(WinPercentage.tender_id, WinPercentage.percentage)
@@ -221,12 +228,13 @@ def attach_analysis_fields(
         # Алиас поверх `stage`: колонки в БД нет, а внешний контракт поле по-прежнему
         # отдаёт (раздел 7 ТЗ), и `__table__.columns` его уже не даст.
         data["relevance_status"] = tender.relevance_status
-        data["win_percentage"] = percentages.get(tender.id)
-        overall, verdict, decision = scores.get(tender.id, (None, None, None))
+        analysed_id = subject_of.get(tender.id, tender.id)
+        data["win_percentage"] = percentages.get(analysed_id)
+        overall, verdict, decision = scores.get(analysed_id, (None, None, None))
         data["ai_score"] = overall
         data["ai_verdict"] = verdict
         data["ai_decision"] = decision
-        data["requirements_count"] = counts.get(tender.id, 0)
+        data["requirements_count"] = counts.get(analysed_id, 0)
         data["assignee_name"] = assignees.get(tender.assignee_id) if tender.assignee_id else None
         data["is_bookmarked"] = tender.id in bookmarked
         data["tags"] = tags_by_tender.get(tender.id, [])

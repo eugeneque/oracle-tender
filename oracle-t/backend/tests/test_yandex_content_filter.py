@@ -121,6 +121,9 @@ def test_routerai_quota_falls_back_to_yandex(monkeypatch):
 
     monkeypatch.setattr(ai_client, "get_active_provider", lambda db: "deepseek")
     monkeypatch.setattr(ai_client, "is_provider_configured", lambda db, provider: True)
+    # Отключение моделей (29.09.2026) здесь не проверяется — все включены.
+    monkeypatch.setattr(ai_client, "is_provider_enabled", lambda db, provider: True)
+    monkeypatch.setattr(ai_client, "disabled_since", lambda db, provider: None)
 
     def _quota(*args, **kwargs):
         raise RouterAiQuotaError("spending limit exceeded")

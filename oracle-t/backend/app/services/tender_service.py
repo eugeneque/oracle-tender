@@ -207,6 +207,14 @@ def _upsert_tender(
         # вполне может оказаться слишком узким.
         relevance_service.apply_to_tender(db, tender, groups)
         db.flush()
+        if registry_number is not None:
+            # Та же закупка из другого канала (Госплан) — своей строкой, но с общим разбором:
+            # если закупку уже разобрали, новая запись сразу показывает этот разбор.
+            from app.services import tender_twins
+
+            primary = tender_twins.link(db, tender)
+            if primary.id != tender.id:
+                tender_twins.share_fields(db, primary)
         return True
 
     changed = False
@@ -519,6 +527,14 @@ DEFAULT_SORT = "created_at"
 UNCLASSIFIED = "unclassified"
 
 
+def analysed_tender_id():
+    """Запись, у которой хранится разбор закупки, — для коррелированных подзапросов по
+    оценке и проценту: у записи-двойника из Госплана они свои не считаются (29.09.2026,
+    см. `app/services/tender_twins.py`)."""
+
+    return func.coalesce(Tender.analysis_tender_id, Tender.id)
+
+
 def mirtek_win_percentage_subquery():
     """Коррелированный подзапрос «процент победителя МИРТЕК по этому тендеру».
 
@@ -536,7 +552,7 @@ def mirtek_win_percentage_subquery():
         select(WinPercentage.percentage)
         .join(Manufacturer, Manufacturer.id == WinPercentage.manufacturer_id)
         .where(
-            WinPercentage.tender_id == Tender.id,
+            WinPercentage.tender_id == analysed_tender_id(),
             Manufacturer.is_mirtek.is_(True),
             WinPercentage.is_current.is_(True),
         )
@@ -559,7 +575,7 @@ def ai_score_subquery():
     return (
         select(AiProfileScore.overall_score)
         .where(
-            AiProfileScore.tender_id == Tender.id,
+            AiProfileScore.tender_id == analysed_tender_id(),
             AiProfileScore.is_current.is_(True),
         )
         .correlate(Tender)

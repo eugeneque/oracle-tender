@@ -285,8 +285,23 @@ def build_tenders_workbook(
 
     regions, districts_by_region, responsibles = _load_reference_data(db)
     tender_ids = [tender.id for tender in tenders]
-    percentages = _win_percentages(db, tender_ids)
-    scores = _ai_scores(db, tender_ids)
+    # Оценка и процент — у записи, где хранится разбор закупки (29.09.2026, tender_twins).
+    from app.services.tender_twins import subject_ids
+
+    subject_of = subject_ids(db, tender_ids)
+    analysed = {tender_id: subject_of.get(tender_id, tender_id) for tender_id in tender_ids}
+    by_subject_percentages = _win_percentages(db, list(set(analysed.values())))
+    by_subject_scores = _ai_scores(db, list(set(analysed.values())))
+    percentages = {
+        tender_id: by_subject_percentages[subject]
+        for tender_id, subject in analysed.items()
+        if subject in by_subject_percentages
+    }
+    scores = {
+        tender_id: by_subject_scores[subject]
+        for tender_id, subject in analysed.items()
+        if subject in by_subject_scores
+    }
     assignees = _assignee_names(db, tenders)
 
     workbook = Workbook()

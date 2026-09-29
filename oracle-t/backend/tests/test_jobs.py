@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -72,17 +73,34 @@ def test_second_enqueue_returns_the_same_job(db_session, admin_user, no_backgrou
     assert first.id == second.id
 
 
-def test_different_kinds_are_queued_separately(db_session, admin_user, no_background_execution):
+def test_score_while_full_review_runs_returns_the_review(
+    db_session, admin_user, no_background_execution
+):
+    """29.09.2026: карточка ставила полный разбор, человек жал «Разобрать» в заключении, и
+    оба потока пула по 15 минут делали одно и то же. Оценка, анализ и матрица входят в
+    полный разбор — вторая задача не создаётся, карточка следит за идущей."""
+
     tender = _tender(db_session)
 
-    analysis = jobs.enqueue(
-        db_session, kind=JobKind.TENDER_ANALYSIS, tender=tender, actor=admin_user
+    review = jobs.enqueue(
+        db_session, kind=JobKind.TENDER_FULL_REVIEW, tender=tender, actor=admin_user
     )
-    evaluation = jobs.enqueue(
-        db_session, kind=JobKind.TENDER_EVALUATION, tender=tender, actor=admin_user
-    )
+    for kind in (JobKind.AI_PROFILE_SCORE, JobKind.TENDER_ANALYSIS, JobKind.TENDER_EVALUATION):
+        assert jobs.enqueue(db_session, kind=kind, tender=tender, actor=admin_user).id == review.id
 
-    assert analysis.id != evaluation.id
+
+def test_feedback_is_queued_beside_running_score(
+    db_session, admin_user, no_background_execution
+):
+    """Пересмотр несёт текст замечания: подмена его идущей оценкой закрыла бы замечание,
+    которого модель не видела."""
+
+    tender = _tender(db_session)
+
+    score = jobs.enqueue(db_session, kind=JobKind.AI_PROFILE_SCORE, tender=tender, actor=admin_user)
+    feedback = jobs.enqueue(db_session, kind=JobKind.AI_FEEDBACK, tender=tender, actor=admin_user)
+
+    assert score.id != feedback.id
 
 
 def test_successful_run_stores_handler_message(

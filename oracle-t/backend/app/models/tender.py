@@ -114,6 +114,15 @@ class Tender(Base):
     # по нему ловятся дубли МЕЖДУ источниками, которых пара (source_id, external_id) не
     # видит (раздел 7 ТЗ, «Дедупликация между источниками»).
     registry_number: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    # Разбор этой закупки хранится у другой её записи (29.09.2026): одна закупка приходит из
+    # ЕИС, с площадки и отдельной строкой в канале Госплана, а требования, матрица и
+    # заключение ИИ должны быть одни на всех — см. `app/services/tender_twins.py`.
+    analysis_tender_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenders.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     customer_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
     customer_contact_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
     customer_contact_phone: Mapped[str | None] = mapped_column(String(100), nullable=True)

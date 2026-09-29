@@ -11,6 +11,7 @@ import { AccountMenu } from "./AccountMenu";
 import { Logo, LogoMark } from "./Logo";
 import { ThemeToggle } from "./ThemeToggle";
 import { HeaderNav } from "./nav/HeaderNav";
+import { MyJobsIndicator } from "./nav/MyJobsIndicator";
 import { WhatsNewCard, WhatsNewPill } from "./nav/WhatsNew";
 import { isNavItemActive, visibleNavItems } from "./nav/navConfig";
 
@@ -62,6 +63,7 @@ export function AppLayout() {
             <HeaderNav />
           </LayoutGroup>
           <div className="ml-auto flex items-center gap-4">
+            <MyJobsIndicator />
             <WhatsNewPill />
             <ThemeToggle />
             <AccountMenu />
@@ -77,6 +79,7 @@ export function AppLayout() {
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="z-30 flex h-16 shrink-0 items-center justify-end gap-4 border-b border-white/[0.05] bg-zinc-950/80 px-8 backdrop-blur">
+          <MyJobsIndicator />
           <ThemeToggle />
           <AccountMenu />
         </header>
