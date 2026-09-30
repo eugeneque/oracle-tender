@@ -68,8 +68,25 @@ export const MANUAL_SOURCE_TYPE = "manual";
 export const GOSPLAN_SOURCE_TYPE = "gosplan";
 export const GOSPLAN_SOURCE_KEY = "gosplan";
 
-/** Канал сбора закупок: площадки из «Источников тендеров» или API Госплана. */
-export type TenderFeed = "standard" | "gosplan";
+/** Внешние каналы сбора: Госплан (28.09.2026), Селдон и Тендерплан (30.09.2026). У каждого
+ * свой источник (имя канала = тип = ключ источника), своя кнопка на переключателе страницы
+ * тендеров и своя вкладка в настройках. */
+export type ExternalFeed = "gosplan" | "seldon" | "tenderplan";
+export const EXTERNAL_FEEDS: readonly ExternalFeed[] = ["gosplan", "seldon", "tenderplan"];
+
+/** Источник образует отдельный канал — в «Источниках тендеров» и фильтре площадок ему не место. */
+export function isExternalFeedSource(type: string): boolean {
+  return (EXTERNAL_FEEDS as readonly string[]).includes(type);
+}
+
+/** Канал сбора закупок: площадки из «Источников тендеров» или один из внешних сервисов. */
+export type TenderFeed = "standard" | ExternalFeed;
+
+export function parseTenderFeed(value: string | null): TenderFeed | null {
+  return value === "standard" || (EXTERNAL_FEEDS as readonly string[]).includes(value ?? "")
+    ? (value as TenderFeed)
+    : null;
+}
 
 export interface Source {
   id: string;

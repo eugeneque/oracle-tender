@@ -19,10 +19,10 @@ import { AnimatePresence, motion } from "motion/react";
 
 import { api } from "../api/client";
 import type { Source } from "../api/types";
-import { GOSPLAN_SOURCE_TYPE, MANUAL_SOURCE_TYPE } from "../api/types";
+import { MANUAL_SOURCE_TYPE, isExternalFeedSource, type ExternalFeed } from "../api/types";
 import { AppShell } from "../components/AppShell";
 import { CredentialsSection } from "../components/settings/CredentialsSection";
-import { GosplanSection } from "../components/settings/GosplanSection";
+import { FeedChannelSection } from "../components/settings/FeedChannelSection";
 import { InterfaceSection } from "../components/settings/InterfaceSection";
 import { RegionResponsiblesSection } from "../components/settings/RegionResponsiblesSection";
 import { RelevanceProfileSection } from "../components/settings/RelevanceProfileSection";
@@ -46,6 +46,8 @@ import { SPRING_SNAPPY, SPRING_SOFT } from "../utils/motion";
 type TabKey =
   | "sources"
   | "gosplan"
+  | "seldon"
+  | "tenderplan"
   | "credentials"
   | "relevance"
   | "regions"
@@ -62,6 +64,8 @@ interface TabDef {
 const TABS: TabDef[] = [
   { key: "sources", label: "Источники", icon: Globe },
   { key: "gosplan", label: "Госплан", icon: Landmark },
+  { key: "seldon", label: "Селдон", icon: Landmark },
+  { key: "tenderplan", label: "Тендерплан", icon: Landmark },
   { key: "relevance", label: "Профиль отбора", icon: SlidersHorizontal },
   { key: "credentials", label: "Доступы", icon: KeyRound, adminOnly: true },
   { key: "regions", label: "Регионы", icon: MapPin, adminOnly: true },
@@ -90,6 +94,13 @@ const SEARCH_INDEX: SearchEntry[] = [
   { tab: "gosplan", anchor: "gosplan-availability", title: "Сбор из Госплана", hint: "Состояние канала и запуск сбора", keywords: "госплан собрать опрос состояние доступность" },
   { tab: "gosplan", anchor: "gosplan-key", title: "Ключ API Госплана", hint: "Ключ платного тарифа", keywords: "госплан ключ токен apikey api", adminOnly: true },
   { tab: "gosplan", anchor: "gosplan-search", title: "Как Госплан ищет закупки", hint: "ОКПД2, слова, документы из ЕИС", keywords: "госплан окпд2 поиск документы модель" },
+  { tab: "seldon", anchor: "seldon-tariff", title: "Доступ к Seldon.API", hint: "Подключение канала Селдон", keywords: "селдон seldon api доступ договор" },
+  { tab: "seldon", anchor: "seldon-availability", title: "Сбор из Селдона", hint: "Состояние канала и запуск сбора", keywords: "селдон seldon собрать опрос состояние" },
+  { tab: "seldon", anchor: "seldon-key", title: "Ключ Seldon.API", hint: "Ключ, выданный по договору", keywords: "селдон seldon ключ токен api", adminOnly: true },
+  { tab: "tenderplan", anchor: "tenderplan-tariff", title: "Доступ к API Тендерплана", hint: "Подключение канала Тендерплан", keywords: "тендерплан tenderplan api доступ" },
+  { tab: "tenderplan", anchor: "tenderplan-availability", title: "Сбор из Тендерплана", hint: "Состояние канала и запуск сбора", keywords: "тендерплан tenderplan собрать опрос состояние" },
+  { tab: "tenderplan", anchor: "tenderplan-key", title: "Токен Тендерплана", hint: "Персональный токен из личного кабинета", keywords: "тендерплан tenderplan токен ключ pat api", adminOnly: true },
+  { tab: "tenderplan", anchor: "tenderplan-search", title: "Как Тендерплан ищет закупки", hint: "ОКПД2, слова, документы", keywords: "тендерплан окпд2 поиск документы" },
   { tab: "relevance", anchor: "relevance-ai-check", title: "Проверка закупок моделью", hint: "ИИ-отбор накопленного архива", keywords: "ии ai модель нейросеть проверить архив отбор", adminOnly: true },
   { tab: "relevance", anchor: "relevance-recalculate", title: "Пересчёт профиля", hint: "Применить профиль к собранным тендерам", keywords: "пересчитать профиль релевантность", adminOnly: true },
   { tab: "relevance", anchor: "relevance-queries", title: "Поисковые фразы", hint: "Чем система ищет на площадках", keywords: "фразы запросы охват поиск" },
@@ -185,8 +196,8 @@ function SettingsSearch({
     const sourceEntries: SearchEntry[] = sources
       .filter((s) => s.type !== MANUAL_SOURCE_TYPE)
       .map((s) =>
-        s.type === GOSPLAN_SOURCE_TYPE
-          ? { tab: "gosplan", anchor: "gosplan-availability", title: s.name, hint: "Канал сбора через API" }
+        isExternalFeedSource(s.type)
+          ? { tab: s.type as ExternalFeed, anchor: `${s.type}-availability`, title: s.name, hint: "Канал сбора через API" }
           : {
               tab: "sources",
               anchor: `source-${s.key}`,
@@ -430,7 +441,9 @@ export function SettingsPage() {
             className="max-w-4xl pb-16"
           >
             {activeTab === "sources" && <SourcesSection isAdmin={isAdmin} active />}
-            {activeTab === "gosplan" && <GosplanSection isAdmin={isAdmin} active />}
+            {(activeTab === "gosplan" || activeTab === "seldon" || activeTab === "tenderplan") && (
+              <FeedChannelSection feed={activeTab} isAdmin={isAdmin} active />
+            )}
             {activeTab === "relevance" && <RelevanceProfileSection isAdmin={isAdmin} />}
             {activeTab === "credentials" && isAdmin && <CredentialsSection />}
             {activeTab === "regions" && isAdmin && <RegionResponsiblesSection />}

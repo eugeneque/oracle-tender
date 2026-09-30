@@ -14,7 +14,7 @@ import {
 
 import { ApiError, api } from "../../api/client";
 import type { Source, SourcePollResult } from "../../api/types";
-import { CATALOG_SOURCE_TYPES, GOSPLAN_SOURCE_TYPE, MANUAL_SOURCE_TYPE } from "../../api/types";
+import { CATALOG_SOURCE_TYPES, MANUAL_SOURCE_TYPE, isExternalFeedSource } from "../../api/types";
 import {
   SettingCard,
   SettingsGroup,
@@ -177,8 +177,8 @@ function SourceCard({
 }
 
 /** Вкладка «Источники»: площадки закупок стандартного канала и источники справочника
- * продукции. Госплан сюда не входит — у него своя вкладка и свой канал на странице тендеров,
- * ручные заявки — не площадка. */
+ * продукции. Госплан, Селдон и Тендерплан сюда не входят — у каждого своя вкладка и свой
+ * канал на странице тендеров, ручные заявки — не площадка. */
 export function SourcesSection({ isAdmin, active }: { isAdmin: boolean; active: boolean }) {
   const { sources, error: loadError, reload } = useSources(active);
   const [pollingKey, setPollingKey] = useState<string | null>(null);
@@ -199,7 +199,7 @@ export function SourcesSection({ isAdmin, active }: { isAdmin: boolean; active: 
   };
 
   const visible = (sources ?? []).filter(
-    (s) => s.type !== MANUAL_SOURCE_TYPE && s.type !== GOSPLAN_SOURCE_TYPE,
+    (s) => s.type !== MANUAL_SOURCE_TYPE && !isExternalFeedSource(s.type),
   );
   const platforms = visible.filter((s) => !CATALOG_SOURCE_TYPES.includes(s.type));
   const connected = platforms.filter((s) => s.adapter_status === "implemented");

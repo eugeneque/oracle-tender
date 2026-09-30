@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
+from app.models.source import FEED_PATTERN
 from app.models.user import User
 from app.services import bitrix_service
 from app.services.export_service import export_tenders
@@ -53,7 +54,7 @@ def get_tenders_xlsx(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ,
     win_percentage_min: Decimal | None = Query(default=None, ge=0, le=100),
     win_percentage_max: Decimal | None = Query(default=None, ge=0, le=100),
     bookmarked: bool = Query(default=False, description="Только избранное текущего пользователя"),
-    feed: str | None = Query(default=None, pattern="^(standard|gosplan)$"),
+    feed: str | None = Query(default=None, pattern=FEED_PATTERN),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Response:

@@ -32,7 +32,6 @@ from app.adapters.base import PollError, TenderSummary
 from app.adapters.registry import get_adapter
 from app.models.log import LogLevel
 from app.models.source import (
-    FEED_GOSPLAN,
     FEED_STANDARD,
     POLL_EXCLUDED_SOURCE_TYPES,
     SEPARATE_FEED_SOURCE_TYPES,
@@ -379,8 +378,8 @@ def poll_source(
     # числу — защита от лавины: если источник вывалил сотни новых записей, разбираем первую
     # партию сейчас, остальное дочистит кнопка в настройках.
     #
-    # Канал Госплана модель на сборе не проверяет: он почти целиком повторяет ЕИС, и
-    # проверка удвоила бы расход на ИИ ради сравнения каналов. Непроверенное доступно
+    # Отдельные каналы (Госплан, Селдон, Тендерплан) модель на сборе не проверяет: они почти
+    # целиком повторяют ЕИС, и проверка умножила бы расход на ИИ ради сравнения каналов. Непроверенное доступно
     # кнопке «Проверить моделью» в настройках.
     if created and source.type not in SEPARATE_FEED_SOURCE_TYPES:
         try:
@@ -499,7 +498,8 @@ class TenderFilters:
     # Теги (замечание 17.09.2026): закупка проходит, если у неё есть хотя бы один из них.
     tag_ids: list[uuid.UUID] = field(default_factory=list)
     # Канал сбора (переключатель на странице тендеров, 28.09.2026): `standard` — площадки
-    # из «Источников тендеров» и ручные заявки, `gosplan` — API Госплана, `None` — все.
+    # из «Источников тендеров» и ручные заявки, `gosplan`/`seldon`/`tenderplan` — внешний
+    # сервис с тем же именем (см. `FEEDS`), `None` — все.
     feed: str | None = None
 
 
@@ -587,8 +587,8 @@ def ai_score_subquery():
 def feed_condition_for(feed: str | None):
     """Условие «закупка из этого канала сбора» — для списка, доски, выгрузки и счётчиков."""
 
-    if feed == FEED_GOSPLAN:
-        types = select(Source.id).where(Source.type.in_(SEPARATE_FEED_SOURCE_TYPES))
+    if feed in SEPARATE_FEED_SOURCE_TYPES:
+        types = select(Source.id).where(Source.type == feed)
         return Tender.source_id.in_(types)
     if feed == FEED_STANDARD:
         types = select(Source.id).where(Source.type.notin_(SEPARATE_FEED_SOURCE_TYPES))

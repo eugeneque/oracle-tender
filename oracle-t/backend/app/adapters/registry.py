@@ -19,7 +19,9 @@ from app.adapters.gosplan import GosplanAdapter
 from app.adapters.lot_online import LotOnlineAdapter
 from app.adapters.roseltorg import RoseltorgAdapter
 from app.adapters.sberbank_ast import SberbankAstAdapter
+from app.adapters.seldon import SeldonAdapter
 from app.adapters.tektorg import TektorgAdapter
+from app.adapters.tenderplan import TenderplanAdapter
 from app.adapters.zakazrf import ZakazrfAdapter
 
 _ADAPTERS: dict[str, type[SourceAdapter]] = {
@@ -33,6 +35,8 @@ _ADAPTERS: dict[str, type[SourceAdapter]] = {
     "tektorg": TektorgAdapter,
     "lot_online": LotOnlineAdapter,
     "gosplan": GosplanAdapter,
+    "seldon": SeldonAdapter,
+    "tenderplan": TenderplanAdapter,
 }
 
 
