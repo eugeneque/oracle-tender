@@ -39,11 +39,11 @@ import type {
 } from "../api/types";
 import {
   CATALOG_SOURCE_TYPES,
-  GOSPLAN_SOURCE_KEY,
-  GOSPLAN_SOURCE_TYPE,
   MANUAL_SOURCE_TYPE,
   STAGE_LABELS,
   STAGE_ORDER,
+  isExternalFeedSource,
+  parseTenderFeed,
 } from "../api/types";
 import { motion } from "motion/react";
 
@@ -74,8 +74,9 @@ const SELECTED_SOURCES_STORAGE_KEY = "oraclet_selected_source_keys";
 const FEED_STORAGE_KEY = "oraclet_tender_feed";
 
 /** Канал сбора (28.09.2026): «Стандартные ресурсы» — площадки из «Настройки → Источники
- * тендеров», «Госплан» — закупки, собранные через API Госплана. Каналы не смешиваются, и
- * выбор запоминается: кто сравнивает каналы, возвращается к тому же. */
+ * тендеров», остальные — закупки, собранные через API внешнего сервиса (Госплан, с 30.09 —
+ * Селдон и Тендерплан). Каналы не смешиваются, и выбор запоминается: кто сравнивает
+ * каналы, возвращается к тому же. */
 const FEED_OPTIONS: { value: TenderFeed; label: string; hint: string }[] = [
   {
     value: "standard",
@@ -83,11 +84,13 @@ const FEED_OPTIONS: { value: TenderFeed; label: string; hint: string }[] = [
     hint: "Закупки с площадок из «Настройки → Источники тендеров»",
   },
   { value: "gosplan", label: "Госплан", hint: "Закупки, собранные через API Госплана" },
+  { value: "seldon", label: "Селдон", hint: "Закупки, собранные через Seldon.API" },
+  { value: "tenderplan", label: "Тендерплан", hint: "Закупки, собранные через API Тендерплана" },
 ];
 
 function loadFeed(): TenderFeed {
   try {
-    return localStorage.getItem(FEED_STORAGE_KEY) === "gosplan" ? "gosplan" : "standard";
+    return parseTenderFeed(localStorage.getItem(FEED_STORAGE_KEY)) ?? "standard";
   } catch {
     return "standard";
   }
@@ -1067,7 +1070,7 @@ export function TendersPage() {
   );
   const [filters, setFilters] = useState<TendersFilters>(() => ({
     ...DEFAULT_FILTERS,
-    feed: searchParams.get("feed") === "gosplan" ? "gosplan" : loadFeed(),
+    feed: parseTenderFeed(searchParams.get("feed")) ?? loadFeed(),
   }));
   const feed = filters.feed;
   // Ссылка «Все →» из меню учётной записи ведёт сразу в раздел «Избранное». Эффектом, а не
@@ -1080,11 +1083,11 @@ export function TendersPage() {
     setFilters((prev) => ({ ...prev, favouritesOnly: true }));
     setSearchParams({}, { replace: true });
   }, [searchParams, setSearchParams]);
-  // Ссылка «Тендеры Госплана» из настроек (`?feed=gosplan`): канал уже выбран начальным
-  // состоянием, параметр только запоминается и снимается с адреса.
+  // Ссылка «Тендеры Госплана» (Селдона, Тендерплана) из настроек (`?feed=gosplan`): канал
+  // уже выбран начальным состоянием, параметр только запоминается и снимается с адреса.
   useEffect(() => {
-    const requested = searchParams.get("feed");
-    if (requested !== "gosplan" && requested !== "standard") return;
+    const requested = parseTenderFeed(searchParams.get("feed"));
+    if (requested === null) return;
     setOffset(0);
     setFilters((prev) => ({ ...prev, feed: requested, sourceKeys: [] }));
     saveFeed(requested);
@@ -1178,7 +1181,7 @@ export function TendersPage() {
     void api.get<TenderTag[]>("/tags").then(setTags).catch(() => setTags([]));
   }, []);
 
-  // «Из N собранных» — по текущему каналу: у Госплана своё число, и общий знаменатель
+  // «Из N собранных» — по текущему каналу: у Госплана и других сервисов своё число, и общий знаменатель
   // выдавал бы строку «12 из 17 800» там, где в канале всего три сотни закупок.
   const loadCollectedTotal = useCallback(
     (activeFeed: TenderFeed) =>
@@ -1193,9 +1196,10 @@ export function TendersPage() {
     void loadCollectedTotal(feed);
   }, [feed, loadCollectedTotal]);
 
-  // Площадки стандартного канала: Госплан — отдельный канал со своей кнопкой сбора, в
-  // фильтре «Площадки» и в «Площадках для синхронизации» ему не место.
-  const standardSources = sources.filter((s) => s.type !== GOSPLAN_SOURCE_TYPE);
+  // Площадки стандартного канала: Госплан, Селдон и Тендерплан — отдельные каналы со своей
+  // кнопкой сбора, в фильтре «Площадки» и в «Площадках для синхронизации» им не место.
+  const standardSources = sources.filter((s) => !isExternalFeedSource(s.type));
+  const feedLabel = FEED_OPTIONS.find((option) => option.value === feed)?.label ?? "";
 
   const changeFeed = (next: TenderFeed) => {
     if (next === feed) return;
@@ -1280,11 +1284,11 @@ export function TendersPage() {
     if (sources.length === 0) return;
     const saved = loadSelectedSourceKeys();
     if (saved) {
-      setSelectedSourceKeys(saved.filter((key) => key !== GOSPLAN_SOURCE_KEY));
+      setSelectedSourceKeys(saved.filter((key) => !isExternalFeedSource(key)));
       return;
     }
     const defaultKeys = sources
-      .filter((s) => s.adapter_status === "implemented" && s.type !== GOSPLAN_SOURCE_TYPE)
+      .filter((s) => s.adapter_status === "implemented" && !isExternalFeedSource(s.type))
       .map((s) => s.key);
     setSelectedSourceKeys(defaultKeys);
     saveSelectedSourceKeys(defaultKeys);
@@ -1571,8 +1575,9 @@ export function TendersPage() {
 
           <button
             onClick={() =>
-              feed === "gosplan"
-                ? void syncSources([GOSPLAN_SOURCE_KEY])
+              // Имя внешнего канала — это и ключ его источника.
+              feed !== "standard"
+                ? void syncSources([feed])
                 : selectedSourceKeys && void syncSources(selectedSourceKeys)
             }
             disabled={
@@ -1580,8 +1585,8 @@ export function TendersPage() {
               (feed === "standard" && (!selectedSourceKeys || selectedSourceKeys.length === 0))
             }
             title={
-              feed === "gosplan"
-                ? "Собрать новые закупки через API Госплана"
+              feed !== "standard"
+                ? `Собрать новые закупки через API: ${feedLabel}`
                 : !selectedSourceKeys || selectedSourceKeys.length === 0
                   ? "Сначала выберите площадки в меню «⋯»"
                   : "Собрать новые закупки с выбранных площадок"

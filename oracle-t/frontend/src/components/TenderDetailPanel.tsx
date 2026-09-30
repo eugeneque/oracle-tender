@@ -237,15 +237,12 @@ export function TenderDetailPanel({
   const [isCardRefreshing, setIsCardRefreshing] = useState(false);
 
   // AI-оценка по профилю (раздел 5.5.1 ТЗ) — грузится сразу вместе с карточкой: это шапка,
-  // а не вкладка, и человек смотрит на неё первым делом. Если оценки ещё нет, расчёт
-  // запускается сам (решение 17.09.2026): кнопку «Рассчитать» на каждой новой закупке
-  // нажимали не всегда, и список показывал «не считалась» там, где ответ был нужен.
+  // а не вкладка, и человек смотрит на неё первым делом. Расчёт — только по кнопке
+  // (решение 30.09.2026): автозапуск при открытии, введённый 17.09, тратил модель на каждую
+  // просмотренную закупку. Открытие карточки лишь подтягивает с площадки документы и
+  // карточку закупки — без обращений к ИИ.
   const [score, setScore] = useState<AiProfileScore | null>(null);
   const [scoreError, setScoreError] = useState<string | null>(null);
-  // Для какого тендера автозапуск уже сделан: эффект загрузки оценки в StrictMode и при
-  // обновлении карточки срабатывает повторно, а второй POST только плодил бы запросы —
-  // сервер и так возвращает уже идущую задачу, но ходить за ней дважды незачем.
-  const autoScoreRef = useRef<string | null>(null);
 
   // Ответы специалистов на заключение ИИ (28.09.2026): нужны и самому заключению (кто уже
   // согласился, не упал ли пересмотр), и блоку «Комментарии» за иконкой в шапке.
@@ -536,22 +533,14 @@ export function TenderDetailPanel({
       const running = active[0];
       const runningKind = running ? JOB_KIND_KEYS[running.kind] : undefined;
       if (running && runningKind) {
-        autoScoreRef.current = tender.id;
         setRunningAction(runningKind);
         setJobId(running.id);
         setJobProgress(jobProgressText(running));
         return;
       }
 
-      if (data === null) {
-        if (autoScoreRef.current === tender.id) return;
-        autoScoreRef.current = tender.id;
-        // Без требований оценка считалась бы «только по карточке, точность ниже» — так
-        // и получались 34% по закупке, ТЗ которой никто не читал. Поэтому первый заход
-        // в карточку запускает полный разбор; если требования уже есть — только оценку.
-        void startJob(tender.requirements_count > 0 ? "ai-score" : "review");
-        return;
-      }
+      // Оценки нет — ждём кнопки «Разобрать закупку» (см. комментарий к `score`).
+      if (data === null) return;
 
       // Тендер пришёл из списка, загруженного до конца разбора: шапка и знак решения
       // отстали бы от панели оценки. Перечитываем — и список получит свежую строку.
@@ -572,10 +561,10 @@ export function TenderDetailPanel({
     return () => {
       cancelled = true;
     };
-    // requirements_count, ai_score и ai_decision намеренно не в зависимостях: они меняются
-    // после разбора, а решать про автозапуск и сверять шапку нужно один раз — при открытии.
+    // ai_score и ai_decision намеренно не в зависимостях: они меняются после разбора, а
+    // сверять шапку нужно один раз — при открытии.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tender.id, startJob]);
+  }, [tender.id]);
 
   useEffect(() => {
     if (!jobId || runningAction === null) return;
@@ -591,8 +580,8 @@ export function TenderDetailPanel({
         return;
       }
       if (job.status === "error" || job.status === "cancelled") {
-        // Сбой расчёта оценки показывается в её блоке: он запускается сам при открытии, и
-        // общая строка ошибок карточки над вкладками для него — сообщение «ни о чём».
+        // Сбой расчёта оценки показывается в её блоке, рядом с кнопкой, которой его
+        // запустили, а не в общей строке ошибок карточки над вкладками.
         if (job.kind === "ai_profile_score" || job.kind === "ai_feedback") {
           setScoreError(job.message ?? "Расчёт не удался");
           if (job.kind === "ai_feedback") await loadFeedback();
@@ -1148,7 +1137,11 @@ export function TenderDetailPanel({
               progress={
                 runningAction === "ai-score" || runningAction === "review" ? jobProgress : null
               }
-              onRun={() => void startJob("ai-score")}
+              // Без требований оценка вышла бы «только по карточке» — так получались 34% по
+              // закупке, ТЗ которой никто не читал. Первый разбор поэтому полный.
+              onRun={() =>
+                void startJob(score || tender.requirements_count > 0 ? "ai-score" : "review")
+              }
               error={scoreError}
               feedback={feedback}
               onAgree={agreeWithScore}

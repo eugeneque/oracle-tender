@@ -14,6 +14,7 @@ from app.models.job import JobKind
 from app.models.market import NicheStatistics, SimilarTender
 from app.models.tender import Tender
 from app.models.tender_document import DOCUMENT_CLASS_LABELS, DocumentClass, TenderDocument
+from app.models.source import FEED_PATTERN
 from app.models.user import User
 from app.schemas.job import BackgroundJobOut
 from app.schemas.tender import (
@@ -123,8 +124,8 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
     tag: list[uuid.UUID] | None = Query(default=None, description="Теги закупки (любой из)"),
     feed: str | None = Query(
         default=None,
-        pattern="^(standard|gosplan)$",
-        description="Канал сбора: standard — площадки из настроек, gosplan — API Госплана",
+        pattern=FEED_PATTERN,
+        description="Канал сбора: standard — площадки из настроек, gosplan/seldon/tenderplan — внешний сервис",
     ),
 ) -> TenderFilters:
     """Общий разбор фильтров для списка и доски.
@@ -246,7 +247,7 @@ def get_tenders_board(
 
 @router.get("/stats", response_model=TenderStatsOut)
 def get_tenders_stats(
-    feed: str | None = Query(default=None, pattern="^(standard|gosplan)$"),
+    feed: str | None = Query(default=None, pattern=FEED_PATTERN),
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ) -> dict:

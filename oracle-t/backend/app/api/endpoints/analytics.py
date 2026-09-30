@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
+from app.models.source import FEED_PATTERN
 from app.models.user import User
 from app.schemas.analytics import AiSummaryOut, AnalyticsOverviewOut
 from app.services.analytics_service import (
@@ -43,7 +44,7 @@ def analytics_filters(  # noqa: PLR0913 - по параметру на филь�
     okpd2: str | None = Query(default=None, max_length=20),
     # Аналитика по умолчанию — по стандартному каналу: канал Госплана почти целиком
     # повторяет ЕИС, и без этого условия каждая закупка считалась бы дважды.
-    feed: str = Query(default="standard", pattern="^(standard|gosplan)$"),
+    feed: str = Query(default="standard", pattern=FEED_PATTERN),
 ) -> TenderFilters:
     return TenderFilters(
         feed=feed,
