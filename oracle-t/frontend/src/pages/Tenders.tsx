@@ -21,6 +21,7 @@ import {
   Star,
   Table as TableIcon,
   Tag as TagIcon,
+  Timer,
   X,
 } from "lucide-react";
 
@@ -347,6 +348,10 @@ interface TendersFilters {
    * пользователем закупки — и вне фильтров по умолчанию (срок подачи, профиль), иначе
    * отложенная закупка исчезала бы из раздела, как только у неё истекал срок. */
   favouritesOnly: boolean;
+  /** Раздел «Минутки» (04.10.2026): срок подачи заявок истекает в день размещения. В отличие
+   * от «Избранного» остальные фильтры действуют: минутка интересна, пока на неё ещё можно
+   * успеть подать заявку. */
+  minutesOnly: boolean;
   /** Теги (замечание 17.09.2026): закупка проходит, если у неё есть хотя бы один из них. */
   tagIds: string[];
 }
@@ -368,6 +373,7 @@ const DEFAULT_FILTERS: TendersFilters = {
   onlyRelevant: true,
   onlyAiSelected: false,
   favouritesOnly: false,
+  minutesOnly: false,
   tagIds: [],
   regionCodes: [],
   tenderTypes: [],
@@ -443,6 +449,7 @@ function buildFilterParams(filters: TendersFilters): URLSearchParams {
   if (filters.priceMin) params.set("price_min", filters.priceMin);
   if (filters.priceMax) params.set("price_max", filters.priceMax);
   if (filters.favouritesOnly) params.set("bookmarked", "true");
+  if (filters.minutesOnly) params.set("same_day", "true");
   for (const id of filters.tagIds) params.append("tag", id);
   if (filters.hideExpired && !filters.favouritesOnly) params.set("hide_expired", "true");
   if (filters.onlyRelevant && !filters.favouritesOnly) params.set("only_profile_relevant", "true");
@@ -591,9 +598,9 @@ function FiltersPanel({
         <div className="flex items-center gap-1.5">
           <span className="mr-1 text-xs text-zinc-500">Раздел:</span>
           <button
-            onClick={() => onChange({ favouritesOnly: false })}
+            onClick={() => onChange({ favouritesOnly: false, minutesOnly: false })}
             className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
-              !filters.favouritesOnly
+              !filters.favouritesOnly && !filters.minutesOnly
                 ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-300"
                 : "border-white/10 text-zinc-500 hover:text-zinc-300"
             }`}
@@ -601,7 +608,7 @@ function FiltersPanel({
             Все закупки
           </button>
           <button
-            onClick={() => onChange({ favouritesOnly: true })}
+            onClick={() => onChange({ favouritesOnly: true, minutesOnly: false })}
             aria-pressed={filters.favouritesOnly}
             title="Отложенные закупки: то, что отмечено звёздочкой в карточке. Показываются независимо от срока подачи и профиля."
             className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
@@ -612,6 +619,19 @@ function FiltersPanel({
           >
             <Star size={11} fill={filters.favouritesOnly ? "currentColor" : "none"} />
             Избранное
+          </button>
+          <button
+            onClick={() => onChange({ minutesOnly: true, favouritesOnly: false })}
+            aria-pressed={filters.minutesOnly}
+            title="Тендеры-минутки: срок подачи заявок истекает в день размещения."
+            className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
+              filters.minutesOnly
+                ? "border-rose-400/40 bg-rose-500/10 text-rose-300"
+                : "border-white/10 text-zinc-500 hover:text-zinc-300"
+            }`}
+          >
+            <Timer size={11} />
+            Минутки
           </button>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
@@ -1010,6 +1030,7 @@ function countActiveFilters(filters: TendersFilters): number {
   if (!filters.onlyRelevant) count += 1;
   if (filters.onlyAiSelected) count += 1;
   if (filters.favouritesOnly) count += 1;
+  if (filters.minutesOnly) count += 1;
   if (filters.tagIds.length > 0) count += 1;
   return count;
 }
@@ -1080,9 +1101,23 @@ export function TendersPage() {
   useEffect(() => {
     if (!searchParams.has("favourites")) return;
     setOffset(0);
-    setFilters((prev) => ({ ...prev, favouritesOnly: true }));
+    setFilters((prev) => ({ ...prev, favouritesOnly: true, minutesOnly: false }));
     setSearchParams({}, { replace: true });
   }, [searchParams, setSearchParams]);
+  // Раздел «Минутки» живёт в адресе (`?minutes=1`), в отличие от «Избранного»: у него свой
+  // пункт меню, и тот должен подсвечиваться, пока раздел открыт. Поэтому адрес — источник
+  // правды: переход по пункту меню включает раздел, переход на «Тендеры» без параметра —
+  // выключает, а кнопки на странице меняют адрес через `updateFilters`.
+  const minutesInUrl = searchParams.has("minutes");
+  useEffect(() => {
+    if (filters.minutesOnly === minutesInUrl) return;
+    setOffset(0);
+    setFilters((prev) => ({
+      ...prev,
+      minutesOnly: minutesInUrl,
+      favouritesOnly: minutesInUrl ? false : prev.favouritesOnly,
+    }));
+  }, [minutesInUrl, filters.minutesOnly]);
   // Ссылка «Тендеры Госплана» (Селдона, Тендерплана) из настроек (`?feed=gosplan`): канал
   // уже выбран начальным состоянием, параметр только запоминается и снимается с адреса.
   useEffect(() => {
@@ -1229,6 +1264,17 @@ export function TendersPage() {
   // выборки пользователь оказывается на пустой пятой странице и решает, что ничего не нашлось.
   const updateFilters = (patch: Partial<TendersFilters>) => {
     setOffset(0);
+    if (patch.minutesOnly !== undefined && patch.minutesOnly !== minutesInUrl) {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (patch.minutesOnly) next.set("minutes", "1");
+          else next.delete("minutes");
+          return next;
+        },
+        { replace: true },
+      );
+    }
     setFilters((prev) => ({ ...prev, ...patch }));
   };
 
@@ -1685,8 +1731,19 @@ export function TendersPage() {
             )}
           </div>
 
-          {(filters.favouritesOnly || filters.tagIds.length > 0) && (
+          {(filters.favouritesOnly || filters.minutesOnly || filters.tagIds.length > 0) && (
             <div className="flex flex-wrap items-center gap-1.5">
+              {filters.minutesOnly && (
+                <button
+                  onClick={() => updateFilters({ minutesOnly: false })}
+                  className="inline-flex items-center gap-1 rounded-full border border-rose-400/40 bg-rose-500/10 px-2 py-1 text-[11px] leading-none text-rose-300 hover:bg-rose-500/20"
+                  title="Выйти из раздела «Минутки»: срок подачи в день размещения"
+                >
+                  <Timer size={11} />
+                  Минутки
+                  <X size={11} />
+                </button>
+              )}
               {filters.favouritesOnly && (
                 <button
                   onClick={() => updateFilters({ favouritesOnly: false })}
@@ -1721,10 +1778,7 @@ export function TendersPage() {
           regions={regions}
           tags={tags}
           onChange={updateFilters}
-          onReset={() => {
-            setOffset(0);
-            setFilters({ ...DEFAULT_FILTERS, feed });
-          }}
+          onReset={() => updateFilters({ ...DEFAULT_FILTERS, feed })}
         />
         )}
 

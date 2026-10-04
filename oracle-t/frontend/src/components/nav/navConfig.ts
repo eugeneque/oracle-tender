@@ -8,6 +8,7 @@ import {
   ScrollText,
   Settings,
   Star,
+  Timer,
   Users as UsersIcon,
 } from "lucide-react";
 
@@ -48,6 +49,13 @@ export const NAV_ITEMS: NavItem[] = [
     group: "tenders",
     headerOnly: true,
   },
+  {
+    label: "Минутки",
+    to: "/tenders?minutes=1",
+    icon: Timer,
+    hint: "Срок подачи заявок — в день размещения",
+    group: "tenders",
+  },
   { label: "Аналитика", to: "/analytics", icon: BarChart3, hint: "Динамика, победители, доли", group: "market" },
   { label: "Каталог продукции", to: "/catalog", icon: Boxes, hint: "Модели производителей и Госреестр", group: "market" },
   { label: "Моя компания", to: "/company", icon: Building2, hint: "Профиль, участия и реквизиты", group: "company" },
@@ -61,9 +69,13 @@ export function visibleNavItems(user: User | null | undefined): NavItem[] {
   return NAV_ITEMS.filter((item) => !item.adminOnly || user?.role === "admin");
 }
 
-/** Вложенные адреса (`/tenders/:id`) подсвечивают свой раздел; query в `to` не учитывается. */
+/** Вложенные адреса (`/tenders/:id`) подсвечивают свой раздел. Пункт с query в `to`
+ * («Минутки» — `/tenders?minutes=1`) активен при этом query и забирает подсветку у пункта
+ * того же адреса без query: иначе горели бы оба. */
 export function isNavItemActive(item: NavItem, pathname: string, search: string): boolean {
   const [path, query] = item.to.split("?");
   if (query) return pathname === path && search.includes(query);
+  if (NAV_ITEMS.some((other) => other.to.startsWith(`${path}?`) && isNavItemActive(other, pathname, search)))
+    return false;
   return pathname === path || pathname.startsWith(`${path}/`);
 }

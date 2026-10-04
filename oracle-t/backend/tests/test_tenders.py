@@ -437,6 +437,50 @@ def test_tenders_filter_by_deadline_range(client, admin_token):
     assert out_of_range_id not in ids
 
 
+def test_tenders_filter_same_day_deadline(client, admin_token):
+    """«Минутки»: срок подачи в день размещения, причём день — московский. Закупка,
+    закрывающаяся в 01:00 по Москве 11.09, в UTC закрывается 10.09 в 22:00 и при сравнении
+    по UTC выпала бы из раздела."""
+
+    db = SessionLocal()
+    try:
+        source = Source(
+            key=f"sameday_{uuid.uuid4().hex[:8]}", name="Тест", url="https://example.test",
+            type="etp_federal_commercial",
+        )
+        db.add(source)
+        db.commit()
+        db.refresh(source)
+        published = date(2026, 9, 11)
+        minute = _make_tender(
+            db, source, external_id="M-1", title="Минутка", publish_date=published,
+            deadline=datetime(2026, 9, 10, 22, 0, tzinfo=timezone.utc),
+        )
+        minute_id = str(minute.id)
+        regular = _make_tender(
+            db, source, external_id="M-2", title="Обычная", publish_date=published,
+            deadline=datetime(2026, 9, 11, 22, 0, tzinfo=timezone.utc),
+        )
+        regular_id = str(regular.id)
+        no_deadline = _make_tender(
+            db, source, external_id="M-3", title="Без срока", publish_date=published,
+        )
+        no_deadline_id = str(no_deadline.id)
+    finally:
+        db.close()
+
+    response = client.get(
+        "/tenders",
+        params={"same_day": "true", "source": source.key},
+        headers=_auth_headers(admin_token),
+    )
+    assert response.status_code == 200
+    ids = {t["id"] for t in response.json()["items"]}
+    assert minute_id in ids
+    assert regular_id not in ids
+    assert no_deadline_id not in ids
+
+
 def test_tenders_stats(client, admin_token):
     db = SessionLocal()
     try:
