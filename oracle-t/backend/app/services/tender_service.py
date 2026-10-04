@@ -25,7 +25,7 @@ from decimal import Decimal
 from typing import Callable
 
 from loguru import logger
-from sqlalchemy import and_, func, select
+from sqlalchemy import Date, and_, cast, func, select
 from sqlalchemy.orm import Session
 
 from app.adapters.base import PollError, TenderSummary
@@ -469,6 +469,10 @@ class TenderFilters:
     # Только то, что модель признала нашим (раздел 5.4 ТЗ). Отдельно от
     # `only_profile_relevant`: профиль ключевых слов — грубое сито, модель — точное.
     only_ai_selected: bool = False
+    # «Тендеры-минутки» (04.10.2026): срок подачи заявок истекает в день размещения. Даты
+    # сравниваются по Москве — `application_end` хранится в UTC, и закупка, закрывающаяся
+    # в 01:00 по Москве, в UTC попала бы на предыдущий день.
+    same_day_deadline: bool = False
     # Поля, которые заполняет ИИ-анализ (Этапы 5-6). Пока анализ не выполнен, они пустые —
     # тендер просто не попадёт в выдачу с таким фильтром, и это верно: пользователь ищет
     # разобранные закупки.
@@ -643,6 +647,11 @@ def _build_conditions(filters: TenderFilters) -> list:
         conditions.append(Tender.ai_relevant.is_not(False))
     if filters.only_ai_selected:
         conditions.append(Tender.ai_relevant.is_(True))
+    if filters.same_day_deadline:
+        conditions.append(
+            cast(func.timezone("Europe/Moscow", Tender.application_end), Date)
+            == Tender.publish_date
+        )
     if filters.hide_expired:
         # «Истёкший» — это не только просроченная дата. Площадки массово отдают закупки без
         # срока подачи вообще (у ЕИС таких больше половины), и почти все они уже завершены:
