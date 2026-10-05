@@ -25,7 +25,7 @@ from decimal import Decimal
 from typing import Callable
 
 from loguru import logger
-from sqlalchemy import Date, and_, cast, func, select
+from sqlalchemy import Date, and_, cast, func, or_, select, true
 from sqlalchemy.orm import Session
 
 from app.adapters.base import PollError, TenderSummary
@@ -488,7 +488,19 @@ class TenderFilters:
     # на площадке и стадия нашей работы с ней — разные вопросы, и фильтруют по ним порознь.
     stages: list[str] = field(default_factory=list)
     assignee_ids: list[uuid.UUID] = field(default_factory=list)
-    okpd2_prefix: str | None = None
+    # Префиксы кодов ОКПД2: закупка проходит, если её код начинается с любого из них
+    # («26.51» включает всё вложенное). Список, а не строка — в фильтре можно отметить
+    # несколько веток классификатора.
+    okpd2_prefixes: list[str] = field(default_factory=list)
+    # Пользовательский профиль релевантности (`relevance_profile_service`): только закупки из
+    # его совпадений. Совпадения к этому моменту уже досчитаны эндпоинтом.
+    relevance_profiles: list["ProfileScope"] = field(default_factory=list)
+    # Как сочетаются несколько профилей на одной площадке: `any` — подошёл любой, `all` — все.
+    relevance_profiles_mode: str = "any"
+    # Скрыть то, что модель явно признала чужим (`ai_relevant = FALSE`). Отдельно от профилей
+    # (05.10.2026): раньше это условие пряталось за галочкой «Только прошедшие профиль», и
+    # пользователь не видел, что закупки скрывает не профиль, а модель.
+    hide_ai_rejected: bool = False
     win_percentage_min: Decimal | None = None
     win_percentage_max: Decimal | None = None
     # Диапазон итоговой AI-оценки по профилю (раздел 5.5.1 ТЗ) — главный фильтр списка
@@ -600,6 +612,44 @@ def feed_condition_for(feed: str | None):
     return None
 
 
+@dataclass(frozen=True)
+class ProfileScope:
+    """Выбранный профиль и площадки, на которые он действует (`None` — на все)."""
+
+    profile_id: uuid.UUID
+    source_ids: tuple[uuid.UUID, ...] | None
+
+
+def _profiles_condition(profiles: list[ProfileScope], mode: str):
+    """Условие по выбранным профилям с учётом их площадок.
+
+    Профиль сужает только закупки своих площадок; закупка с площадки, к которой не привязан
+    ни один выбранный профиль, не трогается — иначе профиль, привязанный к Тендерплану,
+    опустошал бы Госплан. Несколько профилей на одной площадке комбинируются: `any` — достаточно
+    любого из применимых, `all` — нужны все применимые.
+    """
+
+    from app.models.relevance_profile import RelevanceProfileMatch
+
+    applies = []
+    matched = []
+    for scope in profiles:
+        applies.append(
+            true() if scope.source_ids is None else Tender.source_id.in_(list(scope.source_ids))
+        )
+        matched.append(
+            Tender.id.in_(
+                select(RelevanceProfileMatch.tender_id).where(
+                    RelevanceProfileMatch.profile_id == scope.profile_id
+                )
+            )
+        )
+    if mode == "all":
+        return and_(*(or_(~a, m) for a, m in zip(applies, matched)))
+    untouched = and_(*(~a for a in applies))
+    return or_(untouched, *(and_(a, m) for a, m in zip(applies, matched)))
+
+
 def _build_conditions(filters: TenderFilters) -> list:
     conditions = []
 
@@ -644,6 +694,8 @@ def _build_conditions(filters: TenderFilters) -> list:
         # что модель уже признала чужим, продолжало висеть в списке «по профилю». Прячется
         # только явное «нет»; непроверенное (NULL) остаётся — это «не смотрели», а не
         # «не подходит».
+        conditions.append(Tender.ai_relevant.is_not(False))
+    if filters.hide_ai_rejected:
         conditions.append(Tender.ai_relevant.is_not(False))
     if filters.only_ai_selected:
         conditions.append(Tender.ai_relevant.is_(True))
@@ -705,10 +757,19 @@ def _build_conditions(filters: TenderFilters) -> list:
                 select(TenderTagLink.tender_id).where(TenderTagLink.tag_id.in_(filters.tag_ids))
             )
         )
-    if filters.okpd2_prefix:
+    if filters.okpd2_prefixes:
         # Именно префикс, а не точное совпадение: ОКПД2 иерархичен, и «26.51» должно
         # находить в том числе 26.51.63.130 (Приложение F ТЗ).
-        conditions.append(Tender.okpd2_code.ilike(f"{filters.okpd2_prefix}%"))
+        conditions.append(
+            or_(
+                *(
+                    Tender.okpd2_code.startswith(prefix, autoescape=True)
+                    for prefix in filters.okpd2_prefixes
+                )
+            )
+        )
+    if filters.relevance_profiles:
+        conditions.append(_profiles_condition(filters.relevance_profiles, filters.relevance_profiles_mode))
     if filters.win_percentage_min is not None or filters.win_percentage_max is not None:
         percentage = mirtek_win_percentage_subquery()
         if filters.win_percentage_min is not None:
@@ -899,3 +960,83 @@ def get_tender_stats(db: Session, feed: str | None = None) -> dict:
     ).all()
     by_status = {(status or "unknown"): count for status, count in rows}
     return {"total": total, "by_status": by_status}
+
+
+# --- воронка отбора ---------------------------------------------------------------------------
+
+
+def _profile_applies(scope: ProfileScope):
+    return true() if scope.source_ids is None else Tender.source_id.in_(list(scope.source_ids))
+
+
+def _profile_matched(scope: ProfileScope):
+    from app.models.relevance_profile import RelevanceProfileMatch
+
+    return Tender.id.in_(
+        select(RelevanceProfileMatch.tender_id).where(
+            RelevanceProfileMatch.profile_id == scope.profile_id
+        )
+    )
+
+
+def _count_where(db: Session, base: TenderFilters, *extra) -> int:
+    query = select(func.count()).select_from(Tender)
+    conditions = _build_conditions(base) + list(extra)
+    if conditions:
+        query = query.where(and_(*conditions))
+    return db.scalar(query) or 0
+
+
+def selection_funnel(db: Session, filters: TenderFilters) -> dict:
+    """Путь закупок от сбора до списка — с числом на каждом слое (05.10.2026).
+
+    Отвечает на вопрос «почему я вижу это и не вижу того»: сколько собрано в канале, сколько
+    прошло выбранные профили (и сколько отобрал каждый), сколько скрыла модель и сколько
+    отрезали остальные фильтры. Слои — в том же порядке, в каком их применяет список, поэтому
+    последнее число совпадает с итогом списка.
+    """
+
+    from dataclasses import replace
+
+    base = TenderFilters(feed=filters.feed, bookmarked_by_user_id=filters.bookmarked_by_user_id)
+    collected = count_tenders(db, filters=base)
+
+    profiles_layer = replace(
+        base,
+        relevance_profiles=filters.relevance_profiles,
+        relevance_profiles_mode=filters.relevance_profiles_mode,
+    )
+    after_profiles = (
+        count_tenders(db, filters=profiles_layer) if filters.relevance_profiles else collected
+    )
+    per_profile = []
+    for scope in filters.relevance_profiles:
+        in_scope = _count_where(db, base, _profile_applies(scope))
+        per_profile.append(
+            {
+                "profile_id": scope.profile_id,
+                "in_scope": in_scope,
+                "matched": _count_where(db, base, _profile_applies(scope), _profile_matched(scope))
+                if in_scope
+                else 0,
+            }
+        )
+    untouched = 0
+    if filters.relevance_profiles and any(s.source_ids is not None for s in filters.relevance_profiles):
+        untouched = _count_where(
+            db, base, and_(*(~_profile_applies(s) for s in filters.relevance_profiles))
+        )
+
+    ai_layer = replace(profiles_layer, hide_ai_rejected=filters.hide_ai_rejected)
+    after_ai = count_tenders(db, filters=ai_layer) if filters.hide_ai_rejected else after_profiles
+    shown = count_tenders(db, filters=filters)
+    return {
+        "collected": collected,
+        "after_profiles": after_profiles,
+        "profiles": per_profile,
+        "untouched_by_profiles": untouched,
+        "profiles_mode": filters.relevance_profiles_mode,
+        "ai_enabled": filters.hide_ai_rejected,
+        "after_ai": after_ai,
+        "shown": shown,
+    }

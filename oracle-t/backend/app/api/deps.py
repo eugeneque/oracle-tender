@@ -50,3 +50,54 @@ def require_role(*allowed_roles: UserRole):
 
 
 require_admin = require_role(UserRole.ADMIN)
+
+
+def parse_okpd2(values: list[str] | None) -> list[str]:
+    """Префиксы ОКПД2 из query: некорректный код — 422, а не молча пустая выдача."""
+
+    from app.services import okpd2_service
+
+    try:
+        return okpd2_service.clean_prefixes(values)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+def resolve_relevance_profiles(db, profile_ids, *, include_defaults: bool = False):
+    """Профили для фильтра списка: досчитывает совпадения и собирает площадки каждого.
+
+    Нет профиля — 404 с пояснением: молча отдать «ничего не подошло» значило бы показать
+    пустой список вместо объяснения, что профиль удалили.
+    """
+
+    from sqlalchemy import select
+
+    profile_ids = list(profile_ids or [])
+    if include_defaults:
+        # «Общие профили по умолчанию» — то, что раньше было галочкой «Только прошедшие
+        # профиль»: действующие общие профили, тем же механизмом, что и выбранные вручную.
+        from app.services import relevance_service
+
+        profile_ids = [p.id for p in relevance_service.default_profiles(db)] + profile_ids
+    if not profile_ids:
+        return []
+
+    from app.models.source import Source
+    from app.services import relevance_profile_service
+    from app.services.tender_service import ProfileScope
+
+    result = []
+    for profile_id in dict.fromkeys(profile_ids):
+        profile = relevance_profile_service.prepare_for_filter(db, profile_id)
+        if profile is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Профиль релевантности не найден — возможно, его удалили",
+            )
+        source_ids = None
+        if profile.source_keys:
+            source_ids = tuple(
+                db.scalars(select(Source.id).where(Source.key.in_(profile.source_keys)))
+            )
+        result.append(ProfileScope(profile_id=profile.id, source_ids=source_ids))
+    return result

@@ -1,6 +1,7 @@
 import {
   ArrowRight,
   Clock,
+  History,
   LogOut,
   Settings,
   Star,
@@ -225,6 +226,10 @@ export function AccountMenu() {
                   <Link to="/account" onClick={() => setIsOpen(false)} className={itemClass}>
                     <Settings size={15} />
                     Настройки учётной записи
+                  </Link>
+                  <Link to="/changelog" onClick={() => setIsOpen(false)} className={itemClass}>
+                    <History size={15} />
+                    История обновлений
                   </Link>
                   {user?.role === "admin" && (
                     <Link to="/users" onClick={() => setIsOpen(false)} className={itemClass}>

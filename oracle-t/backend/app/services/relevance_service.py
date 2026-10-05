@@ -34,7 +34,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.manufacturer import Manufacturer
+from app.models.relevance_profile import CollectionTerm, RelevanceProfile
 from app.models.search_profile import KeywordMatchMode, SearchKeywordGroup, SearchProfile
+from app.models.source import Source
 from app.models.tender import Tender
 from app.seed.search_profile_data import (
     DEFAULT_AI_SCORE_THRESHOLD,
@@ -62,12 +64,15 @@ _MAX_ENDING = 3
 
 @dataclass
 class GroupMatch:
-    """Результат проверки одной группы."""
+    """Результат проверки одного профиля (до 05.10.2026 — группы)."""
 
     group_id: uuid.UUID | None
     group_name: str
     matched: bool
     reason: str
+    # Чем совпало: "keywords" | "okpd2" | None. Нужно, чтобы закупку, совпавшую по смыслу,
+    # приписать профилю со словами, а не тому, что совпал одним кодом.
+    via: str | None = None
 
 
 @dataclass
@@ -184,85 +189,98 @@ def _fits_window(positions: list[list[int]], distance: int) -> bool:
     return False
 
 
-def check_group(tokens: list[str], group: SearchKeywordGroup) -> GroupMatch:
-    """Проверяет одну группу: сначала исключения, потом положительные ключи."""
+OKPD2_NARROW = "narrow"
+OKPD2_EITHER = "either"
 
-    for excluded in group.exclusion_keywords or []:
+
+def match_profile(
+    tokens: list[str], profile, okpd2_code: str | None = None
+) -> GroupMatch:
+    """Единый движок: подходит ли закупка профилю.
+
+    Принимает и профиль (`RelevanceProfile`), и прежнюю группу (`SearchKeywordGroup`) — поля у
+    них одинаковые. Порядок: исключения — слова — код ОКПД2. Слова и код сочетаются по
+    `okpd2_mode`: `narrow` — нужно и то и другое из заданного, `either` — достаточно одного
+    (так работали группы системного профиля: код товара ловит безликое «Поставка
+    оборудования»).
+    """
+
+    name = profile.name
+    for excluded in profile.exclusion_keywords or []:
         if matches_keyword(tokens, excluded):
-            return GroupMatch(
-                group_id=group.id,
-                group_name=group.name,
-                matched=False,
-                reason=f"исключено ключом «{excluded}»",
-            )
+            return GroupMatch(profile.id, name, False, f"исключено ключом «{excluded}»")
 
-    keywords = group.keywords or []
-    if not keywords:
-        return GroupMatch(group.id, group.name, False, "в группе нет ключевых слов")
+    keywords = profile.keywords or []
+    keyword_hit: bool | None = None
+    hits: list[str] = []
+    if keywords:
+        hits = [keyword for keyword in keywords if matches_keyword(tokens, keyword)]
+        if profile.match_mode == KeywordMatchMode.ALL.value:
+            keyword_hit = len(hits) == len(keywords)
+        else:
+            keyword_hit = bool(hits)
 
-    hits = [keyword for keyword in keywords if matches_keyword(tokens, keyword)]
-    if group.match_mode == KeywordMatchMode.ALL.value:
-        matched = len(hits) == len(keywords)
-    else:
-        matched = bool(hits)
+    codes = profile.okpd2_codes or []
+    code_hit: bool | None = None
+    if codes:
+        code_hit = bool(okpd2_code) and any(okpd2_code.startswith(code) for code in codes)
 
-    return GroupMatch(
-        group_id=group.id,
-        group_name=group.name,
-        matched=matched,
-        reason=(f"совпало: {', '.join(hits[:3])}" if matched else "нет совпадений"),
+    if keyword_hit is None and code_hit is None:
+        return GroupMatch(profile.id, name, False, "в профиле нет ни слов, ни кодов ОКПД2")
+
+    # Профиль без явного режима — «сужение» (так их заводят специалисты); прежние группы
+    # системного профиля, у которых поля нет, — «достаточно одного», как они и работали.
+    mode = getattr(profile, "okpd2_mode", None) or (
+        OKPD2_NARROW if isinstance(profile, RelevanceProfile) else OKPD2_EITHER
     )
+    if mode == OKPD2_NARROW:
+        matched = all(hit for hit in (keyword_hit, code_hit) if hit is not None)
+    else:
+        matched = bool(keyword_hit) or bool(code_hit)
+    if not matched:
+        return GroupMatch(profile.id, name, False, "нет совпадений")
+    if keyword_hit:
+        return GroupMatch(profile.id, name, True, f"совпало: {', '.join(hits[:3])}", "keywords")
+    return GroupMatch(profile.id, name, True, f"совпал код ОКПД2 {okpd2_code}", "okpd2")
 
 
-def _okpd2_matches(group: SearchKeywordGroup, okpd2_code: str | None) -> bool:
-    """Совпадает ли код ОКПД2 тендера с кодами группы (с учётом вложенности)."""
+def check_group(tokens: list[str], group) -> GroupMatch:
+    """Прежнее имя `match_profile` — без учёта кода ОКПД2."""
 
-    if not okpd2_code or not group.okpd2_codes:
-        return False
-    return any(okpd2_code.startswith(code) for code in group.okpd2_codes)
+    return match_profile(tokens, group)
 
 
 def evaluate(
     tokens: list[str],
-    groups: list[SearchKeywordGroup],
+    groups: list,
     *,
     okpd2_code: str | None = None,
 ) -> RelevanceOutcome:
-    """Применяет все группы. Достаточно одной сработавшей.
+    """Применяет набор профилей. Достаточно одного сработавшего.
 
-    Код ОКПД2 усиливает, но не заменяет ключевые слова: совпадение кода само по себе
-    засчитывается только если группа не отклонила тендер своими исключениями. Иначе закупка
-    воды по коду 26.51.63.120 попадала бы к нам через группу, где вода прямо запрещена.
+    Закупка приписывается профилю, совпавшему по словам, даже если раньше по списку стоит
+    профиль, совпавший одним кодом: само решение «прошла» от этого не меняется, но в карточке
+    и в воронке было бы написано не то, и настроить профиль по такой подсказке нельзя.
     """
 
-    active = [group for group in groups if group.is_active]
+    active = [group for group in groups if getattr(group, "is_active", True)]
     rejected: list[str] = []
-    okpd2_candidates: list[SearchKeywordGroup] = []
-
-    # Первый проход — по ключевым словам. Он идёт раньше и целиком, а не вперемешку со
-    # вторым: иначе группа, совпавшая всего лишь кодом ОКПД2, перехватывала бы тендер у
-    # группы, которая совпала по смыслу. Само решение «релевантен» от этого не менялось бы,
-    # но в карточке было бы написано не то, и настроить профиль по такой подсказке нельзя.
+    by_code: GroupMatch | None = None
     for group in active:
-        result = check_group(tokens, group)
-        if result.matched:
+        result = match_profile(tokens, group, okpd2_code)
+        if result.matched and result.via == "keywords":
             return RelevanceOutcome(True, result.group_id, result.group_name, result.reason)
-        if result.reason.startswith("исключено"):
+        if result.matched and by_code is None:
+            by_code = result
+        elif result.reason.startswith("исключено"):
             rejected.append(f"{group.name}: {result.reason}")
-            continue
-        if _okpd2_matches(group, okpd2_code):
-            okpd2_candidates.append(group)
-
-    # Второй проход — по кодам ОКПД2, среди групп, которые тендер не отклонили.
-    if okpd2_candidates:
-        group = okpd2_candidates[0]
-        return RelevanceOutcome(True, group.id, group.name, f"совпал код ОКПД2 {okpd2_code}")
-
-    reason = rejected[0] if rejected else "не совпала ни одна группа профиля"
+    if by_code is not None:
+        return RelevanceOutcome(True, by_code.group_id, by_code.group_name, by_code.reason)
+    reason = rejected[0] if rejected else "не совпал ни один профиль"
     return RelevanceOutcome(False, None, None, reason)
 
 
-# --- работа с профилем в базе -------------------------------------------------------------
+# --- работа с профилями в базе ------------------------------------------------------------
 
 
 def get_profile(db: Session) -> SearchProfile | None:
@@ -270,10 +288,11 @@ def get_profile(db: Session) -> SearchProfile | None:
 
 
 def get_or_create_profile(db: Session) -> SearchProfile:
-    """Возвращает профиль, при первом обращении создавая его с группами по образцу ТЗ.
+    """Настройки охвата; при первом обращении — с общими профилями и фразами сбора по ТЗ.
 
-    Группы засеиваются кодом, а не миграцией: это содержательные настройки, которые люди
-    будут править, и их правки не должны конфликтовать с историей миграций.
+    Засев — кодом, а не миграцией: это содержательные настройки, которые люди правят. Строка
+    `SearchProfile` служит отметкой «засеяно»: если администратор удалит все общие профили,
+    перезапуск не вернёт их обратно.
     """
 
     profile = get_profile(db)
@@ -292,30 +311,38 @@ def get_or_create_profile(db: Session) -> SearchProfile:
     db.add(profile)
     db.flush()
 
-    for item in KEYWORD_GROUPS:
-        db.add(
-            SearchKeywordGroup(
-                search_profile_id=profile.id,
-                name=item["name"],
-                keywords=item["keywords"],
-                exclusion_keywords=item["exclusion_keywords"],
-                okpd2_codes=item["okpd2_codes"],
-                search_queries=item["search_queries"],
+    has_defaults = db.scalar(select(RelevanceProfile.id).where(RelevanceProfile.is_default.is_(True)).limit(1))
+    if has_defaults is None:
+        for item in KEYWORD_GROUPS:
+            db.add(
+                RelevanceProfile(
+                    name=item["name"],
+                    keywords=item["keywords"],
+                    exclusion_keywords=item["exclusion_keywords"],
+                    okpd2_codes=item["okpd2_codes"] or [],
+                    match_mode=KeywordMatchMode.ANY.value,
+                    okpd2_mode=OKPD2_EITHER,
+                    is_default=True,
+                    source_keys=[],
+                )
             )
-        )
+    known = {phrase.lower() for phrase in db.scalars(select(CollectionTerm.phrase))}
+    for item in KEYWORD_GROUPS:
+        for phrase in item["search_queries"]:
+            if phrase.strip() and phrase.strip().lower() not in known:
+                known.add(phrase.strip().lower())
+                db.add(CollectionTerm(phrase=phrase.strip()))
     db.flush()
-    logger.info(f"Создан профиль релевантности с {len(KEYWORD_GROUPS)} группами")
+    logger.info(f"Созданы общие профили отбора ({len(KEYWORD_GROUPS)}) и фразы сбора")
     return profile
 
 
 def bootstrap(db: Session) -> dict[str, int]:
-    """Заводит профиль и применяет его к тендерам без отметки. Вызывается при старте.
+    """Заводит профили и применяет их к закупкам без отметки. Вызывается при старте.
 
-    До этого профиль создавался только при первом открытии раздела в настройках. На сервере,
-    где туда никто не заходил, отбор не работал вовсе: `active_groups` отдавал пустой список,
-    каждый собранный тендер оставался с `passed_relevance_filter = NULL`, а список трактует
-    NULL как «показывать». В итоге вся выдача ЭТП ГПБ — бумага, светильники, грозозащита —
-    висела в списке «по профилю» как новые закупки.
+    Пока профиль создавался лениво (при первом открытии настроек), на сервере без такого
+    визита отбор не работал вовсе: каждый собранный тендер оставался с NULL, а список
+    трактует NULL как «показывать» — вся выдача ЭТП ГПБ висела «по профилю».
     """
 
     get_or_create_profile(db)
@@ -323,36 +350,34 @@ def bootstrap(db: Session) -> dict[str, int]:
     return backfill(db, only_unprocessed=True)
 
 
-def active_groups(db: Session) -> list[SearchKeywordGroup]:
-    profile = get_profile(db)
-    if profile is None:
-        return []
+def default_profiles(db: Session) -> list[RelevanceProfile]:
+    """Действующие общие профили — то, что отбирает закупки по умолчанию."""
+
     return list(
         db.scalars(
-            select(SearchKeywordGroup)
-            .where(
-                SearchKeywordGroup.search_profile_id == profile.id,
-                SearchKeywordGroup.is_active.is_(True),
-            )
-            .order_by(SearchKeywordGroup.name)
+            select(RelevanceProfile)
+            .where(RelevanceProfile.is_default.is_(True), RelevanceProfile.is_active.is_(True))
+            .order_by(RelevanceProfile.name)
         )
     )
 
 
+def active_groups(db: Session) -> list[RelevanceProfile]:
+    """Прежнее имя `default_profiles` (до 05.10.2026 отбирали группы)."""
+
+    return default_profiles(db)
+
+
 def search_queries(db: Session) -> list[str]:
-    """Фразы для поиска на площадках — объединение по всем активным группам.
+    """Фразы для поиска на площадках — то, чем система реально ходит за закупками."""
 
-    Именно они заменили захардкоженные в адаптерах две фразы: пока охват жил в константах
-    кода, целые типы закупок (поверка, монтаж, обслуживание) вообще не попадали в систему.
-    """
-
-    seen: list[str] = []
-    for group in active_groups(db):
-        for query in group.search_queries or []:
-            normalized = query.strip()
-            if normalized and normalized not in seen:
-                seen.append(normalized)
-    return seen
+    return list(
+        db.scalars(
+            select(CollectionTerm.phrase)
+            .where(CollectionTerm.is_active.is_(True))
+            .order_by(CollectionTerm.created_at, CollectionTerm.phrase)
+        )
+    )
 
 
 def tender_text(tender: Tender) -> str:
@@ -362,53 +387,75 @@ def tender_text(tender: Tender) -> str:
     return " ".join(part for part in parts if part)
 
 
-def apply_to_tender(
-    db: Session, tender: Tender, groups: list[SearchKeywordGroup] | None = None
-) -> RelevanceOutcome:
-    """Проставляет тендеру результат фильтра. Ничего не удаляет и не скрывает."""
+def _applicable(profiles: list, source_key: str | None) -> list:
+    """Профили, которые действуют на площадку: без привязки — на все."""
 
-    groups = active_groups(db) if groups is None else groups
-    if not groups:
-        # Профиль не настроен — честно оставляем `None` («не проверяли»), а не `False`.
-        return RelevanceOutcome(True, None, None, "профиль релевантности не настроен")
+    return [
+        profile
+        for profile in profiles
+        if not getattr(profile, "source_keys", None) or (source_key in profile.source_keys)
+    ]
 
-    outcome = evaluate(tokenize(tender_text(tender)), groups, okpd2_code=tender.okpd2_code)
+
+def _decide(profiles: list, tender, source_key: str | None) -> RelevanceOutcome | None:
+    applicable = _applicable(profiles, source_key)
+    if not applicable:
+        # Ни один общий профиль не привязан к этой площадке — она не сужается (то же правило,
+        # что на странице тендеров). Закупка считается прошедшей, иначе модель её не проверит.
+        return RelevanceOutcome(True, None, None, "на эту площадку общие профили не действуют")
+    return evaluate(tokenize(tender_text(tender)), applicable, okpd2_code=tender.okpd2_code)
+
+
+def _set_mark(tender: Tender, outcome: RelevanceOutcome) -> None:
     tender.passed_relevance_filter = outcome.passed
-    tender.matched_keyword_group_id = outcome.group_id
+    profile_id = outcome.group_id if isinstance(outcome.group_id, uuid.UUID) else None
+    tender.matched_profile_id = profile_id
+    tender.matched_keyword_group_id = None
+
+
+def apply_to_tender(
+    db: Session, tender: Tender, groups: list | None = None
+) -> RelevanceOutcome:
+    """Проставляет закупке отметку общих профилей. Ничего не удаляет и не скрывает."""
+
+    profiles = default_profiles(db) if groups is None else groups
+    if not profiles:
+        # Профили не настроены — честно оставляем `None` («не проверяли»), а не `False`.
+        return RelevanceOutcome(True, None, None, "общие профили не настроены")
+
+    source = db.get(Source, tender.source_id) if tender.source_id else None
+    outcome = _decide(profiles, tender, source.key if source else None)
+    if outcome is not None:
+        _set_mark(tender, outcome)
     return outcome
 
 
 def backfill(db: Session, *, only_unprocessed: bool = False) -> dict[str, int]:
-    """Прогоняет фильтр по уже собранным тендерам.
+    """Прогоняет общие профили по уже собранным закупкам.
 
-    Нужен после каждой правки профиля: без пересчёта старые записи остались бы с отметками
-    от прежних настроек, и список показывал бы одно, а профиль означал другое.
-
-    `only_unprocessed` — обработать только те, у которых отметки ещё нет. Так дозаполняют
-    накопленный архив, не трогая уже посчитанное.
+    Вызывается после правки общего профиля и при старте (`only_unprocessed` — только записи
+    без отметки), чтобы отметки не оставались от прежних настроек.
     """
 
-    groups = active_groups(db)
-    if not groups:
+    profiles = default_profiles(db)
+    if not profiles:
         return {"processed": 0, "passed": 0, "rejected": 0}
 
+    source_keys = dict(db.execute(select(Source.id, Source.key)).all())
     query = select(Tender)
     if only_unprocessed:
         query = query.where(Tender.passed_relevance_filter.is_(None))
 
     processed = passed = 0
     for tender in db.scalars(query):
-        outcome = evaluate(
-            tokenize(tender_text(tender)), groups, okpd2_code=tender.okpd2_code
-        )
-        tender.passed_relevance_filter = outcome.passed
-        tender.matched_keyword_group_id = outcome.group_id
+        outcome = _decide(profiles, tender, source_keys.get(tender.source_id))
+        _set_mark(tender, outcome)
         processed += 1
         passed += int(outcome.passed)
 
     db.commit()
     logger.info(
-        f"Профиль релевантности применён к {processed} тендерам: прошли {passed}, "
+        f"Общие профили применены к {processed} закупкам: прошли {passed}, "
         f"отсеяно {processed - passed}"
     )
     return {"processed": processed, "passed": passed, "rejected": processed - passed}

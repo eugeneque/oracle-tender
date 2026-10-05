@@ -12,7 +12,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, parse_okpd2
 from app.db.session import get_db
 from app.models.source import FEED_PATTERN
 from app.models.user import User
@@ -41,7 +41,7 @@ def analytics_filters(  # noqa: PLR0913 - по параметру на филь�
     meter_kind: list[str] | None = Query(default=None, description="Типы приборов учёта (METER_KINDS)"),
     tender_status: list[str] | None = Query(default=None),
     relevance_status: list[str] | None = Query(default=None),
-    okpd2: str | None = Query(default=None, max_length=20),
+    okpd2: list[str] | None = Query(default=None, description="Префиксы ОКПД2 (можно несколько)"),
     # Аналитика по умолчанию — по стандартному каналу: канал Госплана почти целиком
     # повторяет ЕИС, и без этого условия каждая закупка считалась бы дважды.
     feed: str = Query(default="standard", pattern=FEED_PATTERN),
@@ -57,7 +57,7 @@ def analytics_filters(  # noqa: PLR0913 - по параметру на филь�
         meter_kinds=meter_kind or [],
         statuses=tender_status or [],
         relevance_statuses=relevance_status or [],
-        okpd2_prefix=okpd2,
+        okpd2_prefixes=parse_okpd2(okpd2),
     )
 
 

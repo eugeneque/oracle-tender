@@ -65,6 +65,9 @@ EXCLUDED_TABLES = frozenset(
         "background_jobs",
         "notifications",
         "tender_bookmarks",
+        # Совпадения профилей — производные, пересчитываются при первом обращении. Сами
+        # профили в снимке: среди них общие профили отбора — настройка системы.
+        "relevance_profile_matches",
         # Очередь опроса каталога: история прошлых прогонов этой машины. Без неё новая
         # установка при старте опрашивает каталог заново (`app/services/startup_refresh.py`).
         "catalog_lookup_queue",

@@ -197,7 +197,7 @@ def test_filter_by_okpd2_matches_prefix(db_session):
     other = _tender(db_session, source, okpd2_code="33.13.11.000")
 
     found = {
-        tender.id for tender in list_tenders(db_session, filters=TenderFilters(okpd2_prefix="26.51"))
+        tender.id for tender in list_tenders(db_session, filters=TenderFilters(okpd2_prefixes=["26.51"]))
     }
     assert matching.id in found
     assert other.id not in found

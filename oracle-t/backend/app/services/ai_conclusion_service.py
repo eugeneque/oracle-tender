@@ -170,6 +170,20 @@ _FIT_PROMPT = """Ты — руководитель тендерного отде
   замечание по существу — с чем согласен и что изменил в заключении, а где остаёшься при
   своём и почему (со ссылкой на факт). Без замечаний — пустая строка.
 
+Порядок рассуждения — строго такой, и headline называет ПЕРВУЮ сработавшую причину:
+1. Предмет закупки — приборы учёта электроэнергии или нет.
+2. Раздел «ЗАТОЧКА ТЗ ПОД ТОВАРНЫЙ ЗНАК», если он есть. ТЗ под чужой знак и эквивалент не
+   допускается — "not_fit", participate=false, headline: «Не проходим: ТЗ под приборы
+   <производитель> (<модели>), эквивалент не допускается». Этот производитель — первым в
+   competitors со статусом "fits", даже если матрица не нашла его точных исполнений в каталоге:
+   ТЗ названо его моделями. Знак наш — это довод «за». Эквивалент допускается — сравнивай
+   по характеристикам, как обычно.
+3. Приборы — по матрице соответствия (правила ниже).
+4. Требования к участнику (МСП, лицензии, опыт, реестры) — последними. Они не бывают главной
+   причиной, если по пунктам 1-3 уже есть ответ. Статус компании утверждай только по данным
+   входа; если хотя бы одно юрлицо группы требованию удовлетворяет (раздел «СТАТУС МСП ЮРЛИЦ
+   ГРУППЫ»), это оговорка «подавать от <юрлицо>», а не «не подходим».
+
 Правила:
 - Итог матрицы соответствия («проходит / с оговорками / не проходит») — главный источник
   по приборам. Не противоречь ему без факта из входных данных. Если матрица по МИРТЕК
@@ -179,7 +193,11 @@ _FIT_PROMPT = """Ты — руководитель тендерного отде
   приборами в статусе "unchecked", или "unknown".
 - Замечание специалиста — это знание человека, который читал документацию. Принимай его,
   если оно не опровергается фактами входных данных; если опровергается — объясни чем.
-- Обязательного допуска нет у компании — "not_fit" и participate=false.
+- Обязательного допуска (СРО, лицензия, запись в реестре) нет ни у одного юрлица группы —
+  "not_fit" и participate=false; но и тогда причина в headline — после пунктов 1-3.
+- Если замечание специалиста указывает на причину из пунктов 1-3 (например, «ТЗ под приборы
+  другого производителя») и входные данные её не опровергают — заключение перестраивается
+  вокруг неё, а не повторяет прежний вывод.
 - Не выдумывай приборов, производителей и фактов, которых нет во входных данных.
 Отвечай по-русски, без markdown."""
 
@@ -243,6 +261,8 @@ class ConclusionFacts:
     # Сколько требований к товару извлечено из ТЗ: без него «матрица не построена» не
     # отличить от «ТЗ не разобрано» — а причины и действия у них разные.
     product_requirements: int = 0
+    # ТЗ под конкретный товарный знак (05.10.2026) — найдено кодом, см. `detect_brand_lock`.
+    brand_lock: "BrandLock | None" = None
 
 
 _VERDICT_TEXT = {
@@ -257,6 +277,195 @@ _CRITICALITY_TEXT = {
     Criticality.IMPORTANT.value: "важное",
     Criticality.MINOR.value: "второстепенное",
 }
+
+
+# --- заточка ТЗ под товарный знак ------------------------------------------------------------
+#
+# Случай 32616408289 (05.10.2026): в ТЗ шесть критичных требований «Наименование: Прибор учета
+# МИР С-05.10-230-5(80)-PZ1В-KNQ-E-D…», а в документации — «заказчик закупает товар
+# определённого товарного знака ввиду его несовместимости с другими». Матрица этого не видит:
+# точных исполнений нет в каталоге ни у кого, и все производители, включая сам МИР, получали
+# «не хватает данных». Модель, не имея факта, выводила заключение из требования МСП. Факт
+# теперь находит код и подаёт модели первым — это главный ответ «почему мы не проходим».
+
+# Фраза о закупке товара определённого товарного знака (ч. 6.1 ст. 3 223-ФЗ, ст. 33 44-ФЗ)
+# и прямой запрет эквивалента.
+_TRADEMARK_CLAUSE_RE = re.compile(
+    r"[^.;]{0,160}(?:товар\w*\s+(?:определенн|определённ|конкретн)\w*\s+товарн\w*\s+знак\w*"
+    r"|эквивалент\w*\s+не\s+допуска\w*|без\s+(?:права\s+)?(?:предоставлени\w+\s+)?эквивалент\w*"
+    r"|несовместимост\w*\s+с\s+товарами)[^.;]{0,200}",
+    re.IGNORECASE,
+)
+_EQUIVALENT_ALLOWED_RE = re.compile(r"или\s+эквивалент", re.IGNORECASE)
+# Сколько текста документации просматривать: шапка извещения и ТЗ, а не весь проект договора.
+_DOC_SCAN_LIMIT = 400_000
+
+
+@dataclass
+class BrandLock:
+    """ТЗ называет модели одного производителя: кто он и чем это подтверждается."""
+
+    manufacturer: Manufacturer
+    is_ours: bool
+    # Модели, как они названы в ТЗ (без повторов, до 8).
+    models: list[str]
+    critical_mentions: int
+    total_mentions: int
+    # Фраза из документации о товарном знаке / запрете эквивалента, если нашлась.
+    clause: str | None
+    # True — в ТЗ есть «или эквивалент»; False — эквивалент прямо запрещён или закупается товар
+    # определённого знака; None — документация об этом молчит.
+    equivalent_allowed: bool | None
+
+
+def _brand_pattern(manufacturer: Manufacturer) -> re.Pattern[str] | None:
+    """Марка, за которой идёт обозначение модели с цифрой: «МИР С-05», «CE308», «Нартис И300».
+
+    Цифра в обозначении обязательна: «Матрица», «Мир», «Пульсар» — обычные слова, и без неё
+    «матрица соответствия» или «в мире» считались бы упоминанием производителя. Короткие
+    марки сверяются с учётом регистра по той же причине.
+    """
+
+    brand = (manufacturer.brand_name or "").split("(")[0].strip()
+    if len(brand) < 2:
+        return None
+    flags = 0 if len(brand) <= 4 else re.IGNORECASE
+    return re.compile(
+        rf"(?<![\w-]){re.escape(brand)}[\s-]+(?=[\w.()/-]*\d)[\w.()/-]+", flags
+    )
+
+
+def _documents_text(db: Session, tender: Tender) -> str:
+    from app.models.tender_document import TenderDocument
+
+    ids = [tender.id] + ([tender.analysis_tender_id] if tender.analysis_tender_id else [])
+    texts = db.scalars(
+        select(TenderDocument.extracted_text).where(
+            TenderDocument.tender_id.in_(ids), TenderDocument.extracted_text.is_not(None)
+        )
+    )
+    return "\n".join(texts)[:_DOC_SCAN_LIMIT]
+
+
+def detect_brand_lock(
+    db: Session, tender: Tender, requirements: list[Requirement], manufacturers: list[Manufacturer]
+) -> BrandLock | None:
+    """Ищет производителя, чьи модели названы в требованиях к товару.
+
+    Достаточно одного производителя с упоминаниями в требованиях: смешанное ТЗ («МИР С-05 или
+    Энергомера CE208») тоже говорит о заточке, но под нескольких — тогда берётся тот, кого
+    назвали чаще, а модели остальных в заключение не попадают как запрет.
+    """
+
+    best: BrandLock | None = None
+    for manufacturer in manufacturers:
+        pattern = _brand_pattern(manufacturer)
+        if pattern is None:
+            continue
+        models: list[str] = []
+        critical = total = 0
+        for requirement in requirements:
+            text = f"{requirement.text or ''} {requirement.normalized_text or ''}"
+            found = [match.group(0).strip(" .,;") for match in pattern.finditer(text)]
+            if not found:
+                continue
+            total += 1
+            if requirement.criticality == Criticality.CRITICAL.value:
+                critical += 1
+            for model in found:
+                if model not in models:
+                    models.append(model)
+        if total == 0:
+            continue
+        # «МИР С-05.10-230-5(80)-» — обрезок полного обозначения, когда в ТЗ оно перенесено
+        # через пробел; в список идёт только полное.
+        models = [m for m in models if not any(o != m and o.startswith(m) for o in models)]
+        if best is None or total > best.total_mentions:
+            best = BrandLock(
+                manufacturer=manufacturer,
+                is_ours=bool(manufacturer.is_mirtek),
+                models=models[:8],
+                critical_mentions=critical,
+                total_mentions=total,
+                clause=None,
+                equivalent_allowed=None,
+            )
+    if best is None:
+        return None
+
+    documents = _documents_text(db, tender)
+    requirement_text = " ".join(f"{r.text or ''} {r.normalized_text or ''}" for r in requirements)
+    clause = _TRADEMARK_CLAUSE_RE.search(documents) or _TRADEMARK_CLAUSE_RE.search(requirement_text)
+    if clause:
+        best.clause = re.sub(r"\s+", " ", clause.group(0)).strip()[:400]
+        best.equivalent_allowed = False
+    elif _EQUIVALENT_ALLOWED_RE.search(documents) or _EQUIVALENT_ALLOWED_RE.search(requirement_text):
+        best.equivalent_allowed = True
+    return best
+
+
+def brand_lock_block(lock: BrandLock) -> str:
+    who = manufacturer_label(lock.manufacturer)
+    lines = ["ЗАТОЧКА ТЗ ПОД ТОВАРНЫЙ ЗНАК (найдено кодом по тексту ТЗ):"]
+    lines.append(
+        f"  ТЗ называет модели производителя «{who}» ({lock.manufacturer.legal_name}): "
+        f"{'; '.join(lock.models)} — в {lock.total_mentions} требованиях к товару, "
+        f"из них критичных {lock.critical_mentions}."
+    )
+    if lock.clause:
+        lines.append(f"  В документации: «{lock.clause}».")
+    if lock.equivalent_allowed is True:
+        lines.append("  Эквивалент допускается («или эквивалент») — сравнивай по характеристикам.")
+    elif lock.equivalent_allowed is False:
+        lines.append("  Эквивалент не допускается: закупается товар именно этого товарного знака.")
+    else:
+        lines.append("  Про эквивалент документация молчит.")
+    if lock.is_ours:
+        lines.append("  Это наш товарный знак — ТЗ написано под приборы МИРТЕК.")
+    elif lock.equivalent_allowed is False:
+        lines.append(
+            f"  Значит, поставить можно только приборы «{who}»: наши и других производителей не "
+            "пройдут, сколько бы требований они ни выполняли по характеристикам."
+        )
+    else:
+        lines.append(
+            f"  Если эквивалент не допускается — поставить можно только приборы «{who}»; это нужно "
+            "проверить по документации. Если предмет — работы или услуги с этими приборами "
+            "(поверка, монтаж), а не их поставка, это не заточка под знак."
+        )
+    return "\n".join(lines)
+
+
+# --- статус МСП по юрлицам группы ----------------------------------------------------------
+
+_MSP_RE = re.compile(r"малого\s+и\s+среднего\s+предпринимательств|\bМСП\b", re.IGNORECASE)
+
+
+def msp_block(db: Session, participant_requirements: list[Requirement]) -> str | None:
+    """Закупка только для субъектов МСП — какие юрлица группы под это подходят.
+
+    Без этого блока модель видела одну строку профиля «Реестр МСП: не входит» у основного
+    юрлица и делала из неё главный вывод, хотя у группы есть микропредприятия, от имени
+    которых участие возможно.
+    """
+
+    texts = [f"{r.text or ''} {r.normalized_text or ''}" for r in participant_requirements]
+    if not any(_MSP_RE.search(text) for text in texts):
+        return None
+    from app.models.company_profile import CompanyProfile
+
+    lines = ["СТАТУС МСП ЮРЛИЦ ГРУППЫ (в закупке есть требование к участнику о статусе МСП):"]
+    profiles = list(db.scalars(select(CompanyProfile)))
+    if not profiles:
+        return None
+    for profile in profiles:
+        status = ((profile.rusprofile_data or {}).get("msp_status") or "нет данных").strip()
+        lines.append(f"  - {profile.legal_name or 'юрлицо без названия'}: {status}")
+    lines.append(
+        "  Это требование к участнику, а не к прибору. Если хотя бы одно юрлицо группы — "
+        "субъект МСП, участвовать можно от его имени: это оговорка, а не причина «не подходим»."
+    )
+    return "\n".join(lines)
 
 
 def _product_requirements(db: Session, tender: Tender) -> list[Requirement]:
@@ -378,12 +587,31 @@ def collect_facts(db: Session, tender: Tender) -> ConclusionFacts:
     if not compared:
         lines.append("  матрица не построена — по конкурентам данных соответствия нет")
 
+    # Заточка под товарный знак — в начало: это главный факт, когда он есть, и модель должна
+    # увидеть его раньше процентов матрицы.
+    lock = detect_brand_lock(db, tender, requirements, [item.manufacturer for item in facts])
+    if lock is not None:
+        lines.insert(0, brand_lock_block(lock) + "\n")
+
+    participant_requirements = list(
+        db.scalars(
+            select(Requirement).where(
+                Requirement.tender_id == tender.id,
+                Requirement.kind == RequirementKind.PARTICIPANT.value,
+            )
+        )
+    )
+    msp = msp_block(db, participant_requirements)
+    if msp:
+        lines.append("\n" + msp)
+
     return ConclusionFacts(
         text="\n".join(lines),
         mirtek=mirtek,
         others=others,
         matrix_built=matrix_built,
         product_requirements=len(requirements),
+        brand_lock=lock,
     )
 
 
@@ -829,6 +1057,11 @@ def compute_conclusion(
     # наименованию закупки, а проверять прибор было не с чем.
     if fit == Fit.FIT and not facts.matrix_built:
         fit = Fit.FIT_WITH_CAVEATS
+    # ТЗ под чужой товарный знак без эквивалента — «не проходим» независимо от ответа модели:
+    # характеристики тут ничего не решают.
+    lock = facts.brand_lock
+    if lock is not None and not lock.is_ours and lock.equivalent_allowed is False:
+        fit = Fit.NOT_FIT
 
     conclusion: dict = {
         "fit": fit,

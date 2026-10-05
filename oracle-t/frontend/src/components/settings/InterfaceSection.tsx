@@ -2,9 +2,10 @@ import { Moon } from "lucide-react";
 
 import { useTheme } from "../../hooks/useTheme";
 import { NavLayoutSection } from "./NavLayoutSection";
+import { TendersViewSection } from "./TendersViewSection";
 import { SettingCard, SettingsGroup, SettingsPanel, Toggle } from "./ui";
 
-/** Вкладка «Интерфейс»: личные настройки вида — тема и расположение меню. Хранятся в этом
+/** Вкладка «Интерфейс»: личные настройки вида — тема, расположение меню и вид списка тендеров. Хранятся в этом
  * браузере и на других пользователей не влияют. */
 export function InterfaceSection() {
   const { theme, setTheme } = useTheme();
@@ -32,6 +33,7 @@ export function InterfaceSection() {
         />
       </SettingsGroup>
       <NavLayoutSection />
+      <TendersViewSection />
     </SettingsPanel>
   );
 }

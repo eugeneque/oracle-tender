@@ -5,7 +5,8 @@
 кэширует у себя и рисует из него все выпадающие списки.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,6 +16,7 @@ from app.models.region import FederalDistrict, Region, RegionResponsible
 from app.models.user import User
 from app.schemas.analytics import RegionResponsibleOut, RegionResponsibleUpdate
 from app.schemas.tender import FederalDistrictOut, RegionOut
+from app.services import okpd2_service
 from app.services.audit import log_action
 
 router = APIRouter(prefix="/dictionaries", tags=["dictionaries"])
@@ -104,3 +106,54 @@ def put_region_responsible(
         "manager_name": record.manager_name,
         "updated_at": record.updated_at,
     }
+
+
+class OkpdNodeOut(BaseModel):
+    code: str
+    name: str
+    parent: str | None
+    is_leaf: bool
+    has_children: bool
+    # Что записывается в фильтр при выборе узла: у раздела-буквы — коды его классов.
+    select_codes: list[str]
+
+
+def _node_out(node: okpd2_service.OkpdNode) -> OkpdNodeOut:
+    return OkpdNodeOut(
+        code=node.code,
+        name=node.name,
+        parent=node.parent,
+        is_leaf=node.is_leaf,
+        has_children=node.has_children,
+        select_codes=list(node.select_codes),
+    )
+
+
+@router.get("/okpd2", response_model=list[OkpdNodeOut])
+def get_okpd2_children(
+    parent: str | None = Query(default=None, max_length=20, description="Код или буква раздела; пусто — разделы"),
+    _user: User = Depends(get_current_user),
+) -> list[OkpdNodeOut]:
+    """Дочерние узлы классификатора ОКПД2: дерево раскрывается по одному уровню за раз."""
+
+    if parent is not None and okpd2_service.get_node(parent) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Код ОКПД2 не найден")
+    return [_node_out(node) for node in okpd2_service.children_of(parent)]
+
+
+@router.get("/okpd2/search", response_model=list[OkpdNodeOut])
+def search_okpd2(
+    q: str = Query(min_length=2, max_length=100),
+    _user: User = Depends(get_current_user),
+) -> list[OkpdNodeOut]:
+    return [_node_out(node) for node in okpd2_service.search(q)]
+
+
+@router.get("/okpd2/lookup", response_model=list[OkpdNodeOut])
+def lookup_okpd2(
+    code: list[str] = Query(default_factory=list, max_length=200),
+    _user: User = Depends(get_current_user),
+) -> list[OkpdNodeOut]:
+    """Названия для уже выбранных кодов (подписи в чипах)."""
+
+    return [_node_out(node) for node in okpd2_service.lookup(code)]
