@@ -1550,22 +1550,95 @@ export interface EgrulCandidate {
 
 // --- Профиль релевантности (раздел 5.1.1 ТЗ) ---
 
-export interface KeywordGroup {
+/** Узел классификатора ОКПД2 (`GET /dictionaries/okpd2`). Дерево раскрывается по уровню. */
+export interface OkpdNode {
+  /** Код или буква раздела (A–U). */
+  code: string;
+  name: string;
+  parent: string | null;
+  is_leaf: boolean;
+  has_children: boolean;
+  /** Что попадает в фильтр при выборе узла: у раздела-буквы — коды его классов. */
+  select_codes: string[];
+}
+
+/** Личный профиль релевантности специалиста — фильтр на странице тендеров. */
+export interface UserRelevanceProfile {
   id: string;
   name: string;
-  /** Синтаксис: `слово*` — по основе, `(a* b*)~N` — в пределах N слов друг от друга. */
+  description: string | null;
   keywords: string[];
-  /** Совпало — группа не срабатывает, даже если совпали положительные ключи. */
   exclusion_keywords: string[];
-  okpd2_codes: string[] | null;
-  /** Фразы, которыми группа ходит в поиск площадок (без стемминга и близости). */
-  search_queries: string[];
+  okpd2_codes: string[];
+  match_mode: "any" | "all";
+  /** Как сочетать слова и коды ОКПД2: `narrow` — нужно и то и другое, `either` — достаточно одного. */
+  okpd2_mode: "narrow" | "either";
+  /** Площадки, на которые действует профиль (ключи источников); пусто — на все. */
+  source_keys: string[];
+  /** Общий профиль: выбран по умолчанию у всех, ведёт администратор. */
+  is_default: boolean;
+  is_active: boolean;
+  owner_id: string | null;
+  owner_name: string | null;
+  can_edit: boolean;
+  /** Заполнено в ответе на сохранение; в списке — null. */
+  matched_count: number | null;
+  updated_at: string;
+}
+
+export type UserRelevanceProfileInput = Pick<
+  UserRelevanceProfile,
+  | "name"
+  | "description"
+  | "keywords"
+  | "exclusion_keywords"
+  | "okpd2_codes"
+  | "match_mode"
+  | "okpd2_mode"
+  | "source_keys"
+  | "is_default"
+  | "is_active"
+>;
+
+/** Правила профиля без имени — для предпросмотра «что отберёт». */
+export type ProfileRules = Pick<
+  UserRelevanceProfile,
+  "keywords" | "exclusion_keywords" | "okpd2_codes" | "match_mode" | "okpd2_mode" | "source_keys"
+>;
+
+export interface ProfilePreview {
+  count: number;
+  total: number;
+  samples: { id: string; title: string; okpd2_code: string | null; publish_date: string | null }[];
+}
+
+/** Фраза сбора: чем система ищет закупки на площадках. */
+export interface CollectionTerm {
+  id: string;
+  phrase: string;
   is_active: boolean;
 }
 
-export interface RelevanceProfile {
-  groups: KeywordGroup[];
-  search_queries: string[];
+/** Воронка отбора (`GET /tenders/funnel`): число закупок на каждом слое. */
+export interface SelectionFunnel {
+  collected: number;
+  after_profiles: number;
+  profiles: {
+    profile_id: string;
+    name: string;
+    is_default: boolean;
+    sources: string[];
+    /** Закупок на площадках, к которым профиль привязан. */
+    in_scope: number;
+    /** Из них подошли профилю. */
+    matched: number;
+  }[];
+  /** Закупки площадок, к которым не привязан ни один выбранный профиль — не сужались. */
+  untouched_by_profiles: number;
+  profiles_mode: "any" | "all";
+  ai_enabled: boolean;
+  after_ai: number;
+  shown: number;
 }
 
 export interface RelevanceRecalcResult {

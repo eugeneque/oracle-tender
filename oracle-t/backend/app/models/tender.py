@@ -176,6 +176,13 @@ class Tender(Base):
         ForeignKey("search_keyword_groups.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # С 05.10.2026 отбирают общие профили (`relevance_profiles`), и сработавший профиль пишется
+    # сюда; `matched_keyword_group_id` остался от групп и больше не заполняется.
+    matched_profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("relevance_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     # Решение модели: «это правда наша закупка» (раздел 5.4 ТЗ). Второй слой поверх профиля
     # ключевых слов — тот отвечает лишь «есть ли нужные слова» и не отличает поставку

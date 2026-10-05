@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, parse_okpd2, resolve_relevance_profiles
 from app.core.jobs import enqueue
 from app.db.session import get_db
 from app.models.job import JobKind
@@ -81,6 +81,7 @@ from app.services.manual_request_service import (
 )
 from app.services.document_service import get_storage_root, sync_tender_documents
 from app.services.ai_client import AiNotConfiguredError, AiQuotaExceededError
+from app.services.tender_service import selection_funnel as tender_service_funnel
 from app.services.tender_service import (
     DEFAULT_SORT,
     TenderFilters,
@@ -117,7 +118,20 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
     relevance_status: list[str] | None = Query(default=None),
     stage: list[str] | None = Query(default=None, description="Этапы внутреннего пайплайна"),
     assignee: list[uuid.UUID] | None = Query(default=None, description="Ответственные за тендер"),
-    okpd2: str | None = Query(default=None, max_length=20, description="Код ОКПД2 или его начало"),
+    okpd2: list[str] | None = Query(
+        default=None, description="Коды ОКПД2 или их начала (можно несколько)"
+    ),
+    relevance_profile: list[uuid.UUID] | None = Query(
+        default=None, description="Профили релевантности специалиста (можно несколько)"
+    ),
+    relevance_profile_mode: str = Query(
+        default="any", pattern="^(any|all)$", description="Сочетание профилей на одной площадке"
+    ),
+    relevance_profile_default: bool = Query(
+        default=False, description="Добавить к выбору действующие общие профили"
+    ),
+    hide_ai_rejected: bool = Query(default=False, description="Скрыть то, что модель признала чужим"),
+    db: Session = Depends(get_db),
     win_percentage_min: Decimal | None = Query(default=None, ge=0, le=100),
     win_percentage_max: Decimal | None = Query(default=None, ge=0, le=100),
     ai_score_min: Decimal | None = Query(default=None, ge=0, le=100),
@@ -157,7 +171,12 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
         stages=stage or [],
         assignee_ids=assignee or [],
         tag_ids=tag or [],
-        okpd2_prefix=okpd2,
+        okpd2_prefixes=parse_okpd2(okpd2),
+        relevance_profiles=resolve_relevance_profiles(
+            db, relevance_profile, include_defaults=relevance_profile_default
+        ),
+        hide_ai_rejected=hide_ai_rejected,
+        relevance_profiles_mode=relevance_profile_mode,
         win_percentage_min=win_percentage_min,
         win_percentage_max=win_percentage_max,
         ai_score_min=ai_score_min,
@@ -245,6 +264,33 @@ def get_tenders_board(
         total=sum(counts.values()),
         per_column=per_column,
     )
+
+
+@router.get("/funnel")
+def get_selection_funnel(
+    bookmarked: bool = Query(default=False),
+    filters: TenderFilters = Depends(tender_filters),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Воронка отбора для текущих фильтров: собрано → профили → модель → фильтры → список."""
+
+    from app.models.relevance_profile import RelevanceProfile
+    from app.models.source import Source
+
+    if bookmarked:
+        filters.bookmarked_by_user_id = user.id
+    funnel = tender_service_funnel(db, filters)
+    ids = [item["profile_id"] for item in funnel["profiles"]]
+    profiles = {p.id: p for p in db.scalars(select(RelevanceProfile).where(RelevanceProfile.id.in_(ids)))}
+    names = dict(db.execute(select(Source.key, Source.name)).all())
+    for item in funnel["profiles"]:
+        profile = profiles.get(item["profile_id"])
+        item["profile_id"] = str(item["profile_id"])
+        item["name"] = profile.name if profile else "—"
+        item["is_default"] = bool(profile and profile.is_default)
+        item["sources"] = [names.get(key, key) for key in (profile.source_keys if profile else [])]
+    return funnel
 
 
 @router.get("/stats", response_model=TenderStatsOut)

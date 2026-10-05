@@ -4,22 +4,20 @@ import {
   ArrowDown,
   ArrowUp,
   Building2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock,
   Database,
   Download,
-  Columns2,
   FilePlus2,
   Filter,
-  KanbanSquare,
   Loader2,
   MoreHorizontal,
   RefreshCw,
   RotateCcw,
   Search,
   Star,
-  Table as TableIcon,
   Tag as TagIcon,
   Timer,
   X,
@@ -34,9 +32,10 @@ import type {
   Tender,
   TenderBoard,
   TenderPage,
-  TenderStats,
   TenderFeed,
   TenderTag,
+  SelectionFunnel,
+  UserRelevanceProfile,
 } from "../api/types";
 import {
   CATALOG_SOURCE_TYPES,
@@ -46,19 +45,23 @@ import {
   isExternalFeedSource,
   parseTenderFeed,
 } from "../api/types";
-import { motion } from "motion/react";
-
 import { AppShell } from "../components/AppShell";
 import { ConfidenceBar } from "../components/ConfidenceBar";
 import { DecisionMark } from "../components/DecisionMark";
 import { DropdownMenu } from "../components/DropdownMenu";
 import { NewRequestModal } from "../components/NewRequestModal";
+import { OkpdPickerModal } from "../components/OkpdTreePicker";
+import { ProfilePicker } from "../components/ProfilePicker";
+import { SelectionFunnelBar } from "../components/SelectionFunnelBar";
+import { SelectionGuideModal } from "../components/SelectionGuide";
+import { RelevanceProfilesModal } from "../components/RelevanceProfilesModal";
 import { TenderDetailModal } from "../components/TenderDetailModal";
 import { TagChip, TagRow } from "../components/tags/TagChip";
 import { TenderSplitView } from "../components/tender-views/TenderSplitView";
 import { TenderTableView } from "../components/tender-views/TenderTableView";
 import { METER_KINDS } from "../utils/meterKinds";
-import { SPRING_SNAPPY } from "../utils/motion";
+import { loadTendersView } from "../utils/tendersView";
+import type { TenderViewKey } from "../utils/tendersView";
 import type {
   SortDirection,
   SortKey,
@@ -329,7 +332,9 @@ interface TendersFilters {
   priceMin: string;
   priceMax: string;
   hideExpired: boolean;
-  onlyRelevant: boolean;
+  /** Скрывать то, что модель признала чужим. Отдельно от профилей с 05.10.2026: раньше это
+   * пряталось за галочкой «Только прошедшие профиль», и было не понять, кто скрыл закупку. */
+  hideAiRejected: boolean;
   onlyAiSelected: boolean;
   // Фильтры по результатам ИИ-анализа (Этапы 5-6, раздел 5.6 ТЗ). Пока анализ по тендеру не
   // выполнен, эти поля у него пустые — и он честно не попадает в такую выборку.
@@ -339,7 +344,13 @@ interface TendersFilters {
   statuses: string[];
   relevanceStatuses: string[];
   stages: string[];
-  okpd2: string;
+  /** Префиксы ОКПД2, выбранные деревом классификатора; закупка проходит по любому из них. */
+  okpd2: string[];
+  /** Личный профиль релевантности (раздел «Профили»); пусто — без профиля. */
+  /** Выбранные профили отбора; `null` — общие профили по умолчанию, `[]` — без профилей. */
+  relevanceProfileIds: string[] | null;
+  /** Как сочетаются несколько профилей на одной площадке: любой из них или все. */
+  relevanceProfileMode: "any" | "all";
   winPercentMin: string;
   winPercentMax: string;
   aiScoreMin: string;
@@ -370,7 +381,7 @@ const DEFAULT_FILTERS: TendersFilters = {
   priceMin: "",
   priceMax: "",
   hideExpired: true,
-  onlyRelevant: true,
+  hideAiRejected: true,
   onlyAiSelected: false,
   favouritesOnly: false,
   minutesOnly: false,
@@ -381,7 +392,9 @@ const DEFAULT_FILTERS: TendersFilters = {
   statuses: [],
   relevanceStatuses: [],
   stages: [],
-  okpd2: "",
+  okpd2: [],
+  relevanceProfileIds: null,
+  relevanceProfileMode: "any",
   winPercentMin: "",
   winPercentMax: "",
   aiScoreMin: "",
@@ -452,7 +465,9 @@ function buildFilterParams(filters: TendersFilters): URLSearchParams {
   if (filters.minutesOnly) params.set("same_day", "true");
   for (const id of filters.tagIds) params.append("tag", id);
   if (filters.hideExpired && !filters.favouritesOnly) params.set("hide_expired", "true");
-  if (filters.onlyRelevant && !filters.favouritesOnly) params.set("only_profile_relevant", "true");
+  // «Избранное» — вне профилей и проверки моделью: отложенная вручную закупка не должна
+  // исчезать из раздела, потому что не подошла под отбор.
+  if (filters.hideAiRejected && !filters.favouritesOnly) params.set("hide_ai_rejected", "true");
   if (filters.onlyAiSelected) params.set("only_ai_selected", "true");
   for (const code of filters.regionCodes) params.append("region", code);
   for (const value of filters.tenderTypes) params.append("tender_type", value);
@@ -461,7 +476,14 @@ function buildFilterParams(filters: TendersFilters): URLSearchParams {
   for (const value of filters.relevanceStatuses)
     params.append("relevance_status", value);
   for (const value of filters.stages) params.append("stage", value);
-  if (filters.okpd2.trim()) params.set("okpd2", filters.okpd2.trim());
+  for (const code of filters.okpd2) params.append("okpd2", code);
+  if (!filters.favouritesOnly) {
+    if (filters.relevanceProfileIds === null) params.set("relevance_profile_default", "true");
+    else for (const id of filters.relevanceProfileIds) params.append("relevance_profile", id);
+  }
+  const profileCount = filters.relevanceProfileIds === null ? 2 : filters.relevanceProfileIds.length;
+  if (!filters.favouritesOnly && profileCount > 1)
+    params.set("relevance_profile_mode", filters.relevanceProfileMode);
   if (filters.winPercentMin)
     params.set("win_percentage_min", filters.winPercentMin);
   if (filters.winPercentMax)
@@ -575,6 +597,7 @@ function FiltersPanel({
   onChange: (patch: Partial<TendersFilters>) => void;
   onReset: () => void;
 }) {
+  const [isOkpdOpen, setIsOkpdOpen] = useState(false);
   const toggleSource = (key: string) => {
     const has = filters.sourceKeys.includes(key);
     onChange({
@@ -734,13 +757,38 @@ function FiltersPanel({
           />
         </div>
         <div>
-          <label className="mb-1 block text-xs text-zinc-500">Код ОКПД2</label>
-          <input
-            value={filters.okpd2}
-            onChange={(e) => onChange({ okpd2: e.target.value })}
-            placeholder="26.51 — включая вложенные"
-            className="w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white placeholder-zinc-600 outline-none focus:border-indigo-500"
-          />
+          <label className="mb-1 block text-xs text-zinc-500">Коды ОКПД2</label>
+          <button
+            type="button"
+            onClick={() => setIsOkpdOpen(true)}
+            title="Открыть классификатор: разделы раскрываются, ветки отмечаются точечно"
+            className={`flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
+              filters.okpd2.length > 0
+                ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-200"
+                : "border-white/10 bg-white/[0.03] text-zinc-500 hover:text-zinc-300"
+            }`}
+          >
+            <span className="min-w-0 truncate">
+              {filters.okpd2.length === 0
+                ? "Выбрать в классификаторе"
+                : filters.okpd2.length <= 3
+                  ? filters.okpd2.join(", ")
+                  : `${filters.okpd2.slice(0, 3).join(", ")} и ещё ${filters.okpd2.length - 3}`}
+            </span>
+            {filters.okpd2.length > 0 && (
+              <span
+                role="button"
+                aria-label="Сбросить коды ОКПД2"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onChange({ okpd2: [] });
+                }}
+                className="shrink-0 rounded p-0.5 text-indigo-300 hover:bg-white/10"
+              >
+                <X size={13} />
+              </span>
+            )}
+          </button>
         </div>
         <div>
           <label className="mb-1 block text-xs text-zinc-500">
@@ -909,15 +957,15 @@ function FiltersPanel({
           </label>
           <label
             className="flex items-center gap-2 text-sm text-zinc-300"
-            title="Профиль релевантности из настроек: девять групп потребностей с исключениями, поверх него — ответ модели «наша ли это тематика». Скрыто то, что отсеял профиль или отклонила модель; непроверенное моделью остаётся. Снимите галочку, чтобы увидеть отсеянное — профиль мог оказаться слишком узким."
+            title="Модель читает название закупки и отсекает то, что похоже по словам, но не наше: «счётчик монет», «счётчик клеток». Скрывается только явное «нет»; непроверенное моделью остаётся. Профили отбора выбираются отдельно — в меню «Профиль»."
           >
             <input
               type="checkbox"
-              checked={filters.onlyRelevant}
-              onChange={(e) => onChange({ onlyRelevant: e.target.checked })}
+              checked={filters.hideAiRejected}
+              onChange={(e) => onChange({ hideAiRejected: e.target.checked })}
               className="h-4 w-4 rounded border-white/20 bg-white/5 accent-indigo-500"
             />
-            Только прошедшие профиль релевантности
+            Скрывать отклонённые ИИ
           </label>
         </div>
         <button
@@ -928,6 +976,16 @@ function FiltersPanel({
           Сбросить фильтры
         </button>
       </div>
+      {isOkpdOpen && (
+        <OkpdPickerModal
+          value={filters.okpd2}
+          onApply={(codes) => {
+            onChange({ okpd2: codes });
+            setIsOkpdOpen(false);
+          }}
+          onCancel={() => setIsOkpdOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -1001,7 +1059,6 @@ function countActiveFilters(filters: TendersFilters): number {
     "deadlineTo",
     "publishFrom",
     "publishTo",
-    "okpd2",
     "aiScoreMin",
     "aiScoreMax",
     "winPercentMin",
@@ -1019,6 +1076,7 @@ function countActiveFilters(filters: TendersFilters): number {
     "stages",
     "relevanceStatuses",
     "regionCodes",
+    "okpd2",
   ];
   for (const key of listKeys) {
     const value = filters[key];
@@ -1027,44 +1085,20 @@ function countActiveFilters(filters: TendersFilters): number {
   // Галочки считаем, только когда они отличаются от умолчания: включённые по умолчанию
   // «скрывать закрытые» и «только релевантные» не должны выглядеть как ручная настройка.
   if (!filters.hideExpired) count += 1;
-  if (!filters.onlyRelevant) count += 1;
+  if (!filters.hideAiRejected) count += 1;
   if (filters.onlyAiSelected) count += 1;
   if (filters.favouritesOnly) count += 1;
   if (filters.minutesOnly) count += 1;
   if (filters.tagIds.length > 0) count += 1;
+  if (filters.relevanceProfileIds !== null) count += 1;
   return count;
 }
 
-const VIEW_TABS = [
-  { key: "split", label: "Две панели", icon: Columns2 },
-  { key: "kanban", label: "Kanban", icon: KanbanSquare },
-  { key: "table", label: "Таблица", icon: TableIcon },
-] as const;
-
-type ViewKey = (typeof VIEW_TABS)[number]["key"];
-
-const ACTIVE_VIEW_STORAGE_KEY = "oraclet_tenders_view";
-
-/** Выбранный вид переживает перезагрузку страницы: у каждого пользователя свой рабочий
- * режим (кто-то живёт в таблице, кто-то на доске), и сбрасывать его при каждом заходе —
- * лишнее раздражение.
- *
- * Умолчание — двухпанельный режим (раздел 5.6 ТЗ). Проверка `VIEW_TABS.some(...)` здесь не
- * формальность: у тех, кто раньше выбрал «Список» или «Таймплан», в хранилище остался ключ
- * удалённого вида, и без неё страница показала бы пустое место вместо таблицы. */
-function loadActiveView(): ViewKey {
-  try {
-    const raw = localStorage.getItem(ACTIVE_VIEW_STORAGE_KEY);
-    if (raw && VIEW_TABS.some((tab) => tab.key === raw)) return raw as ViewKey;
-  } catch {
-    // приватный режим браузера — используем значение по умолчанию
-  }
-  return "split";
-}
+type ViewKey = TenderViewKey;
 
 export function TendersPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [activeView, setActiveView] = useState<ViewKey>(loadActiveView);
+  const [activeView] = useState<ViewKey>(loadTendersView);
   // Справочник тегов — для чипов в фильтрах. Перечитывается при открытии панели фильтров:
   // тег, заведённый в карточке минуту назад, должен быть виден без перезагрузки.
   const [tags, setTags] = useState<TenderTag[]>([]);
@@ -1083,6 +1117,12 @@ export function TendersPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [isResourcesOpen, setIsResourcesOpen] = useState(false);
   const [isNewRequestOpen, setIsNewRequestOpen] = useState(false);
+  // Личные профили релевантности: список для выпадающего выбора и окно управления.
+  const [relevanceProfiles, setRelevanceProfiles] = useState<UserRelevanceProfile[]>([]);
+  const [isProfilesOpen, setIsProfilesOpen] = useState(false);
+  const [isGuideOpen, setIsGuideOpen] = useState(false);
+  // Воронка отбора для текущих фильтров — строка над списком и числа в гайде.
+  const [funnel, setFunnel] = useState<SelectionFunnel | null>(null);
   // Свёрнуто по умолчанию: базовые поля видны и так, а редкие фильтры отодвигали список
   // тендеров за сгиб экрана.
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
@@ -1141,13 +1181,12 @@ export function TendersPage() {
   const [regions, setRegions] = useState<Region[]>([]);
   // Сколько закупок собрано всего — знаменатель для строки «показано N из M»: список по
   // умолчанию отфильтрован (открытые, прошедшие профиль), и без знаменателя это не видно.
-  const [collectedTotal, setCollectedTotal] = useState<number | null>(null);
   const [total, setTotal] = useState(0);
   const [board, setBoard] = useState<TenderBoard | null>(null);
   const [offset, setOffset] = useState(0);
   const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({
-    key: "application_end",
-    direction: "asc",
+    key: "publish_date",
+    direction: "desc",
   });
 
   const loadTenders = useCallback(
@@ -1214,26 +1253,58 @@ export function TendersPage() {
       .then((all) => setSources(all.filter((s) => !CATALOG_SOURCE_TYPES.includes(s.type))));
     void api.get<Region[]>("/dictionaries/regions").then(setRegions);
     void api.get<TenderTag[]>("/tags").then(setTags).catch(() => setTags([]));
+    void api
+      .get<UserRelevanceProfile[]>("/relevance/profiles")
+      .then(setRelevanceProfiles)
+      .catch(() => setRelevanceProfiles([]));
   }, []);
 
-  // «Из N собранных» — по текущему каналу: у Госплана и других сервисов своё число, и общий знаменатель
-  // выдавал бы строку «12 из 17 800» там, где в канале всего три сотни закупок.
-  const loadCollectedTotal = useCallback(
-    (activeFeed: TenderFeed) =>
+  /** Перечитывает профили после правки в окне управления. Профиль, которого больше нет
+   * (удалён здесь или другим сотрудником), из фильтра снимается — иначе список отвечал бы
+   * ошибкой «профиль не найден». */
+  const reloadRelevanceProfiles = useCallback(async () => {
+    try {
+      const list = await api.get<UserRelevanceProfile[]>("/relevance/profiles");
+      setRelevanceProfiles(list);
+      setFilters((prev) => ({
+        ...prev,
+        relevanceProfileIds:
+          prev.relevanceProfileIds === null
+            ? null
+            : prev.relevanceProfileIds.filter((id) => list.some((item) => item.id === id)),
+      }));
+    } catch {
+      // оставляем прежний список: выбор профиля не должен ломать страницу
+    }
+  }, []);
+
+  // Воронка отбора — по текущему каналу и фильтрам: «собрано» у Госплана своё, и общий
+  // знаменатель выдавал бы «12 из 17 800» там, где в канале три сотни закупок.
+  const loadFunnel = useCallback(
+    (activeFilters: TendersFilters) =>
       api
-        .get<TenderStats>(`/tenders/stats?feed=${activeFeed}`)
-        .then((stats) => setCollectedTotal(stats.total))
-        .catch(() => setCollectedTotal(null)),
+        .get<SelectionFunnel>(`/tenders/funnel?${buildFilterParams(activeFilters).toString()}`)
+        .then(setFunnel)
+        .catch(() => setFunnel(null)),
     [],
   );
-  useEffect(() => {
-    setCollectedTotal(null);
-    void loadCollectedTotal(feed);
-  }, [feed, loadCollectedTotal]);
 
   // Площадки стандартного канала: Госплан, Селдон и Тендерплан — отдельные каналы со своей
   // кнопкой сбора, в фильтре «Площадки» и в «Площадках для синхронизации» им не место.
   const standardSources = sources.filter((s) => !isExternalFeedSource(s.type));
+  // Общие профили по умолчанию — то, что выбрано, пока человек не трогал меню «Профиль».
+  const defaultProfileIds = relevanceProfiles
+    .filter((item) => item.is_default && item.is_active)
+    .map((item) => item.id);
+  const selectedProfileIds = filters.relevanceProfileIds ?? defaultProfileIds;
+  const profilesLabel =
+    filters.relevanceProfileIds === null
+      ? "Общие профили"
+      : selectedProfileIds.length === 0
+        ? "Без профилей"
+        : selectedProfileIds.length === 1
+          ? relevanceProfiles.find((item) => item.id === selectedProfileIds[0])?.name ?? "Профиль"
+          : `Профили (${selectedProfileIds.length})`;
   const feedLabel = FEED_OPTIONS.find((option) => option.value === feed)?.label ?? "";
 
   const changeFeed = (next: TenderFeed) => {
@@ -1259,6 +1330,14 @@ export function TendersPage() {
     }, 300);
     return () => clearTimeout(timer);
   }, [filters, sort, offset, activeView, loadTenders, loadBoard]);
+
+  // Воронка — отдельным запросом и с тем же дебаунсом: её считают несколько подсчётов по
+  // базе, и ждать её списку незачем.
+  useEffect(() => {
+    if (filters.favouritesOnly) return;
+    const timer = setTimeout(() => void loadFunnel(filters), 350);
+    return () => clearTimeout(timer);
+  }, [filters, loadFunnel]);
 
   // Смена фильтров или сортировки возвращает на первую страницу: иначе после сужения
   // выборки пользователь оказывается на пустой пятой странице и решает, что ничего не нашлось.
@@ -1316,15 +1395,6 @@ export function TendersPage() {
       current && tenders.some((item) => item.id === current.id) ? current : tenders[0],
     );
   }, [activeView, tenders]);
-
-  const changeView = (key: ViewKey) => {
-    setActiveView(key);
-    try {
-      localStorage.setItem(ACTIVE_VIEW_STORAGE_KEY, key);
-    } catch {
-      // не сохранили — не критично, вид всё равно переключился
-    }
-  };
 
   useEffect(() => {
     if (sources.length === 0) return;
@@ -1407,7 +1477,7 @@ export function TendersPage() {
             void (activeView === "kanban"
               ? loadBoard(filters, sort)
               : loadTenders(filters, sort, offset));
-            void loadCollectedTotal(feed);
+            void loadFunnel(filters);
           } else if (job.status === "error") {
             setError(`Синхронизация прервана: ${job.message ?? "неизвестная ошибка"}`);
           }
@@ -1416,7 +1486,7 @@ export function TendersPage() {
     }, 2_000);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `syncJob.message` нужен только как стартовое значение
-  }, [isSyncing, activeView, filters, sort, offset, loadBoard, loadTenders, loadCollectedTotal, feed]);
+  }, [isSyncing, activeView, filters, sort, offset, loadBoard, loadTenders, loadFunnel, feed]);
 
   /** Выгрузка в Excel (раздел 5.7 ТЗ) — по текущим фильтрам списка, а не по всей базе:
    * пользователь только что отобрал нужное, и отчёт должен повторять именно этот срез. */
@@ -1485,41 +1555,6 @@ export function TendersPage() {
         <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
           <h1 className="mr-1 text-xl font-semibold tracking-tight text-white">Тендеры</h1>
 
-          <div
-            role="radiogroup"
-            aria-label="Источник закупок"
-            className="inline-flex h-9 items-center gap-0.5 rounded-lg border border-white/[0.08] bg-white/[0.03] p-0.5"
-          >
-            {FEED_OPTIONS.map((option) => {
-              const isActive = option.value === feed;
-              return (
-                <button
-                  key={option.value}
-                  role="radio"
-                  aria-checked={isActive}
-                  onClick={() => changeFeed(option.value)}
-                  title={option.hint}
-                  className="relative flex h-7 items-center rounded-md px-3 text-xs font-medium"
-                >
-                  {isActive && (
-                    <motion.span
-                      layoutId="tender-feed-selected"
-                      transition={SPRING_SNAPPY}
-                      className="absolute inset-0 rounded-md bg-white/10"
-                    />
-                  )}
-                  <span
-                    className={`relative transition-colors ${
-                      isActive ? "text-white" : "text-zinc-500 hover:text-zinc-200"
-                    }`}
-                  >
-                    {option.label}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
           <div className="relative min-w-[220px] flex-1">
             <Search
               size={14}
@@ -1541,51 +1576,6 @@ export function TendersPage() {
               </button>
             )}
           </div>
-
-          {/* Виды — иконками с подсказкой: подписи повторялись на каждом заходе, а выбирают
-              вид раз и надолго (он запоминается). */}
-          <div className="inline-flex h-9 items-center gap-0.5 rounded-lg border border-white/[0.08] bg-white/[0.03] p-0.5">
-            {VIEW_TABS.map((tab) => {
-              const Icon = tab.icon;
-              const isActive = tab.key === activeView;
-              return (
-                <button
-                  key={tab.key}
-                  onClick={() => changeView(tab.key)}
-                  title={tab.label}
-                  aria-label={tab.label}
-                  aria-pressed={isActive}
-                  className={`flex h-7 w-8 items-center justify-center rounded-md transition-colors ${
-                    isActive ? "bg-white/10 text-white" : "text-zinc-500 hover:text-zinc-200"
-                  }`}
-                >
-                  <Icon size={15} />
-                </button>
-              );
-            })}
-          </div>
-
-          <DateSortControl sort={sort} onChange={changeSort} />
-
-          <button
-            onClick={() => {
-              setIsFiltersOpen((v) => !v);
-              if (!isFiltersOpen) void api.get<TenderTag[]>("/tags").then(setTags).catch(() => undefined);
-            }}
-            className={`flex h-9 items-center gap-1.5 rounded-lg border px-3 text-sm transition-colors ${
-              isFiltersOpen || activeFilterCount > 0
-                ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-300"
-                : "border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:bg-white/5"
-            }`}
-          >
-            <Filter size={14} />
-            Фильтры
-            {activeFilterCount > 0 && (
-              <span className="rounded-full bg-indigo-500/25 px-1.5 text-[11px] leading-4 text-indigo-200">
-                {activeFilterCount}
-              </span>
-            )}
-          </button>
 
           <DropdownMenu
             title="Ещё действия"
@@ -1644,6 +1634,67 @@ export function TendersPage() {
           </button>
         </div>
 
+        {/* Вторая строка — всё, что управляет ВЫДАЧЕЙ: откуда закупки, по какому профилю,
+            какие фильтры и в каком порядке. Раньше всё это, плюс три вида списка, стояло в
+            одной строке с поиском и кнопкой синхронизации (05.10.2026). Виды переехали в
+            «Настройки → Интерфейс», каналы — в один выбор ресурсов. */}
+        <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
+          <DropdownMenu
+            title="Выбор ресурсов: откуда показывать закупки"
+            align="left"
+            buttonClassName="flex h-9 items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 text-sm text-zinc-300 transition-colors hover:bg-white/5"
+            trigger={
+              <>
+                <Database size={14} />
+                <span className="text-zinc-500">Ресурсы:</span>
+                <span>{feedLabel}</span>
+                <ChevronDown size={13} className="text-zinc-500" />
+              </>
+            }
+            items={FEED_OPTIONS.map((option) => ({
+              key: option.value,
+              label: option.label,
+              hint: option.hint,
+              active: option.value === feed,
+              onSelect: () => changeFeed(option.value),
+            }))}
+          />
+
+          <ProfilePicker
+            profiles={relevanceProfiles}
+            selectedIds={selectedProfileIds}
+            isDefaultSelection={filters.relevanceProfileIds === null}
+            label={profilesLabel}
+            mode={filters.relevanceProfileMode}
+            onChange={(ids) => updateFilters({ relevanceProfileIds: ids })}
+            onResetToDefault={() => updateFilters({ relevanceProfileIds: null })}
+            onModeChange={(mode) => updateFilters({ relevanceProfileMode: mode })}
+            onManage={() => setIsProfilesOpen(true)}
+          />
+
+          <button
+            onClick={() => {
+              setIsFiltersOpen((v) => !v);
+              if (!isFiltersOpen) void api.get<TenderTag[]>("/tags").then(setTags).catch(() => undefined);
+            }}
+            className={`flex h-9 items-center gap-1.5 rounded-lg border px-3 text-sm transition-colors ${
+              isFiltersOpen || activeFilterCount > 0
+                ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-300"
+                : "border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:bg-white/5"
+            }`}
+          >
+            <Filter size={14} />
+            Фильтры
+            {activeFilterCount > 0 && (
+              <span className="rounded-full bg-indigo-500/25 px-1.5 text-[11px] leading-4 text-indigo-200">
+                {activeFilterCount}
+              </span>
+            )}
+          </button>
+
+          <SortMenu sort={sort} onChange={changeSort} />
+        </div>
+
         {error && (
           <div className="mb-2 flex shrink-0 items-start gap-2 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
             <span className="min-w-0 flex-1">{error}</span>
@@ -1661,14 +1712,12 @@ export function TendersPage() {
           </div>
         )}
 
-        {/* Строка состояния: что показано и почему. Список по умолчанию — не «все собранные
-            закупки», а открытые и прошедшие профиль релевантности; без этой строки два
-            включённых переключателя в свёрнутой панели выглядели как «система собрала
-            только 52 тендера» (вопрос тестировщика 16.09.2026). С 28.09.2026 — просто
-            строкой текста, без рамки: это пояснение, а не отдельный блок. */}
+        {/* Строка состояния: что показано и почему. С 05.10.2026 — воронка отбора «собрано →
+            профили → модель → фильтры → в списке»: прежняя строка «N из M собранных · по
+            профилю» говорила, сколько скрыто, но не чем, и было не понять, что снимать. */}
         <div className="mb-2 flex min-h-[24px] shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 px-1">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
-            {isLoading ? (
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
+            {isLoading && filters.favouritesOnly ? (
               <span className="flex items-center gap-1.5">
                 <Loader2 size={12} className="animate-spin text-zinc-600" />
                 Считаем…
@@ -1683,7 +1732,7 @@ export function TendersPage() {
                   {plural(shownTotal, "закупка", "закупки", "закупок")} в избранном
                 </span>
                 <span className="text-zinc-700">·</span>
-                <span>срок подачи и профиль не учитываются</span>
+                <span>срок подачи, профили и проверка моделью не учитываются</span>
                 <button
                   onClick={() => updateFilters({ favouritesOnly: false })}
                   className="text-indigo-400 hover:text-indigo-300"
@@ -1692,46 +1741,33 @@ export function TendersPage() {
                 </button>
               </>
             ) : (
-              <>
-                <span>
-                  <span className="font-medium tabular-nums text-zinc-200">
-                    {shownTotal.toLocaleString("ru-RU")}
-                  </span>{" "}
-                  {plural(shownTotal, "закупка", "закупки", "закупок")}
-                  {collectedTotal !== null && (
-                    <> из {collectedTotal.toLocaleString("ru-RU")} собранных</>
-                  )}
-                </span>
-                {(filters.hideExpired || filters.onlyRelevant) && (
-                  <>
-                    <span className="text-zinc-700">·</span>
-                    <span
-                      title={[
-                        filters.hideExpired &&
-                          "Скрыты закупки с истёкшим сроком подачи, завершённые и отменённые",
-                        filters.onlyRelevant &&
-                          "Только прошедшие профиль релевантности из настроек и не отклонённые моделью",
-                      ]
-                        .filter(Boolean)
-                        .join(". ")}
-                    >
-                      {[filters.hideExpired && "только открытые", filters.onlyRelevant && "по профилю"]
-                        .filter(Boolean)
-                        .join(", ")}
-                    </span>
-                    <button
-                      onClick={() => updateFilters({ hideExpired: false, onlyRelevant: false })}
-                      className="text-indigo-400 hover:text-indigo-300"
-                    >
-                      показать все
-                    </button>
-                  </>
-                )}
-              </>
+              <SelectionFunnelBar
+                funnel={funnel}
+                isLoading={isLoading}
+                feedLabel={feedLabel}
+                profilesLabel={profilesLabel}
+                onClearProfiles={() => updateFilters({ relevanceProfileIds: [] })}
+                onDisableAi={() => updateFilters({ hideAiRejected: false })}
+                onResetFilters={() =>
+                  updateFilters({
+                    ...DEFAULT_FILTERS,
+                    feed,
+                    hideExpired: false,
+                    relevanceProfileIds: filters.relevanceProfileIds,
+                    relevanceProfileMode: filters.relevanceProfileMode,
+                    hideAiRejected: filters.hideAiRejected,
+                    minutesOnly: filters.minutesOnly,
+                  })
+                }
+                onOpenGuide={() => setIsGuideOpen(true)}
+                onEditProfiles={() => setIsProfilesOpen(true)}
+              />
             )}
           </div>
 
-          {(filters.favouritesOnly || filters.minutesOnly || filters.tagIds.length > 0) && (
+          {(filters.favouritesOnly ||
+            filters.minutesOnly ||
+            filters.tagIds.length > 0) && (
             <div className="flex flex-wrap items-center gap-1.5">
               {filters.minutesOnly && (
                 <button
@@ -1903,6 +1939,26 @@ export function TendersPage() {
         />
       )}
 
+      {isGuideOpen && (
+        <SelectionGuideModal
+          funnel={funnel}
+          onClose={() => setIsGuideOpen(false)}
+          onOpenProfiles={() => setIsProfilesOpen(true)}
+          onOpenFilters={() => setIsFiltersOpen(true)}
+        />
+      )}
+
+      {isProfilesOpen && (
+        <RelevanceProfilesModal
+          profiles={relevanceProfiles}
+          sources={sources}
+          activeIds={selectedProfileIds}
+          onApply={(ids) => updateFilters({ relevanceProfileIds: ids })}
+          onChanged={() => void reloadRelevanceProfiles()}
+          onClose={() => setIsProfilesOpen(false)}
+        />
+      )}
+
       {isResourcesOpen && (
         <ResourcesModal
           // Источник ручных заявок — не площадка: синхронизировать по нему нечего, а в
@@ -1925,54 +1981,51 @@ export function TendersPage() {
   );
 }
 
-/** Сортировка списка по датам (29.09.2026) — прямо в панели над списком, а не в
- *  «Фильтрах»: это порядок строк, а не сужение выдачи, и нужна она во всех видах, а не
- *  только в таблице, где сортируют щелчком по заголовку. Повторный щелчок по выбранной
- *  дате меняет направление. Первый щелчок — самое полезное направление: свежие
- *  размещения сверху, ближайшие окончания подачи сверху. */
-const DATE_SORTS: { key: "publish_date" | "application_end"; label: string; first: SortDirection }[] = [
-  { key: "publish_date", label: "Размещение", first: "desc" },
-  { key: "application_end", label: "Окончание", first: "asc" },
+/** Сортировка списка (с 05.10.2026 — выпадающий выбор вместо двух кнопок): порядок строк, а
+ *  не сужение выдачи, поэтому живёт рядом с фильтрами и действует во всех видах. По
+ *  умолчанию — по дате размещения, свежие сверху. Сортировка по другим столбцам включается
+ *  щелчком по заголовку таблицы и в меню показана как «своя». */
+const SORT_OPTIONS: { key: SortKey; direction: SortDirection; label: string }[] = [
+  { key: "publish_date", direction: "desc", label: "По дате размещения — сначала новые" },
+  { key: "publish_date", direction: "asc", label: "По дате размещения — сначала старые" },
+  { key: "application_end", direction: "asc", label: "По окончанию подачи — сначала ближайшие" },
+  { key: "application_end", direction: "desc", label: "По окончанию подачи — сначала дальние" },
 ];
 
-function DateSortControl({
+function SortMenu({
   sort,
   onChange,
 }: {
   sort: { key: SortKey; direction: SortDirection };
   onChange: (key: SortKey, direction: SortDirection) => void;
 }) {
+  const current = SORT_OPTIONS.find(
+    (option) => option.key === sort.key && option.direction === sort.direction,
+  );
+  const Arrow = sort.direction === "asc" ? ArrowUp : ArrowDown;
   return (
-    <div
-      role="group"
-      aria-label="Сортировка по дате"
-      className="flex h-9 items-center gap-0.5 rounded-lg border border-white/[0.08] bg-white/[0.03] p-1"
-    >
-      <span className="px-1.5 text-xs text-zinc-500">Дата:</span>
-      {DATE_SORTS.map((item) => {
-        const isActive = sort.key === item.key;
-        const Arrow = isActive && sort.direction === "asc" ? ArrowUp : ArrowDown;
-        const next = isActive ? (sort.direction === "asc" ? "desc" : "asc") : item.first;
-        return (
-          <button
-            key={item.key}
-            type="button"
-            aria-pressed={isActive}
-            onClick={() => onChange(item.key, next)}
-            title={
-              isActive
-                ? `Сейчас: ${sort.direction === "asc" ? "сначала ранние" : "сначала поздние"} — нажмите, чтобы развернуть`
-                : `Сортировать по дате ${item.key === "publish_date" ? "размещения" : "окончания подачи"}`
-            }
-            className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs transition-colors ${
-              isActive ? "bg-white/10 text-white" : "text-zinc-400 hover:text-zinc-200"
-            }`}
-          >
-            {item.label}
-            {isActive && <Arrow size={12} />}
-          </button>
-        );
-      })}
-    </div>
+    <DropdownMenu
+      title="Порядок закупок в списке"
+      align="left"
+      buttonClassName="flex h-9 items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 text-sm text-zinc-300 transition-colors hover:bg-white/5"
+      trigger={
+        <>
+          <Arrow size={13} className="text-zinc-500" />
+          <span>
+            {current
+              ? current.key === "publish_date"
+                ? "По дате размещения"
+                : "По окончанию подачи"
+              : "Своя сортировка"}
+          </span>
+        </>
+      }
+      items={SORT_OPTIONS.map((option) => ({
+        key: `${option.key}-${option.direction}`,
+        label: option.label,
+        active: option.key === sort.key && option.direction === sort.direction,
+        onSelect: () => onChange(option.key, option.direction),
+      }))}
+    />
   );
 }

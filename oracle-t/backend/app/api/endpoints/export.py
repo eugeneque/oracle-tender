@@ -6,6 +6,7 @@
 """
 
 import urllib.parse
+import uuid
 from datetime import date
 from decimal import Decimal
 
@@ -13,7 +14,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, parse_okpd2, resolve_relevance_profiles
 from app.db.session import get_db
 from app.models.source import FEED_PATTERN
 from app.models.user import User
@@ -51,10 +52,14 @@ def get_tenders_xlsx(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ,
     meter_kind: list[str] | None = Query(default=None, description="Типы приборов учёта (METER_KINDS)"),
     tender_status: list[str] | None = Query(default=None),
     relevance_status: list[str] | None = Query(default=None),
-    okpd2: str | None = Query(default=None, max_length=20),
+    okpd2: list[str] | None = Query(default=None, description="Префиксы ОКПД2 (можно несколько)"),
     win_percentage_min: Decimal | None = Query(default=None, ge=0, le=100),
     win_percentage_max: Decimal | None = Query(default=None, ge=0, le=100),
     bookmarked: bool = Query(default=False, description="Только избранное текущего пользователя"),
+    relevance_profile: list[uuid.UUID] | None = Query(default=None, description="Профили релевантности специалиста"),
+    relevance_profile_mode: str = Query(default="any", pattern="^(any|all)$"),
+    relevance_profile_default: bool = Query(default=False),
+    hide_ai_rejected: bool = Query(default=False),
     feed: str | None = Query(default=None, pattern=FEED_PATTERN),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -79,7 +84,12 @@ def get_tenders_xlsx(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ,
         meter_kinds=meter_kind or [],
         statuses=tender_status or [],
         relevance_statuses=relevance_status or [],
-        okpd2_prefix=okpd2,
+        okpd2_prefixes=parse_okpd2(okpd2),
+        relevance_profiles=resolve_relevance_profiles(
+            db, relevance_profile, include_defaults=relevance_profile_default
+        ),
+        hide_ai_rejected=hide_ai_rejected,
+        relevance_profiles_mode=relevance_profile_mode,
         win_percentage_min=win_percentage_min,
         win_percentage_max=win_percentage_max,
     )

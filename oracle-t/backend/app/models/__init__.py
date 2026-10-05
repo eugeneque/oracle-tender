@@ -61,6 +61,7 @@ from app.models.notification import (
     NotificationStatus,
     NotificationTrigger,
 )
+from app.models.relevance_profile import CollectionTerm, RelevanceProfile, RelevanceProfileMatch
 from app.models.region import FederalDistrict, Region, RegionResponsible
 from app.models.registry_record import AdmissionRegistry, ProductRegistryRecord, RegistryPresence
 from app.models.search_profile import (
@@ -159,4 +160,7 @@ __all__ = [
     "TenderTagLink",
     "UpperSoftwareDevice",
     "UpperSoftwareProductLink",
+    "RelevanceProfile",
+    "RelevanceProfileMatch",
+    "CollectionTerm",
 ]

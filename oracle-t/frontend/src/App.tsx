@@ -7,6 +7,7 @@ import { WHATS_NEW_PATH } from "./components/nav/WhatsNew";
 import { AccountPage } from "./pages/Account";
 import { AnalyticsPage } from "./pages/Analytics";
 import { CatalogPage } from "./pages/Catalog";
+import { ChangelogPage } from "./pages/Changelog";
 import { CompanyPage } from "./pages/Company";
 import { HomePage } from "./pages/Home";
 import { IntegrationsPage } from "./pages/Integrations";
@@ -50,6 +51,7 @@ export default function App() {
           <Route path="/integrations" element={<IntegrationsPage />} />
           <Route path="/logs" element={<LogsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/changelog" element={<ChangelogPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/tenders" replace />} />
       </Routes>

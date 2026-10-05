@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { AppShell } from "../components/AppShell";
 import { BentoRecap } from "../components/home/BentoRecap";
@@ -19,20 +19,15 @@ const TAB_KEY = "home.tab";
 
 // Раскладки мозаики на широком экране: четыре колонки, `hero` — центральная плитка.
 // Каждый `id` из homeSlides должен встретиться здесь ровно одной прямоугольной областью.
-const NEWS_AREAS_ADMIN = [
-  "ai-conclusion ai-conclusion specialist-feedback review-no-gaps",
-  "nav-layout hero hero theme",
-  "nav-layout hero hero theme",
-  "tenders-clean gosplan gosplan settings-tabs",
-  "catalog-autofill catalog-autofill si-groups logs-page",
-  "sidebar-brand sidebar-brand catalog-sort catalog-steps",
-  "meter-parameters meter-parameters registry-learning registry-learning",
-  "ai-models platforms-fixed platforms-fixed ai-checklists",
-  "ai-models relevance full-review ai-checklists",
-  "manual-requests manual-requests seed-snapshot server-update",
+const NEWS_AREAS = [
+  "selection selection profiles profiles",
+  "okpd2-tree hero hero minutes",
+  "tenders-header hero hero feeds",
+  "brand-lock brand-lock job-queue feeds",
+  "no-auto-analysis meter-vpu deepseek-fast catalog-hide-eol",
 ];
-// У пользователя без прав администратора нет плиток про обновление сервера и установку.
-const NEWS_AREAS = [...NEWS_AREAS_ADMIN.slice(0, -1), "manual-requests manual-requests manual-requests manual-requests"];
+// Плиток только для администратора сейчас нет — раскладка общая.
+const NEWS_AREAS_ADMIN = NEWS_AREAS;
 
 const GUIDE_AREAS = [
   "tenders hero hero tender-card",
@@ -110,7 +105,7 @@ export function HomePage() {
         {tab === "news" ? (
           <BentoRecap
             key="news"
-            hero={{ title: "Sova", subtitle: `Сентябрь 2026 · ${news.length} нововведений` }}
+            hero={{ title: "Sova", subtitle: `Сентябрь — октябрь 2026 · ${news.length} нововведений` }}
             slides={news}
             areas={isAdmin ? NEWS_AREAS_ADMIN : NEWS_AREAS}
           />
@@ -124,7 +119,14 @@ export function HomePage() {
           />
         )}
 
-        <p className="mt-4 text-xs text-zinc-600">Нажмите на плитку, чтобы прочитать подробности.</p>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-600">
+          <p>Нажмите на плитку, чтобы прочитать подробности.</p>
+          {tab === "news" && (
+            <Link to="/changelog" className="text-indigo-400 hover:text-indigo-300">
+              Вся история обновлений →
+            </Link>
+          )}
+        </div>
       </div>
     </AppShell>
   );
