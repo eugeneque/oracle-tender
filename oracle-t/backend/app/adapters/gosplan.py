@@ -38,6 +38,7 @@ from app.adapters.base import (
     TenderSummary,
 )
 from app.adapters.http_utils import DEFAULT_USER_AGENT, fetch_with_retry
+from app.services import okpd2_service
 
 FREE_BASE_URL = "https://v2test.gosplan.info"
 PAID_BASE_URL = "https://v2.gosplan.info"
@@ -198,7 +199,7 @@ class GosplanAdapter(SourceAdapter):
             currency=item.get("currency_code") or "RUB",
             application_end=_parse_datetime(item.get(deadline_key)),
             publish_date=published_at.date() if published_at else None,
-            okpd2_code=okpd2[0] if okpd2 else None,
+            okpd2_code=okpd2_service.pick_relevant(okpd2),
             region_code=_region_code(item.get("region")),
         )
 

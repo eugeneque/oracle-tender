@@ -40,6 +40,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -77,8 +78,15 @@ from app.seed.meter_parameters import (
     parameter_hint,
 )
 from app.services.meter_kind import kind_group, kind_labels, kinds_from_text, product_kinds
-from app.services.product_relevance import select_products_for_context
+from app.services.product_relevance import select_products_for_context, tender_named_text
+from app.services.tz_reference import (
+    TzReference,
+    find_reference,
+    is_model_requirement,
+    match_manufacturer,
+)
 from app.services.ai_client import run_structured
+from app.services.ai_provider_service import AiNotConfiguredError, AiQuotaExceededError
 
 # Вес требования по критичности (раздел 5.5 ТЗ, п.1 методики).
 CRITICALITY_WEIGHTS: dict[str, int] = {
@@ -143,7 +151,9 @@ _SYSTEM_PROMPT = """Ты сопоставляешь требования зак�
 - [registry] — запись о допуске модели в реестре: реестр промышленной продукции (ПП РФ \
 № 719, ГИСП Минпромторга), заключение аттестационной комиссии ПАО «Россети» (ЗАК), реестр \
 российского ПО. Состояние записи (действует / истекает / истекла / проверено, что записи \
-нет) уже вычислено по датам.
+нет) уже вычислено по датам;
+- [tz] — по какой модели этого производителя составлено ТЗ закупки (найдено кодом по \
+тексту документации).
 
 Правила:
 1. Ответь по КАЖДОМУ требованию ровно один раз, указав его номер в поле `number`.
@@ -155,7 +165,8 @@ _SYSTEM_PROMPT = """Ты сопоставляешь требования зак�
 3. Не додумывай. Отсутствие упоминания — это no_data, а НЕ not_meets. Это важно: \
 not_meets означает «прибор точно не подходит», и ставить его из-за неполноты данных нельзя.
 4. `source` — откуда взят решающий факт: si_type, catalog, manual, software, registry или \
-astra. Если данных не было, укажи пустую строку.
+astra. Если данных не было, укажи пустую строку. Факт [tz] сам по себе требование не \
+подтверждает — он говорит, с какой моделью сравнивать.
 5. `explanation` — ОДНО короткое предложение по-русски (до 150 символов): какой факт из \
 карточки привёл к вердикту; для no_data — чего именно не хватает. Не пересказывай карточку.
 6. `confidence` — 0.0-1.0, насколько ты уверен. Точное совпадение числового параметра — \
@@ -196,6 +207,22 @@ meets, source astra. Если найдено только постороннее
 серверная СУБД) или в выписке прямо сказано, что ПО производителя в каталоге нет, — \
 not_meets, confidence 0.6-0.7 (производитель мог заявить совместимость без сертификата). \
 Если фактов [astra] нет — no_data.
+14. Обозначение исполнения. Модели в карточке часто названы полным обозначением \
+исполнения («CE207 R7.849.2.OG.QUVLF GS01 SPDS», «МИР С-05.10-230-5(80)-PZ»), а в [si_type] \
+есть «Структура условного обозначения» с таблицами кодов. Расшифруй обозначение модели по \
+этим таблицам и используй расшифровку как факт: у Энергомеры «R7» — корпус на рейку, \
+«8» — класс 1/2, «4» — 230 В, «9» — 5(80) А, «2» — два датчика тока, «OG» — оптопорт и \
+GSM, «QUVLF» — реле управления нагрузкой, показатели качества, электронные пломбы, \
+подсветка, датчик магнитного поля. Вердикт по расшифровке — meets, source si_type, \
+confidence 0.8-0.9; в explanation назови код («G — GSM в обозначении»). Если код в \
+таблицах не найден — не угадывай.
+15. Наличие в Госреестре СИ, утверждение типа: если в карточке есть номер в Госреестре \
+(«номер в Госреестре СИ 72632-18», «Номер в Госреестре: …») для модели требуемого типа \
+— meets, source si_type. Соответствие ГОСТ 31818.11, 31819.21/23 подтверждается тем же \
+описанием типа, если стандарт в нём назван.
+16. Программа обслуживания (конфигуратор) производителя, названная в [si_type] или \
+[manual] («обслуживание с помощью ПО «Admin Tools»»), подтверждает требование о работе с \
+этой программой — meets.
 """
 
 
@@ -233,6 +260,11 @@ class ComplianceOutcome:
     messages: list[str] = field(default_factory=list)
 
 
+# Пояснение к «нет данных», когда модель не ответила (сбой запроса, обрыв ответа): это не
+# «в каталоге нет данных», и эталон ТЗ такие ячейки не заполняет (`apply_reference_rules`).
+MODEL_NO_VERDICT = "Модель не вернула вердикт по этому требованию"
+
+
 def _no_data_verdict(number: int, explanation: str = "", confidence: float = 1.0) -> RequirementVerdict:
     """Вердикт «нет данных», сформированный кодом (а не моделью) — например, когда карточка
     производителя пуста и спрашивать не о чем."""
@@ -254,6 +286,7 @@ _SOURCE_BY_TAG = {
     "registry": ComplianceSource.ADMISSION_REGISTRY.value,
     "astra": ComplianceSource.ASTRA_CATALOG.value,
     "rule": ComplianceSource.EXPERT_RULE.value,
+    "tz": ComplianceSource.TZ_REFERENCE.value,
 }
 _STATUS_VALUES = {s.value for s in ComplianceStatus}
 
@@ -264,6 +297,7 @@ def build_manufacturer_context(
     *,
     include_manual: bool,
     requirements: list[Requirement] | None = None,
+    named_text: str = "",
 ) -> tuple[str, uuid.UUID | None]:
     """Карточка производителя для модели: факты из трёх источников с пометками.
 
@@ -275,20 +309,19 @@ def build_manufacturer_context(
     `requirements` задают, какие модели показать: в карточку помещается лишь
     `MAX_PRODUCTS_IN_CONTEXT` штук, и выбирать их надо по требованиям закупки, а не по
     алфавиту (`app/services/product_relevance.py`). Без требований — прежний порядок по
-    названию.
+    названию. `named_text` — документация закупки, где ищется прямо названная модель.
+
+    Типы СИ — те, к которым относятся отобранные модели (`_si_types_for`).
     """
 
     blocks: list[str] = []
 
-    si_types = list(
-        db.scalars(
-            select(SiType)
-            .where(SiType.manufacturer_id == manufacturer.id)
-            .order_by(SiType.verified_by_user.desc(), SiType.created_at)
-            .limit(MAX_SI_TYPES_IN_CONTEXT)
-        )
+    selected = select_products_for_context(
+        db, manufacturer, requirements or [], limit=MAX_PRODUCTS_IN_CONTEXT, named_text=named_text
     )
-    for si_type in si_types:
+    primary_product_id = selected[0].product.id if selected else None
+
+    for si_type in _si_types_for(db, manufacturer, [item.product for item in selected]):
         facts = [f"номер в Госреестре СИ {si_type.si_code}"]
         if si_type.notation:
             facts.append(f"обозначение типа {si_type.notation}")
@@ -305,13 +338,8 @@ def build_manufacturer_context(
         if si_type.description_type_text:
             blocks.append(
                 f"[si_type] Выдержка из «Описания типа» {si_type.si_code}:\n"
-                f"{si_type.description_type_text[:MAX_DESCRIPTION_CHARS]}"
+                f"{description_excerpt(si_type.description_type_text)}"
             )
-
-    selected = select_products_for_context(
-        db, manufacturer, requirements or [], limit=MAX_PRODUCTS_IN_CONTEXT
-    )
-    primary_product_id = selected[0].product.id if selected else None
 
     for product, characteristics in ((item.product, item.characteristics) for item in selected):
         if not characteristics:
@@ -354,6 +382,67 @@ def build_manufacturer_context(
         blocks.extend(astra_facts(manufacturer))
 
     return _cap_context(blocks), primary_product_id
+
+
+# Где в «Описании типа» начинается расшифровка условного обозначения и сколько начала
+# документа оставлять перед ней.
+_DESIGNATION_MARKER = re.compile(r"структур\w*\s+условного\s+обозначения", re.IGNORECASE)
+DESCRIPTION_HEAD_CHARS = 2_500
+# Сколько текста брать до маркера: перед структурой обозначения обычно абзац о программе
+# обслуживания («Admin Tools» у Энергомеры) — частое требование ТЗ.
+DESCRIPTION_LEAD_CHARS = 400
+
+
+def description_excerpt(text: str, limit: int = MAX_DESCRIPTION_CHARS) -> str:
+    """Выдержка из «Описания типа» не длиннее `limit`: начало документа и расшифровка
+    условного обозначения.
+
+    Первые 6 000 знаков подряд теряли главное: у СЕ207 (72632-18) таблицы «G — GSM»,
+    «Q — реле управления нагрузкой», «R2 — внешняя антенна» стоят на 9 400-м знаке, после
+    назначения, описания конструкции и пломбировки. Модель видела исполнение
+    «CE207 R7.849.2.OG.QUVLF» и не могла его прочитать — «нет данных» по модему и реле у
+    прибора, под который написано ТЗ."""
+
+    if len(text) <= limit:
+        return text
+    marker = _DESIGNATION_MARKER.search(text, DESCRIPTION_HEAD_CHARS)
+    if marker is None:
+        return text[:limit]
+    head = text[:DESCRIPTION_HEAD_CHARS]
+    start = max(DESCRIPTION_HEAD_CHARS, marker.start() - DESCRIPTION_LEAD_CHARS)
+    tail = text[start : start + limit - DESCRIPTION_HEAD_CHARS]
+    return f"{head}\n[…]\n{tail}"
+
+
+def _si_types_for(db: Session, manufacturer: Manufacturer, products: list[Product]) -> list[SiType]:
+    """Типы СИ для карточки: сначала типы отобранных моделей в порядке их отбора, остаток
+    мест — прочие типы производителя прежним порядком.
+
+    Раньше брались только «прочие»: четыре первых по дате записи из 155 у Энергомеры —
+    тестовая «12345-19», ЦЭ6827М, поверочная установка СУ203. Описание типа СЕ207, которое
+    расшифровывает исполнение «…OG.QUVLF» как GSM-модем и реле нагрузки, в карточку не
+    попадало, и на закупке под CE207 Энергомера получала «нет данных» по модему и реле.
+    Прочие типы добираются только когда у отобранных моделей типа нет вовсе: чужое описание
+    типа на 6 000 знаков модели не помогает, а место в карточке занимает."""
+
+    linked: list[uuid.UUID] = []
+    for product in products:
+        if product.si_type_id and product.si_type_id not in linked:
+            linked.append(product.si_type_id)
+    linked = linked[:MAX_SI_TYPES_IN_CONTEXT]
+    if linked:
+        by_id = {
+            item.id: item for item in db.scalars(select(SiType).where(SiType.id.in_(linked)))
+        }
+        return [by_id[item] for item in linked if item in by_id]
+    return list(
+        db.scalars(
+            select(SiType)
+            .where(SiType.manufacturer_id == manufacturer.id)
+            .order_by(SiType.verified_by_user.desc(), SiType.created_at)
+            .limit(MAX_SI_TYPES_IN_CONTEXT)
+        )
+    )
 
 
 # Предел длины карточки производителя. Окно YandexGPT — 32 768 токенов на запрос; проход с
@@ -462,24 +551,55 @@ def evaluate_tender(
         db.scalars(select(Manufacturer).order_by(Manufacturer.is_mirtek.desc(), Manufacturer.legal_name))
     )
 
+    named_text = tender_named_text(db, tender)
+    reference = find_reference(requirements, manufacturers, db=db, named_text=named_text)
+    if reference is not None:
+        who = reference.manufacturer.brand_name or reference.manufacturer.legal_name
+        outcome.messages.append(f"ТЗ составлено по модели {who}: {reference.label}")
     fresh = _fresh_manufacturers(db, tender, requirements, skip_fresh_since)
-    total = len(manufacturers)
-    for position, manufacturer in enumerate(manufacturers, start=1):
-        label = manufacturer.brand_name or manufacturer.legal_name
-        if manufacturer.id in fresh:
-            outcome.manufacturers_skipped += 1
-            continue
-        report_progress(f"Матрица соответствия: {position} из {total} производителей — {label}")
-        verdicts = _evaluate_manufacturer(
-            db, tender, manufacturer, requirements, outcome, use_manual_fallback=use_manual_fallback
-        )
+    pending = [item for item in manufacturers if item.id not in fresh]
+    outcome.manufacturers_skipped = len(manufacturers) - len(pending)
+    total = len(pending)
+
+    def finish(manufacturer: Manufacturer, verdicts: dict[int, RequirementVerdict]) -> None:
+        apply_reference_rules(manufacturer, requirements, verdicts, reference, manufacturers)
         _save_entries(db, tender, manufacturer, requirements, verdicts, outcome)
-        _calculate_percentage(db, tender, manufacturer, requirements, verdicts)
+        _calculate_percentage(
+            db,
+            tender,
+            manufacturer,
+            requirements,
+            verdicts,
+            reference=reference
+            if reference is not None and reference.manufacturer.id == manufacturer.id
+            else None,
+        )
         outcome.manufacturers_processed += 1
         # Коммит после каждого производителя (28.09.2026): матрица на 55 требований строится
         # 10-15 минут, и перезапуск сервера на двенадцатом производителе раньше выбрасывал
         # все одиннадцать готовых — задача начинала заново и снова не доходила до конца.
         db.commit()
+
+    if _can_run_in_parallel(db) and total > 1:
+        _evaluate_in_parallel(
+            db, tender, pending, requirements, outcome, finish,
+            use_manual_fallback=use_manual_fallback, named_text=named_text, reference=reference,
+        )
+    else:
+        for position, manufacturer in enumerate(pending, start=1):
+            label = manufacturer.brand_name or manufacturer.legal_name
+            report_progress(f"Матрица соответствия: {position} из {total} производителей — {label}")
+            verdicts = _evaluate_manufacturer(
+                db,
+                tender,
+                manufacturer,
+                requirements,
+                outcome,
+                use_manual_fallback=use_manual_fallback,
+                named_text=named_text,
+                reference=reference,
+            )
+            finish(manufacturer, verdicts)
 
     if outcome.manufacturers_skipped:
         outcome.messages.append(
@@ -489,6 +609,110 @@ def evaluate_tender(
     _request_missing_catalog_data(db, manufacturers, actor=actor)
     _log(db, tender, outcome, actor)
     return outcome
+
+
+# Сколько производителей считать одновременно. Матрица — 4-5 запросов к модели на
+# производителя, по очереди 17 производителей шли 15-17 минут (06.10.2026); четыре потока
+# укладывают их в 4-5 минут и не упираются в лимиты RouterAI (100 запросов за 10 с).
+MATRIX_WORKERS = 4
+
+
+def _can_run_in_parallel(db: Session) -> bool:
+    """Параллельно — только когда у сессии свой пул соединений (рабочий сервер). Тестовая
+    сессия живёт в одной внешней транзакции на одном соединении, и потоки со своими
+    сессиями не увидели бы её незакоммиченных данных."""
+
+    from sqlalchemy.engine import Engine
+
+    return MATRIX_WORKERS > 1 and isinstance(db.get_bind(), Engine)
+
+
+def _evaluate_in_parallel(
+    db: Session,
+    tender: Tender,
+    manufacturers: list[Manufacturer],
+    requirements: list[Requirement],
+    outcome: ComplianceOutcome,
+    finish,
+    *,
+    use_manual_fallback: bool,
+    named_text: str,
+    reference: TzReference | None,
+) -> None:
+    """Вердикты производителей считаются в потоках, каждый со своей сессией; сохраняются —
+    в основном потоке по мере готовности, с тем же коммитом после каждого производителя.
+    Контекст задачи (автор, отмена, выбранная модель) переносится в поток копией
+    `contextvars`: без неё запросы ушли бы не той модели и не остановились бы по отмене."""
+
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from app.db.session import SessionLocal
+
+    tender_id = tender.id
+    requirement_ids = [item.id for item in requirements]
+    reference_plain = (
+        None
+        if reference is None
+        else (
+            reference.manufacturer.id,
+            list(reference.designations),
+            reference.equivalent_allowed,
+            reference.clause,
+        )
+    )
+    by_id = {item.id: item for item in manufacturers}
+
+    def work(manufacturer_id: uuid.UUID) -> tuple[dict[int, RequirementVerdict], ComplianceOutcome]:
+        session = SessionLocal()
+        try:
+            local_tender = session.get(Tender, tender_id)
+            local_manufacturer = session.get(Manufacturer, manufacturer_id)
+            local_requirements = [session.get(Requirement, item) for item in requirement_ids]
+            local_reference = None
+            if reference_plain is not None:
+                local_reference = TzReference(
+                    manufacturer=session.get(Manufacturer, reference_plain[0]),
+                    designations=reference_plain[1],
+                    equivalent_allowed=reference_plain[2],
+                    clause=reference_plain[3],
+                )
+            local_outcome = ComplianceOutcome()
+            verdicts = _evaluate_manufacturer(
+                session,
+                local_tender,
+                local_manufacturer,
+                local_requirements,
+                local_outcome,
+                use_manual_fallback=use_manual_fallback,
+                named_text=named_text,
+                reference=local_reference,
+            )
+            return verdicts, local_outcome
+        finally:
+            session.close()
+
+    total = len(manufacturers)
+    done = 0
+    report_progress(f"Матрица соответствия: 0 из {total} производителей")
+    executor = ThreadPoolExecutor(max_workers=MATRIX_WORKERS, thread_name_prefix="oraclet-matrix")
+    try:
+        futures = {
+            executor.submit(contextvars.copy_context().run, work, item.id): item.id
+            for item in manufacturers
+        }
+        for future in as_completed(futures):
+            verdicts, local_outcome = future.result()
+            manufacturer = by_id[futures[future]]
+            outcome.manual_fallback_used += local_outcome.manual_fallback_used
+            outcome.messages.extend(local_outcome.messages)
+            finish(manufacturer, verdicts)
+            done += 1
+            label = manufacturer.brand_name or manufacturer.legal_name
+            report_progress(f"Матрица соответствия: {done} из {total} производителей — {label}")
+    finally:
+        # Отмена задачи или сбой — оставшиеся производители не запускаются.
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _fresh_manufacturers(
@@ -562,6 +786,8 @@ def _evaluate_manufacturer(
     outcome: ComplianceOutcome,
     *,
     use_manual_fallback: bool,
+    named_text: str = "",
+    reference: TzReference | None = None,
 ) -> dict[int, RequirementVerdict]:
     """Вердикты по всем требованиям для одного производителя.
 
@@ -571,8 +797,10 @@ def _evaluate_manufacturer(
     5.5 ТЗ (fallback, а не обязательный источник)."""
 
     context, product_id = build_manufacturer_context(
-        db, manufacturer, include_manual=False, requirements=requirements
+        db, manufacturer, include_manual=False, requirements=requirements, named_text=named_text
     )
+    if context.strip() and reference is not None and reference.manufacturer.id == manufacturer.id:
+        context = f"{reference_fact(reference)}\n{context}"
     if not context.strip():
         # Данных о производителе нет вовсе — честный no_data без обращения к модели.
         return {
@@ -589,8 +817,14 @@ def _evaluate_manufacturer(
     ]
     if use_manual_fallback and unresolved:
         manual_context, _ = build_manufacturer_context(
-            db, manufacturer, include_manual=True, requirements=requirements
+            db,
+            manufacturer,
+            include_manual=True,
+            requirements=requirements,
+            named_text=named_text,
         )
+        if manual_context.strip() and reference is not None and reference.manufacturer.id == manufacturer.id:
+            manual_context = f"{reference_fact(reference)}\n{manual_context}"
         if manual_context.strip() and manual_context != context:
             subset = [requirements[index - 1] for index in unresolved]
             fallback = _ask_in_batches(db, manufacturer, subset, manual_context, outcome)
@@ -607,7 +841,7 @@ def _evaluate_manufacturer(
 
     for index in range(1, len(requirements) + 1):
         verdicts.setdefault(
-            index, _no_data_verdict(index, "Модель не вернула вердикт по этому требованию", 0.0)
+            index, _no_data_verdict(index, MODEL_NO_VERDICT, 0.0)
         )
     # Типы каталога считаются, только когда есть «не соответствует» по типу/фазности:
     # это запрос по всем моделям производителя, а нужен он редко.
@@ -681,6 +915,151 @@ def manufacturer_kind_groups(db: Session, manufacturer: Manufacturer) -> set[str
 def _brand_matches(manufacturer: Manufacturer, brands: tuple[str, ...]) -> bool:
     names = f"{manufacturer.brand_name or ''} {manufacturer.legal_name or ''}".lower()
     return any(brand in names for brand in brands)
+
+
+def reference_fact(reference: TzReference) -> str:
+    """Строка карточки о том, что ТЗ составлено по модели этого производителя: модель
+    сравнивает требования прежде всего с ней, а не с соседними моделями карточки."""
+
+    equivalent = {
+        True: "допускается эквивалент",
+        False: "эквивалент не допускается",
+        None: "про эквивалент документация молчит",
+    }[reference.equivalent_allowed]
+    return (
+        f"[tz] ТЗ закупки составлено по модели этого производителя: {reference.label} "
+        f"({equivalent}). Требования ТЗ описывают этот прибор — сверяй их прежде всего с ним."
+    )
+
+
+# Уверенность для вердиктов по эталону ТЗ. Требование, по которому в каталоге нет данных,
+# у эталонного прибора выполняется почти всегда — ТЗ с него и переписано, — но не всегда:
+# заказчик мог дописать своё (настройка модема под оператора). Поэтому ниже порога «на
+# проверку» не опускаем, но и до уверенности фактов из каталога не поднимаем.
+REFERENCE_FILL_CONFIDENCE = 0.65
+
+
+def apply_reference_rules(
+    manufacturer: Manufacturer,
+    requirements: list[Requirement],
+    verdicts: dict[int, RequirementVerdict],
+    reference: TzReference | None,
+    manufacturers: list[Manufacturer],
+) -> None:
+    """Вердикты, которые следуют из эталона ТЗ и фирменного ПО, — кодом, поверх модели.
+
+    * «Модель прибора: X» — производителю X «соответствует»; остальным — «соответствует»
+      как эквивалент, если он допущен (решают остальные требования), и «не соответствует»,
+      если эквивалент запрещён.
+    * Фирменное ПО или сервис производителя (`vendor_exclusive`: «AdminTools», «CE
+      Net-Connection» у Энергомеры) — другим производителям «не соответствует», что бы ни
+      ответила модель: заявку с чужим прибором по этому пункту отклонят. Такие требования
+      критичные (`tender_analysis`), поэтому итог «не проходит», а не «с оговорками».
+    * Эталонному производителю «нет данных» заменяется на «соответствует по эталону ТЗ».
+      Противоречие из каталога («не соответствует») остаётся — его должен увидеть человек.
+    """
+
+    is_reference = reference is not None and reference.manufacturer.id == manufacturer.id
+    who_reference = (
+        (reference.manufacturer.brand_name or reference.manufacturer.legal_name)
+        if reference is not None
+        else ""
+    )
+    for index, requirement in enumerate(requirements, start=1):
+        current = verdicts.get(index)
+        status = current.status if current else ComplianceStatus.NO_DATA.value
+
+        if is_model_requirement(requirement):
+            owner = match_manufacturer(requirement.vendor, manufacturers) or (
+                reference.manufacturer if reference is not None else None
+            )
+            if owner is None:
+                continue
+            owner_name = owner.brand_name or owner.legal_name
+            designation = (requirement.normalized_text or "").split(":", 1)[-1].strip()
+            if owner.id == manufacturer.id:
+                verdicts[index] = RequirementVerdict(
+                    number=index,
+                    status=ComplianceStatus.MEETS.value,
+                    source="tz",
+                    explanation=f"ТЗ называет модель этого производителя: {designation}"[:300],
+                    confidence=0.95,
+                )
+            elif reference is not None and reference.equivalent_allowed is False:
+                verdicts[index] = RequirementVerdict(
+                    number=index,
+                    status=ComplianceStatus.NOT_MEETS.value,
+                    source="rule",
+                    explanation=(
+                        f"Эквивалент не допускается: закупается модель {owner_name} "
+                        f"«{designation}»"
+                    )[:300],
+                    confidence=0.95,
+                )
+            else:
+                allowed = reference is None or reference.equivalent_allowed is True
+                verdicts[index] = RequirementVerdict(
+                    number=index,
+                    status=ComplianceStatus.MEETS.value,
+                    source="rule",
+                    explanation=(
+                        f"Эталон ТЗ — {owner_name}; "
+                        + (
+                            "эквивалент допускается, соответствие оценивается по остальным "
+                            "требованиям"
+                            if allowed
+                            else "допустим ли эквивалент, документация не говорит — проверить"
+                        )
+                    )[:300],
+                    confidence=0.7 if allowed else 0.4,
+                )
+            continue
+
+        if requirement.vendor_exclusive:
+            owner = match_manufacturer(requirement.vendor, manufacturers)
+            if owner is None:
+                continue  # производителя нет в справочнике — решает модель по фактам
+            what = (requirement.normalized_text or requirement.text or "")[:120]
+            if owner.id != manufacturer.id:
+                verdicts[index] = RequirementVerdict(
+                    number=index,
+                    status=ComplianceStatus.NOT_MEETS.value,
+                    source="rule",
+                    explanation=(
+                        f"Требуется фирменное ПО/сервис {owner.brand_name or owner.legal_name} "
+                        f"({what}) — прибор другого производителя его не поддерживает"
+                    )[:300],
+                    confidence=0.9,
+                )
+            elif status == ComplianceStatus.NO_DATA.value:
+                verdicts[index] = RequirementVerdict(
+                    number=index,
+                    status=ComplianceStatus.MEETS.value,
+                    source="tz",
+                    explanation=f"Фирменное ПО/сервис самого производителя: {what}"[:300],
+                    confidence=0.8,
+                )
+            continue
+
+        if (
+            is_reference
+            and status == ComplianceStatus.NO_DATA.value
+            # Модель не ответила — сбой, а не пустота каталога: «соответствует по эталону»
+            # спрятало бы его (06.10.2026: при нулевом балансе RouterAI Энергомера получила
+            # бы «проходит» без единого ответа модели).
+            and (current is None or current.explanation != MODEL_NO_VERDICT)
+        ):
+            verdicts[index] = RequirementVerdict(
+                number=index,
+                status=ComplianceStatus.MEETS.value,
+                source="tz",
+                explanation=(
+                    f"ТЗ составлено по модели {who_reference} {reference.label} — требование "
+                    "описывает эталонный прибор; в каталоге подтверждения нет, проверить по "
+                    "паспорту"
+                )[:300],
+                confidence=REFERENCE_FILL_CONFIDENCE,
+            )
 
 
 def apply_expert_rules(
@@ -790,9 +1169,12 @@ def _ask_model(
     context: str,
     outcome: ComplianceOutcome,
 ) -> dict[int, RequirementVerdict]:
+    # Карточка — первой, требования — после (06.10.2026). Карточка одна на все пачки
+    # производителя, и одинаковое начало запроса провайдер берёт из кэша (у DeepSeek —
+    # автоматически, в разы дешевле); при обратном порядке начало менялось с каждой пачкой.
     user_text = (
-        f"ТРЕБОВАНИЯ ЗАКУПКИ:\n{_requirements_block(requirements)}\n\n"
-        f"КАРТОЧКА ПРОИЗВОДИТЕЛЯ «{manufacturer.brand_name or manufacturer.legal_name}»:\n{context}"
+        f"КАРТОЧКА ПРОИЗВОДИТЕЛЯ «{manufacturer.brand_name or manufacturer.legal_name}»:\n{context}\n\n"
+        f"ТРЕБОВАНИЯ ЗАКУПКИ:\n{_requirements_block(requirements)}"
     )
     try:
         result = run_structured(
@@ -801,6 +1183,12 @@ def _ask_model(
             user_text=user_text,
             response_model=ComplianceResult,
         )
+    except (AiQuotaExceededError, AiNotConfiguredError):
+        # Деньги кончились или модель выключена — остальные запросы упрутся в то же самое.
+        # Расчёт останавливается с ошибкой: посчитанные производители уже сохранены, а
+        # продолжение досчитает остальных. Раньше задача шла дальше, на каждый запрос
+        # получала отказ и завершалась «успешно» с пустой матрицей (06.10.2026).
+        raise
     except Exception as exc:  # noqa: BLE001 - сбой по одному производителю не рушит весь расчёт
         logger.warning(f"Сопоставление для «{manufacturer.legal_name}» не удалось: {exc}")
         outcome.messages.append(f"{manufacturer.legal_name}: сопоставление не выполнено ({exc})")
@@ -912,6 +1300,8 @@ def _calculate_percentage(
     manufacturer: Manufacturer,
     requirements: list[Requirement],
     verdicts: dict[int, RequirementVerdict],
+    *,
+    reference: TzReference | None = None,
 ) -> None:
     percentage, scored = calculate_percentage(requirements, verdicts)
 
@@ -946,6 +1336,8 @@ def _calculate_percentage(
     # данных добавляем, иначе итог в списке производителей было бы нечем объяснить.
     if verdict in (WinVerdict.CAVEATS.value, WinVerdict.UNKNOWN.value):
         reason = f"{reason}. {verdict_reason}"
+    if reference is not None:
+        reason = f"Эталон ТЗ — {reference.label}. {reason}"
 
     # Пересчёт не правит прежнюю строку, а гасит её и добавляет новую (решение 03.09.2026,
     # раздел 7 ТЗ): каталог пополняется, процент от этого меняется, и без истории пересчётов
@@ -971,6 +1363,7 @@ def _calculate_percentage(
             requirements_total=len(requirements),
             requirements_scored=scored,
             verdict=verdict,
+            tz_reference=reference is not None,
             is_current=True,
         )
     )

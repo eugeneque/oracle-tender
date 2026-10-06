@@ -111,6 +111,7 @@ def get_compliance_matrix(db: Session, tender: Tender) -> ComplianceMatrixOut:
             requirements_total=record.requirements_total,
             requirements_scored=record.requirements_scored,
             verdict=record.verdict,
+            tz_reference=record.tz_reference,
             calculated_at=record.calculated_at,
         )
         for record in db.scalars(
@@ -208,7 +209,9 @@ def attach_analysis_fields(
             )
         ).all()
     }
-    assignee_ids = [tender.assignee_id for tender in tenders if tender.assignee_id]
+    assignee_ids = [tender.assignee_id for tender in tenders if tender.assignee_id] + [
+        tender.relevance_marked_by_id for tender in tenders if tender.relevance_marked_by_id
+    ]
     assignees: dict[uuid.UUID, str] = (
         dict(
             db.execute(
@@ -236,6 +239,9 @@ def attach_analysis_fields(
         data["ai_decision"] = decision
         data["requirements_count"] = counts.get(analysed_id, 0)
         data["assignee_name"] = assignees.get(tender.assignee_id) if tender.assignee_id else None
+        data["relevance_marked_by_name"] = (
+            assignees.get(tender.relevance_marked_by_id) if tender.relevance_marked_by_id else None
+        )
         data["is_bookmarked"] = tender.id in bookmarked
         data["tags"] = tags_by_tender.get(tender.id, [])
         enriched.append(data)

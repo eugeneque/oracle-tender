@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
+  Ban,
+  CheckCircle2,
   ArrowDown,
   ArrowUp,
   Building2,
@@ -48,6 +50,7 @@ import {
 import { AppShell } from "../components/AppShell";
 import { ConfidenceBar } from "../components/ConfidenceBar";
 import { DecisionMark } from "../components/DecisionMark";
+import { RelevanceMark } from "../components/RelevanceMark";
 import { DropdownMenu } from "../components/DropdownMenu";
 import { NewRequestModal } from "../components/NewRequestModal";
 import { OkpdPickerModal } from "../components/OkpdTreePicker";
@@ -196,6 +199,12 @@ function TenderCard({
         )}
         {tender.title}
       </h3>
+
+      {tender.relevance_status !== "new" && (
+        <div className="mb-2.5 flex">
+          <RelevanceMark tender={tender} />
+        </div>
+      )}
 
       {tender.tags.length > 0 && (
         <div className="mb-2.5">
@@ -363,8 +372,36 @@ interface TendersFilters {
    * от «Избранного» остальные фильтры действуют: минутка интересна, пока на неё ещё можно
    * успеть подать заявку. */
   minutesOnly: boolean;
+  /** Разделы «Релевантные» и «Неактуальные» (06.10.2026): закупки, которые специалист уже
+   * отметил в карточке, — общие для всех. Как «Избранное», вне профилей, проверки моделью и
+   * скрытия просроченных: иначе у каждого был бы свой список, а смысл раздела в том, что
+   * коллеги видят одно и то же. */
+  markedList: MarkedList | null;
   /** Теги (замечание 17.09.2026): закупка проходит, если у неё есть хотя бы один из них. */
   tagIds: string[];
+}
+
+type MarkedList = "relevant" | "rejected";
+
+const MARKED_LIST_LABELS: Record<MarkedList, string> = {
+  relevant: "Релевантные",
+  rejected: "Неактуальные",
+};
+const MARKED_LIST_HINTS: Record<MarkedList, string> = {
+  relevant: "Закупки, которые специалисты отметили «Релевантна», — общий список для всех.",
+  rejected: "Закупки, которые специалисты отметили «Неактуально», — общий список для всех.",
+};
+const MARKED_LIST_ICONS: Record<MarkedList, typeof CheckCircle2> = {
+  relevant: CheckCircle2,
+  rejected: Ban,
+};
+const MARKED_LIST_ACTIVE_CLASSES: Record<MarkedList, string> = {
+  relevant: "border-emerald-400/40 bg-emerald-500/10 text-emerald-300",
+  rejected: "border-zinc-400/40 bg-zinc-500/10 text-zinc-300",
+};
+
+function parseMarkedList(value: string | null): MarkedList | null {
+  return value === "relevant" || value === "rejected" ? value : null;
 }
 
 // По умолчанию скрываем тендеры с истёкшим сроком подачи: собранные тендеры — это broad-поиск
@@ -385,6 +422,7 @@ const DEFAULT_FILTERS: TendersFilters = {
   onlyAiSelected: false,
   favouritesOnly: false,
   minutesOnly: false,
+  markedList: null,
   tagIds: [],
   regionCodes: [],
   tenderTypes: [],
@@ -463,11 +501,15 @@ function buildFilterParams(filters: TendersFilters): URLSearchParams {
   if (filters.priceMax) params.set("price_max", filters.priceMax);
   if (filters.favouritesOnly) params.set("bookmarked", "true");
   if (filters.minutesOnly) params.set("same_day", "true");
+  if (filters.markedList) params.set("marked", filters.markedList);
+  // Разделы «Избранное», «Релевантные», «Неактуальные» — вне личных профилей, проверки
+  // моделью и срока подачи: отмеченная закупка не должна пропадать из общего списка.
+  const sharedSection = filters.favouritesOnly || filters.markedList !== null;
   for (const id of filters.tagIds) params.append("tag", id);
-  if (filters.hideExpired && !filters.favouritesOnly) params.set("hide_expired", "true");
+  if (filters.hideExpired && !sharedSection) params.set("hide_expired", "true");
   // «Избранное» — вне профилей и проверки моделью: отложенная вручную закупка не должна
   // исчезать из раздела, потому что не подошла под отбор.
-  if (filters.hideAiRejected && !filters.favouritesOnly) params.set("hide_ai_rejected", "true");
+  if (filters.hideAiRejected && !sharedSection) params.set("hide_ai_rejected", "true");
   if (filters.onlyAiSelected) params.set("only_ai_selected", "true");
   for (const code of filters.regionCodes) params.append("region", code);
   for (const value of filters.tenderTypes) params.append("tender_type", value);
@@ -477,12 +519,12 @@ function buildFilterParams(filters: TendersFilters): URLSearchParams {
     params.append("relevance_status", value);
   for (const value of filters.stages) params.append("stage", value);
   for (const code of filters.okpd2) params.append("okpd2", code);
-  if (!filters.favouritesOnly) {
+  if (!sharedSection) {
     if (filters.relevanceProfileIds === null) params.set("relevance_profile_default", "true");
     else for (const id of filters.relevanceProfileIds) params.append("relevance_profile", id);
   }
   const profileCount = filters.relevanceProfileIds === null ? 2 : filters.relevanceProfileIds.length;
-  if (!filters.favouritesOnly && profileCount > 1)
+  if (!sharedSection && profileCount > 1)
     params.set("relevance_profile_mode", filters.relevanceProfileMode);
   if (filters.winPercentMin)
     params.set("win_percentage_min", filters.winPercentMin);
@@ -621,9 +663,9 @@ function FiltersPanel({
         <div className="flex items-center gap-1.5">
           <span className="mr-1 text-xs text-zinc-500">Раздел:</span>
           <button
-            onClick={() => onChange({ favouritesOnly: false, minutesOnly: false })}
+            onClick={() => onChange({ favouritesOnly: false, minutesOnly: false, markedList: null })}
             className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
-              !filters.favouritesOnly && !filters.minutesOnly
+              !filters.favouritesOnly && !filters.minutesOnly && !filters.markedList
                 ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-300"
                 : "border-white/10 text-zinc-500 hover:text-zinc-300"
             }`}
@@ -631,7 +673,7 @@ function FiltersPanel({
             Все закупки
           </button>
           <button
-            onClick={() => onChange({ favouritesOnly: true, minutesOnly: false })}
+            onClick={() => onChange({ favouritesOnly: true, minutesOnly: false, markedList: null })}
             aria-pressed={filters.favouritesOnly}
             title="Отложенные закупки: то, что отмечено звёздочкой в карточке. Показываются независимо от срока подачи и профиля."
             className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
@@ -644,7 +686,7 @@ function FiltersPanel({
             Избранное
           </button>
           <button
-            onClick={() => onChange({ minutesOnly: true, favouritesOnly: false })}
+            onClick={() => onChange({ minutesOnly: true, favouritesOnly: false, markedList: null })}
             aria-pressed={filters.minutesOnly}
             title="Тендеры-минутки: срок подачи заявок истекает в день размещения."
             className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
@@ -656,6 +698,24 @@ function FiltersPanel({
             <Timer size={11} />
             Минутки
           </button>
+          {(["relevant", "rejected"] as const).map((value) => {
+            const Icon = MARKED_LIST_ICONS[value];
+            const active = filters.markedList === value;
+            return (
+              <button
+                key={value}
+                onClick={() => onChange({ markedList: value, favouritesOnly: false, minutesOnly: false })}
+                aria-pressed={active}
+                title={MARKED_LIST_HINTS[value]}
+                className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                  active ? MARKED_LIST_ACTIVE_CLASSES[value] : "border-white/10 text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                <Icon size={11} />
+                {MARKED_LIST_LABELS[value]}
+              </button>
+            );
+          })}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="mr-1 flex items-center gap-1 text-xs text-zinc-500">
@@ -1089,6 +1149,7 @@ function countActiveFilters(filters: TendersFilters): number {
   if (filters.onlyAiSelected) count += 1;
   if (filters.favouritesOnly) count += 1;
   if (filters.minutesOnly) count += 1;
+  if (filters.markedList) count += 1;
   if (filters.tagIds.length > 0) count += 1;
   if (filters.relevanceProfileIds !== null) count += 1;
   return count;
@@ -1141,7 +1202,7 @@ export function TendersPage() {
   useEffect(() => {
     if (!searchParams.has("favourites")) return;
     setOffset(0);
-    setFilters((prev) => ({ ...prev, favouritesOnly: true, minutesOnly: false }));
+    setFilters((prev) => ({ ...prev, favouritesOnly: true, minutesOnly: false, markedList: null }));
     setSearchParams({}, { replace: true });
   }, [searchParams, setSearchParams]);
   // Раздел «Минутки» живёт в адресе (`?minutes=1`), в отличие от «Избранного»: у него свой
@@ -1158,6 +1219,19 @@ export function TendersPage() {
       favouritesOnly: minutesInUrl ? false : prev.favouritesOnly,
     }));
   }, [minutesInUrl, filters.minutesOnly]);
+  // «Релевантные» / «Неактуальные» — так же через адрес (`?marked=relevant|rejected`): у
+  // разделов свои пункты меню.
+  const markedInUrl = parseMarkedList(searchParams.get("marked"));
+  useEffect(() => {
+    if (filters.markedList === markedInUrl) return;
+    setOffset(0);
+    setFilters((prev) => ({
+      ...prev,
+      markedList: markedInUrl,
+      favouritesOnly: markedInUrl ? false : prev.favouritesOnly,
+      minutesOnly: markedInUrl ? false : prev.minutesOnly,
+    }));
+  }, [markedInUrl, filters.markedList]);
   // Ссылка «Тендеры Госплана» (Селдона, Тендерплана) из настроек (`?feed=gosplan`): канал
   // уже выбран начальным состоянием, параметр только запоминается и снимается с адреса.
   useEffect(() => {
@@ -1343,12 +1417,20 @@ export function TendersPage() {
   // выборки пользователь оказывается на пустой пятой странице и решает, что ничего не нашлось.
   const updateFilters = (patch: Partial<TendersFilters>) => {
     setOffset(0);
-    if (patch.minutesOnly !== undefined && patch.minutesOnly !== minutesInUrl) {
+    const minutesChanged = patch.minutesOnly !== undefined && patch.minutesOnly !== minutesInUrl;
+    const markedChanged = patch.markedList !== undefined && patch.markedList !== markedInUrl;
+    if (minutesChanged || markedChanged) {
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
-          if (patch.minutesOnly) next.set("minutes", "1");
-          else next.delete("minutes");
+          if (minutesChanged) {
+            if (patch.minutesOnly) next.set("minutes", "1");
+            else next.delete("minutes");
+          }
+          if (markedChanged) {
+            if (patch.markedList) next.set("marked", patch.markedList);
+            else next.delete("marked");
+          }
           return next;
         },
         { replace: true },
@@ -1757,6 +1839,7 @@ export function TendersPage() {
                     relevanceProfileMode: filters.relevanceProfileMode,
                     hideAiRejected: filters.hideAiRejected,
                     minutesOnly: filters.minutesOnly,
+                    markedList: filters.markedList,
                   })
                 }
                 onOpenGuide={() => setIsGuideOpen(true)}
@@ -1767,8 +1850,23 @@ export function TendersPage() {
 
           {(filters.favouritesOnly ||
             filters.minutesOnly ||
+            filters.markedList ||
             filters.tagIds.length > 0) && (
             <div className="flex flex-wrap items-center gap-1.5">
+              {filters.markedList && (() => {
+                const Icon = MARKED_LIST_ICONS[filters.markedList];
+                return (
+                  <button
+                    onClick={() => updateFilters({ markedList: null })}
+                    className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] leading-none ${MARKED_LIST_ACTIVE_CLASSES[filters.markedList]}`}
+                    title={`Выйти из раздела «${MARKED_LIST_LABELS[filters.markedList]}»`}
+                  >
+                    <Icon size={11} />
+                    {MARKED_LIST_LABELS[filters.markedList]}
+                    <X size={11} />
+                  </button>
+                );
+              })()}
               {filters.minutesOnly && (
                 <button
                   onClick={() => updateFilters({ minutesOnly: false })}

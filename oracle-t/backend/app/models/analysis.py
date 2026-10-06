@@ -46,6 +46,11 @@ class RequirementKind(str, enum.Enum):
     PRODUCT = "product"  # характеристики прибора, комплектация, документы на товар
     SERVICE = "service"  # состав и объём работ/услуг, сроки, гарантия на работы, приёмка
     PARTICIPANT = "participant"  # допуски, лицензии, стаж, персонал участника
+    # Условия поставки (06.10.2026): новый товар, год выпуска, дата поверки, упаковка,
+    # документы при отгрузке, приёмка, претензии, замена брака. Их выполняет поставщик, какой
+    # бы прибор он ни вёз, — в матрице соответствия они давали «нет данных» всем
+    # производителям и тянули итог в «не хватает данных».
+    SUPPLY = "supply"
 
 
 class Criticality(str, enum.Enum):
@@ -83,6 +88,9 @@ class ComplianceSource(str, enum.Enum):
     # Правило тендерного отдела из комментария файла «Параметры для ПУ», выполненное кодом
     # (например, трёхпозиционный переключатель реле — только три производителя).
     EXPERT_RULE = "expert_rule"
+    # ТЗ составлено по модели этого производителя («CE207 … или эквивалент»): требование, по
+    # которому в каталоге нет данных, описывает сам эталонный прибор (06.10.2026).
+    TZ_REFERENCE = "tz_reference"
 
 
 class WinVerdict(str, enum.Enum):
@@ -133,6 +141,16 @@ class Requirement(Base):
     # Номер параметра из файла тендерного отдела «Параметры для ПУ» (1-39,
     # `app/seed/meter_parameters.py`); NULL — требование ни к одному параметру не отнесено.
     parameter_no: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    # Производитель, которому принадлежит названное в требовании фирменное ПО, сервис или
+    # модель («AdminTools», «CE Net-Connection» — Энергомера), как его назвала модель; NULL —
+    # требование ни к чьей продукции не привязано (06.10.2026).
+    vendor: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Выполнимо ли требование только продукцией `vendor`: фирменное ПО или сервис без «или
+    # эквивалент». Обозначение эталонной модели с «или эквивалент» — `vendor` есть, а
+    # исключительности нет: эквивалент другого производителя допустим.
+    vendor_exclusive: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     verified_by_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -225,6 +243,10 @@ class WinPercentage(Base):
     # по методике считается арифметически, а заявку отклоняют по одному критичному
     # несоответствию, сколько бы остальных требований ни выполнялось.
     verdict: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # ТЗ составлено по модели этого производителя (`tz_reference.find_reference`, 06.10.2026).
+    tz_reference: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     calculated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

@@ -20,6 +20,7 @@ const TAB_KEY = "home.tab";
 // Раскладки мозаики на широком экране: четыре колонки, `hero` — центральная плитка.
 // Каждый `id` из homeSlides должен встретиться здесь ровно одной прямоугольной областью.
 const NEWS_AREAS = [
+  "tz-reference tz-reference marked-lists marked-lists",
   "selection selection profiles profiles",
   "okpd2-tree hero hero minutes",
   "tenders-header hero hero feeds",

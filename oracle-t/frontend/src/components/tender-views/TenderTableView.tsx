@@ -4,6 +4,7 @@ import type { Tender } from "../../api/types";
 import { TruncatedText } from "./TruncatedText";
 import { TagRow } from "../tags/TagChip";
 import { DecisionMark } from "../DecisionMark";
+import { RelevanceMark } from "../RelevanceMark";
 import {
   daysLeft,
   formatDate,
@@ -144,6 +145,7 @@ export function TenderTableView({
                 <td className="max-w-0 px-2.5 py-2">
                   <div className="flex items-center gap-1.5">
                     <DecisionMark decision={tender.ai_decision} size="sm" />
+                    <RelevanceMark tender={tender} compact />
                     {tender.is_bookmarked && (
                       <Star size={12} fill="currentColor" className="shrink-0 text-amber-400" aria-label="В избранном" />
                     )}

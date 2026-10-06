@@ -312,3 +312,43 @@ def test_regions_dictionary_available(client, admin_token):
     regions = response.json()
     assert regions, "справочник регионов пуст — не выполнен сид Приложения H"
     assert {"code", "name", "federal_district_code"} <= set(regions[0])
+
+
+def test_relevance_mark_records_author_and_feeds_shared_lists(db_session, admin_user):
+    """Разделы «Релевантные» / «Неактуальные» (06.10.2026): специалист отметил закупку —
+    она в общем списке, с автором и временем отметки; переход дальше по пайплайну автора
+    не меняет, возврат в «новые» отметку снимает."""
+
+    source = _source(db_session)
+    relevant = _tender(db_session, source)
+    rejected = _tender(db_session, source)
+    untouched = _tender(db_session, source)
+
+    set_relevance(db_session, relevant, RelevanceStatus.CONFIRMED.value, actor=admin_user)
+    set_relevance(db_session, rejected, RelevanceStatus.REJECTED.value, actor=admin_user)
+
+    assert relevant.relevance_marked_by_id == admin_user.id
+    assert relevant.relevance_marked_at is not None
+    assert untouched.relevance_marked_by_id is None
+
+    marked_at = relevant.relevance_marked_at
+    update_tender(db_session, relevant, {"stage": "application_submitted"}, actor=admin_user)
+    assert relevant.relevance_marked_at == marked_at
+
+    ids_relevant = {
+        item.id
+        for item in list_tenders(
+            db_session, filters=TenderFilters(source_keys=[source.key], marked="relevant")
+        )
+    }
+    ids_rejected = {
+        item.id
+        for item in list_tenders(
+            db_session, filters=TenderFilters(source_keys=[source.key], marked="rejected")
+        )
+    }
+    assert ids_relevant == {relevant.id}
+    assert ids_rejected == {rejected.id}
+
+    set_relevance(db_session, rejected, RelevanceStatus.NEW.value, actor=admin_user)
+    assert rejected.relevance_marked_by_id is None

@@ -48,6 +48,7 @@ from app.models.analysis import (
     RequirementKind,
     TenderOutcome,
     WinPercentage,
+    WinVerdict,
 )
 from app.models.company_participation import (
     OUTCOME_LABELS,
@@ -387,6 +388,7 @@ _KIND_LABELS = {
     RequirementKind.PRODUCT.value: "к товару",
     RequirementKind.SERVICE.value: "к работам",
     RequirementKind.PARTICIPANT.value: "к участнику",
+    RequirementKind.SUPPLY.value: "условия поставки",
 }
 
 
@@ -1000,6 +1002,56 @@ def _history_dimension(
     )
 
 
+# Потолки, когда наш прибор не проходит (06.10.2026). Закупка 32616436166: заключение «НЕ
+# ИДТИ — ТЗ требует фирменное ПО Энергомеры», а рядом бейдж «AI 67%» — среднее истории,
+# задачи и компетенций, которое о провале по критичному требованию не знало.
+# «Задача» — может ли компания выполнить предмет закупки своими приборами: при «не проходит»
+# в матрице это красная зона. Итог при заключении «не подходим» — тоже красная зона, ниже
+# порога «с оговорками» (50).
+FAILED_MATRIX_TASK_CAP = 20
+NOT_FIT_OVERALL_CAP = 30
+
+
+def _apply_matrix_gate(
+    db: Session,
+    tender: Tender,
+    task_score: Decimal | None,
+    task_comment: str | None,
+    task_checklist: list[dict] | None,
+) -> tuple[Decimal | None, str | None]:
+    """«Задача» не выше `FAILED_MATRIX_TASK_CAP`, если в матрице соответствия приборы МИРТЕК
+    не проходят по критичному требованию. Причина дописывается в комментарий и чек-лист."""
+
+    row = db.execute(
+        select(WinPercentage.verdict, WinPercentage.reason_summary)
+        .join(Manufacturer, Manufacturer.id == WinPercentage.manufacturer_id)
+        .where(
+            WinPercentage.tender_id == tender.id,
+            WinPercentage.is_current.is_(True),
+            Manufacturer.is_mirtek.is_(True),
+        )
+    ).first()
+    if row is None or row.verdict != WinVerdict.FAILS.value or task_score is None:
+        return task_score, task_comment
+    if task_score <= FAILED_MATRIX_TASK_CAP:
+        return task_score, task_comment
+    reason = (row.reason_summary or "не выполнены критичные требования")[:300]
+    if task_checklist is not None:
+        task_checklist.append(
+            _checklist_item(
+                "Приборы МИРТЕК проходят по критичным требованиям ТЗ",
+                CheckStatus.NOT_MET.value,
+                reason,
+                mandatory=True,
+            )
+        )
+    note = (
+        f"Оценка ограничена {FAILED_MATRIX_TASK_CAP}%: по матрице соответствия приборы МИРТЕК "
+        f"не проходят — {reason}"
+    )
+    return Decimal(FAILED_MATRIX_TASK_CAP), f"{task_comment} {note}".strip() if task_comment else note
+
+
 def _overall(
     history: Decimal | None, task: Decimal | None, competencies: Decimal | None
 ) -> Decimal | None:
@@ -1313,6 +1365,7 @@ def compute_profile_score(
             "Оценка не посчитана, прежняя оставлена без изменений: " + "; ".join(outcome.messages)
         )
 
+    task_score, task_comment = _apply_matrix_gate(db, tender, task_score, task_comment, task_checklist)
     history_score, history_comment, history_evidence = _history_dimension(db, tender)
     overall = _overall(history_score, task_score, competencies_score)
 
@@ -1370,6 +1423,14 @@ def compute_profile_score(
     except Exception as exc:  # noqa: BLE001 - запасной путь ниже
         logger.warning(f"Заключение по тендеру {tender.external_id} не составлено: {exc}")
         outcome.messages.append(f"Заключение не составлено: {exc}")
+
+    if conclusion is not None and conclusion.get("fit") == "not_fit" and overall is not None:
+        if overall > NOT_FIT_OVERALL_CAP:
+            outcome.messages.append(
+                f"итоговая оценка {float(overall):.0f}% ограничена {NOT_FIT_OVERALL_CAP}%: "
+                "заключение — «не подходим»"
+            )
+            overall = Decimal(NOT_FIT_OVERALL_CAP)
 
     if conclusion is not None:
         verdict = _verdict_from_conclusion(conclusion, decision)

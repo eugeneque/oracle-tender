@@ -38,7 +38,7 @@ from app.models.source import (
     Source,
     SourceStatus,
 )
-from app.models.tender import Tender, TenderStatus
+from app.models.tender import RelevanceStatus, Tender, TenderStatus
 from app.services import notification_service
 from app.services import ai_relevance_service, relevance_service
 from app.services.audit import log_action
@@ -473,6 +473,9 @@ class TenderFilters:
     # сравниваются по Москве — `application_end` хранится в UTC, и закупка, закрывающаяся
     # в 01:00 по Москве, в UTC попала бы на предыдущий день.
     same_day_deadline: bool = False
+    # Раздел «Релевантные» / «Неактуальные» (06.10.2026): закупки, которые специалист уже
+    # отметил. `relevant` — «Релевантна» и дальше по пайплайну, `rejected` — «Неактуально».
+    marked: str | None = None
     # Поля, которые заполняет ИИ-анализ (Этапы 5-6). Пока анализ не выполнен, они пустые —
     # тендер просто не попадёт в выдачу с таким фильтром, и это верно: пользователь ищет
     # разобранные закупки.
@@ -699,6 +702,10 @@ def _build_conditions(filters: TenderFilters) -> list:
         conditions.append(Tender.ai_relevant.is_not(False))
     if filters.only_ai_selected:
         conditions.append(Tender.ai_relevant.is_(True))
+    if filters.marked == "relevant":
+        conditions.append(Tender.relevance_status == RelevanceStatus.CONFIRMED.value)
+    elif filters.marked == "rejected":
+        conditions.append(Tender.relevance_status == RelevanceStatus.REJECTED.value)
     if filters.same_day_deadline:
         conditions.append(
             cast(func.timezone("Europe/Moscow", Tender.application_end), Date)

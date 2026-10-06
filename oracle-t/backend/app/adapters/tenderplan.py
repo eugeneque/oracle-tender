@@ -47,6 +47,7 @@ from app.adapters.base import (
 )
 from app.adapters.eis_documents import normalize_eis_number
 from app.adapters.http_utils import DEFAULT_USER_AGENT, fetch_with_retry
+from app.services import okpd2_service
 
 BASE_URL = "https://tenderplan.ru"
 SOURCE_KEY = "tenderplan"
@@ -245,7 +246,7 @@ class TenderplanAdapter(SourceAdapter):
             application_start=_from_millis(item.get("submissionStartDateTime")),
             application_end=_from_millis(item.get("submissionCloseDateTime")),
             publish_date=published_at.date() if published_at else None,
-            okpd2_code=okpd2[0] if okpd2 else None,
+            okpd2_code=okpd2_service.pick_relevant(okpd2),
             region_code=_region_code(item.get("region")),
         )
 

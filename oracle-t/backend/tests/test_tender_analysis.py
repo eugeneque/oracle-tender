@@ -19,6 +19,8 @@ from app.models.tender import Tender, TenderType
 from app.models.user import User
 from app.services.tender_analysis import (
     ClassificationResult,
+    ConsolidationResult,
+    DuplicateGroup,
     ExtractedRequirement,
     RequirementsResult,
     analyze_tender,
@@ -116,19 +118,24 @@ def _requirement(**overrides) -> ExtractedRequirement:
         "criticality": Criticality.IMPORTANT.value,
         "group_name": "",
         "parameter_no": 0,
+        "vendor": "",
+        "vendor_exclusive": False,
     }
     data.update(overrides)
     return ExtractedRequirement(**data)
 
 
-def _patch_model(monkeypatch, *, classification=None, requirements=None):
-    """Подменяет вызов модели: тип ответа определяется запрошенной схемой."""
+def _patch_model(monkeypatch, *, classification=None, requirements=None, duplicates=None):
+    """Подменяет вызов модели: тип ответа определяется запрошенной схемой. `duplicates` —
+    ответ прохода сведения повторов (по умолчанию «повторов нет»)."""
 
     def _fake(db, *, system_prompt, user_text, response_model, **kwargs):
         if response_model is ClassificationResult:
             if classification is None:
                 raise RuntimeError("модель недоступна")
             return classification
+        if response_model is ConsolidationResult:
+            return duplicates or ConsolidationResult(groups=[])
         if requirements is None:
             raise RuntimeError("модель недоступна")
         return requirements
@@ -456,3 +463,118 @@ def test_long_documentation_keeps_chunks_about_the_device():
 def test_short_documentation_is_read_whole():
     chunks = [f"кусок {index}" for index in range(analysis_module.MAX_CHUNKS_PER_TENDER)]
     assert analysis_module._select_chunks(chunks) == chunks
+
+
+def test_same_normalized_requirement_is_saved_once_with_strongest_criticality(
+    db_session, admin_user: User, monkeypatch
+):
+    """Закупка 32616436166: ТЗ целиком вложено в проект договора, и «Гарантийный срок: не
+    менее 7 лет» приходило четырежды с разными исходными фразами. Остаётся одно, и с
+    наибольшей критичностью из повторов."""
+
+    tender = _make_tender(db_session)
+    _patch_model(
+        monkeypatch,
+        classification=_classification(),
+        requirements=RequirementsResult(
+            requirements=[
+                _requirement(
+                    text="Гарантийный срок эксплуатации должен составлять не менее 7 лет",
+                    normalized_text="Гарантийный срок: не менее 7 лет",
+                ),
+                _requirement(
+                    text="Гарантийный срок должен составлять не менее 7 (семи) лет",
+                    normalized_text="Гарантийный срок: не менее 7 лет",
+                    criticality=Criticality.CRITICAL.value,
+                ),
+            ]
+        ),
+    )
+
+    outcome = analyze_tender(db_session, tender, actor=admin_user)
+
+    saved = db_session.query(Requirement).filter(Requirement.tender_id == tender.id).all()
+    assert [item.criticality for item in saved] == [Criticality.CRITICAL.value]
+    assert outcome.duplicates_removed == 1
+
+
+def test_semantic_duplicates_are_merged_but_model_designation_survives(
+    db_session, admin_user: User, monkeypatch
+):
+    """Проход сведения убирает смысловые повторы, но обозначение эталонной модели не
+    поглощает: на живом прогоне «Модель прибора: CE207 …» ушло в «Тип прибора»."""
+
+    tender = _make_tender(db_session)
+    _patch_model(
+        monkeypatch,
+        classification=_classification(),
+        requirements=RequirementsResult(
+            requirements=[
+                _requirement(text="Протокол СПОДЭС", normalized_text="Протокол обмена: СПОДЭС"),
+                _requirement(
+                    text="обмен по протоколу СПОДЭС", normalized_text="Протокол передачи: СПОДЭС"
+                ),
+                _requirement(text="однофазный", normalized_text="Тип прибора: однофазный"),
+                _requirement(
+                    text="«CE207 R7.849.2.OG.QUVLF GS01 SPDs» (или эквивалент)",
+                    normalized_text="Модель прибора: CE207 R7.849.2.OG.QUVLF GS01 SPDs (или эквивалент)",
+                    vendor="Энергомера",
+                ),
+            ]
+        ),
+        duplicates=ConsolidationResult(
+            groups=[
+                DuplicateGroup(keep=1, duplicates=[2]),
+                DuplicateGroup(keep=3, duplicates=[4]),
+            ]
+        ),
+    )
+
+    analyze_tender(db_session, tender, actor=admin_user)
+
+    texts = {
+        item.normalized_text
+        for item in db_session.query(Requirement).filter(Requirement.tender_id == tender.id)
+    }
+    assert "Протокол передачи: СПОДЭС" not in texts
+    assert "Модель прибора: CE207 R7.849.2.OG.QUVLF GS01 SPDs (или эквивалент)" in texts
+
+
+def test_vendor_exclusive_requirement_is_critical_and_supply_kind_is_kept(
+    db_session, admin_user: User, monkeypatch
+):
+    """Фирменное ПО чужого производителя — повод отклонить заявку, поэтому критичное, как
+    бы модель ни оценила формулировку. Условия поставки сохраняются своим видом и в матрицу
+    не идут."""
+
+    tender = _make_tender(db_session)
+    _patch_model(
+        monkeypatch,
+        classification=_classification(),
+        requirements=RequirementsResult(
+            requirements=[
+                _requirement(
+                    text="Работа со счетчиком производится с применением ПО «AdminTools»",
+                    normalized_text="ПО для работы со счётчиком: AdminTools",
+                    vendor="Энергомера",
+                    vendor_exclusive=True,
+                ),
+                _requirement(
+                    text="Товар должен быть новым",
+                    normalized_text="Товар новый",
+                    kind=RequirementKind.SUPPLY.value,
+                ),
+            ]
+        ),
+    )
+
+    analyze_tender(db_session, tender, actor=admin_user)
+
+    saved = {
+        item.normalized_text: item
+        for item in db_session.query(Requirement).filter(Requirement.tender_id == tender.id)
+    }
+    admin_tools = saved["ПО для работы со счётчиком: AdminTools"]
+    assert admin_tools.criticality == Criticality.CRITICAL.value
+    assert admin_tools.vendor == "Энергомера" and admin_tools.vendor_exclusive
+    assert saved["Товар новый"].kind == RequirementKind.SUPPLY.value

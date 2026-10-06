@@ -110,6 +110,7 @@ const COMPLIANCE_SOURCE_LABELS: Record<string, string> = {
   admission_registry: "Запись в реестре допуска",
   astra_catalog: "Каталог «Ready for Astra»",
   expert_rule: "Правило тендерного отдела",
+  tz_reference: "Эталон ТЗ",
 };
 
 /** Источник вердикта — три шага сопоставления раздела 5.5 ТЗ. */

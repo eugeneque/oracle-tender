@@ -752,3 +752,39 @@ def test_history_fallback_still_refuses_wins_only_sample(db_session):
 
     assert score is None
     assert "исключено" in comment
+
+
+def test_task_is_capped_when_mirtek_fails_in_matrix(db_session):
+    """Закупка 32616436166: «НЕ ИДТИ — ТЗ требует фирменное ПО Энергомеры» и рядом «AI 67%».
+    Если приборы МИРТЕК в матрице не проходят по критичному требованию, «Задача» не выше 20%
+    и причина видна в чек-листе."""
+
+    from decimal import Decimal as D
+
+    from app.models.analysis import WinPercentage, WinVerdict
+    from app.models.manufacturer import Manufacturer
+
+    tender = _tender(db_session)
+    mirtek = Manufacturer(legal_name=f"ООО «МИРТЕК-тест {uuid.uuid4().hex[:6]}»", is_mirtek=True)
+    db_session.add(mirtek)
+    db_session.flush()
+    db_session.add(
+        WinPercentage(
+            tender_id=tender.id,
+            manufacturer_id=mirtek.id,
+            percentage=D("92.40"),
+            reason_summary="Не выполнены критичные требования: ПО для работы со счетчиком: AdminTools",
+            verdict=WinVerdict.FAILS.value,
+            is_current=True,
+        )
+    )
+    db_session.flush()
+    checklist: list[dict] = []
+
+    score, comment = ai_profile_service._apply_matrix_gate(
+        db_session, tender, D("85"), "Профильная закупка.", checklist
+    )
+
+    assert score == D(ai_profile_service.FAILED_MATRIX_TASK_CAP)
+    assert "AdminTools" in comment
+    assert checklist and checklist[-1]["status"] == "not_met"

@@ -19,7 +19,7 @@ from app.models.search_profile import SearchKeywordGroup
 from app.models.source import Source
 from app.models.tender import Tender
 from app.seed.search_profile_data import KEYWORD_GROUPS
-from app.services import relevance_service
+from app.services import okpd2_service, relevance_service
 from app.services.relevance_service import evaluate, matches_keyword, tokenize
 
 
@@ -189,6 +189,14 @@ def test_real_profile_decisions(seeded_groups, title, expected):
     [
         # Код самого товара проходит и без слов: заголовок бывает «Поставка оборудования».
         ("Поставка оборудования", "26.51.63.130", True),
+        # Соседние категории электросчётчиков и вид без уточнения категории — просьба
+        # тендерного отдела 06.10.2026.
+        ("Поставка оборудования", "26.51.63.131", True),
+        ("Поставка оборудования", "26.51.63.139", True),
+        ("Поставка оборудования", "26.51.63", True),
+        # Газ и «интеллектуальные» газовые приборы под тот же вид — по-прежнему нет.
+        ("Поставка оборудования", "26.51.63.110", False),
+        ("Поставка оборудования", "26.51.63.111", False),
         # Коды отраслей — нет: по 43.21.10 приходила замена светильников в аэропорту, по
         # 71.12.40 пришла бы поверка манометров, по 26.51.63.120 — счётчики воды.
         ("Работы по замене осветительных приборов в терминале «А»", "43.21.10.140", False),
@@ -382,3 +390,28 @@ def test_model_rejection_hides_tender_from_profile_list(db_session, seeded_group
         db_session, limit=10, offset=0, filters=TenderFilters(only_profile_relevant=False, search=marker)
     )
     assert {item.id for item in everything} == {rejected.id, unchecked.id}
+
+
+@pytest.mark.parametrize(
+    ("selected", "code", "expected"),
+    [
+        ("26.51.63.130", "26.51.63.130", True),
+        ("26.51", "26.51.63.131", True),
+        # Категория выбрана — закупка с одним видом подходит, соседняя категория нет.
+        ("26.51.63.130", "26.51.63", True),
+        ("26.51.63.130", "26.51.63.131", False),
+        # Снизу вверх только на один уровень: «26.51» — все измерительные приборы.
+        ("26.51.63.130", "26.51", False),
+        ("26.51.63", "26.51.6", False),
+    ],
+)
+def test_okpd2_covers(selected, code, expected):
+    assert okpd2_service.covers(selected, code) is expected
+
+
+def test_pick_relevant_prefers_electric_meter_code():
+    # Первой позицией площадка отдала монтаж — код закупки всё равно электросчётчик.
+    assert okpd2_service.pick_relevant(["43.21.10.290", "26.51.63.131"]) == "26.51.63.131"
+    assert okpd2_service.pick_relevant(["26.51.63.120", "26.51.63.139"]) == "26.51.63.139"
+    assert okpd2_service.pick_relevant(["43.21.10.290", "33.20.42"]) == "43.21.10.290"
+    assert okpd2_service.pick_relevant([]) is None
