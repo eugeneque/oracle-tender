@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -131,6 +132,7 @@ def update_tender(
     for field_name, value in changes.items():
         _validate(db, field_name, value)
 
+    relevance_before = tender.relevance_status
     entries: list[TenderHistoryEntry] = []
     for field_name, value in changes.items():
         old_value = getattr(tender, field_name)
@@ -167,6 +169,8 @@ def update_tender(
                 )
             )
 
+    _record_relevance_mark(tender, relevance_before, actor)
+
     if entries:
         details = "; ".join(
             f"{FIELD_LABELS.get(entry.field_name, entry.field_name)}: "
@@ -186,6 +190,23 @@ def update_tender(
     db.commit()
     db.refresh(tender)
     return entries
+
+
+def _record_relevance_mark(tender: Tender, before: str, actor: User) -> None:
+    """Автор отметки «Релевантна» / «Неактуально» — тот, кто перевёл закупку в это
+    состояние (кнопкой в карточке, выбором этапа или перетаскиванием на доске). Переход
+    внутри «релевантных» (на проверке → заявка подана) автора не меняет: закупку оценил
+    тот, кто отметил первым. Возврат в «новые» отметку снимает."""
+
+    after = tender.relevance_status
+    if after == before:
+        return
+    if after == RelevanceStatus.NEW.value:
+        tender.relevance_marked_by_id = None
+        tender.relevance_marked_at = None
+        return
+    tender.relevance_marked_by_id = actor.id
+    tender.relevance_marked_at = datetime.now(timezone.utc)
 
 
 def add_comment(db: Session, tender: Tender, text: str, *, actor: User) -> TenderHistoryEntry:

@@ -43,6 +43,7 @@ from app.seed.search_profile_data import (
     DEFAULT_MIN_NMCK,
     KEYWORD_GROUPS,
 )
+from app.services import okpd2_service
 
 # Слово текста: буквы, цифры и дефис. Всё остальное — разделители.
 _WORD_RE = re.compile(r"[а-яёa-z0-9]+(?:-[а-яёa-z0-9]+)*", re.IGNORECASE)
@@ -223,7 +224,9 @@ def match_profile(
     codes = profile.okpd2_codes or []
     code_hit: bool | None = None
     if codes:
-        code_hit = bool(okpd2_code) and any(okpd2_code.startswith(code) for code in codes)
+        code_hit = bool(okpd2_code) and any(
+            okpd2_service.covers(code, okpd2_code) for code in codes
+        )
 
     if keyword_hit is None and code_hit is None:
         return GroupMatch(profile.id, name, False, "в профиле нет ни слов, ни кодов ОКПД2")

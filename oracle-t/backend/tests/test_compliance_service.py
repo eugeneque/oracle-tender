@@ -30,6 +30,7 @@ from app.services.compliance_service import (
     RequirementVerdict,
     build_manufacturer_context,
     calculate_percentage,
+    description_excerpt,
     evaluate_tender,
 )
 
@@ -510,3 +511,75 @@ def test_resumed_matrix_skips_manufacturers_already_counted(
         skip_fresh_since=datetime.min.replace(tzinfo=timezone.utc),
     )
     assert stale.manufacturers_processed == first.manufacturers_processed
+
+
+def test_context_takes_si_types_of_selected_models(db_session):
+    """В карточку идут типы СИ отобранных моделей, а не первые по дате записи: у Энергомеры
+    первыми были фиктивный «12345-19», ЦЭ6827М и поверочная установка СУ203, а описание
+    типа СЕ207 — прибора, под который написано ТЗ, — не попадало вовсе."""
+
+    manufacturer = _make_manufacturer(db_session, with_catalog=True)
+    noise = (
+        db_session.query(SiType).filter(SiType.manufacturer_id == manufacturer.id).one()
+    )
+    noise.verified_by_user = True
+    wanted = SiType(
+        manufacturer_id=manufacturer.id,
+        si_code="72632-18",
+        notation="СЕ207",
+        description_type_text="Таблица 2. Q Реле управления нагрузкой потребителя",
+    )
+    db_session.add(wanted)
+    db_session.flush()
+    product = (
+        db_session.query(Product).filter(Product.manufacturer_id == manufacturer.id).one()
+    )
+    product.si_type_id = wanted.id
+    db_session.commit()
+
+    context, _ = build_manufacturer_context(db_session, manufacturer, include_manual=False)
+
+    assert "72632-18" in context and "Реле управления нагрузкой" in context
+    assert noise.si_code not in context
+
+
+def test_description_excerpt_keeps_designation_tables():
+    """У СЕ207 таблица «G — GSM, Q — реле» стоит на 9 400-м знаке описания типа, а в карточку
+    уходили первые 6 000: исполнение «…OG.QUVLF» было не прочитать."""
+
+    text = (
+        "Назначение. " * 900
+        + "Обслуживание — программа «Admin Tools».\n"
+        + "Структура условного обозначения модификаций приведена на рисунке 1.\n"
+        + "G GSM\nQ Реле управления нагрузкой потребителя\n"
+        + "Комплектность. " * 900
+    )
+
+    excerpt = description_excerpt(text)
+
+    assert len(excerpt) <= 6_100
+    assert excerpt.startswith("Назначение.")
+    assert "G GSM" in excerpt and "Q Реле управления" in excerpt and "Admin Tools" in excerpt
+    assert description_excerpt("короткое описание") == "короткое описание"
+
+
+def test_quota_error_stops_matrix_instead_of_saving_empty_cells(db_session, admin_user: User, monkeypatch):
+    """06.10.2026: баланс RouterAI кончился посреди расчёта, а задача обошла всех
+    производителей, на каждый запрос получила отказ и завершилась «успешно» с пустой
+    матрицей. Теперь отказ из-за денег останавливает расчёт ошибкой."""
+
+    import pytest
+
+    from app.services.ai_provider_service import AiQuotaExceededError
+
+    tender = _make_tender(db_session)
+    _make_manufacturer(db_session, with_catalog=True)
+    _add_requirement(db_session, tender, "Класс точности 1,0", Criticality.CRITICAL.value)
+
+    def broke(*args, **kwargs):
+        raise AiQuotaExceededError("RouterAI отказал: исчерпан лимит расходов ключа или баланс")
+
+    monkeypatch.setattr(compliance_module, "run_structured", broke)
+
+    with pytest.raises(AiQuotaExceededError):
+        evaluate_tender(db_session, tender, actor=admin_user)

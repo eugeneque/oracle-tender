@@ -134,6 +134,9 @@ def create_manual_request(
         stage=TenderStage.UNDER_REVIEW.value,
         passed_relevance_filter=True,
         assignee_id=actor.id,
+        # Заявку принёс специалист — это и есть отметка «релевантна», с автором.
+        relevance_marked_by_id=actor.id,
+        relevance_marked_at=datetime.now(timezone.utc),
     )
     db.add(tender)
     db.flush()

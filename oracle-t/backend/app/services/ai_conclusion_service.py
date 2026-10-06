@@ -50,7 +50,12 @@ from app.models.market import NicheStatistics
 from app.models.tender import Tender
 from app.models.user import User
 from app.services.ai_client import run_structured
-from app.services.product_relevance import select_products_for_context
+from app.services.product_relevance import (
+    named_products,
+    select_products_for_context,
+    tender_named_text,
+)
+from app.services.tz_reference import is_model_requirement, match_manufacturer
 
 # --- словари ---------------------------------------------------------------------------
 
@@ -316,6 +321,13 @@ class BrandLock:
     # True — в ТЗ есть «или эквивалент»; False — эквивалент прямо запрещён или закупается товар
     # определённого знака; None — документация об этом молчит.
     equivalent_allowed: bool | None
+    # Где найдены модели: в требованиях к товару или только в тексте документации (ТЗ называет
+    # прибор кодом без марки — «CE207 R7.849.2.OG.QUVLF GS01 SPDs»).
+    found_in_documents: bool = False
+    # Требования к фирменному ПО или сервису этого производителя без «или эквивалент»
+    # («AdminTools», «CE Net-Connection» у Энергомеры): чужой прибор по ним не пройдёт, даже
+    # когда эквивалент прибора допускается (06.10.2026).
+    exclusive: list[str] = field(default_factory=list)
 
 
 def _brand_pattern(manufacturer: Manufacturer) -> re.Pattern[str] | None:
@@ -391,7 +403,16 @@ def detect_brand_lock(
                 equivalent_allowed=None,
             )
     if best is None:
+        best = _lock_by_named_models(db, tender, manufacturers)
+    if best is None:
+        best = _lock_by_vendor(requirements, manufacturers)
+    if best is None:
         return None
+    best.exclusive = [
+        (item.normalized_text or item.text or "")[:150]
+        for item in requirements
+        if item.vendor_exclusive and match_manufacturer(item.vendor, [best.manufacturer])
+    ]
 
     documents = _documents_text(db, tender)
     requirement_text = " ".join(f"{r.text or ''} {r.normalized_text or ''}" for r in requirements)
@@ -404,14 +425,75 @@ def detect_brand_lock(
     return best
 
 
+def _lock_by_vendor(
+    requirements: list[Requirement], manufacturers: list[Manufacturer]
+) -> BrandLock | None:
+    """Последний запасной путь: модели в каталоге нет, но при извлечении требование «Модель
+    прибора: …» или фирменное ПО привязано к производителю из справочника."""
+
+    counts: dict = {}
+    for item in requirements:
+        owner = match_manufacturer(item.vendor, manufacturers)
+        if owner is not None and (item.vendor_exclusive or is_model_requirement(item)):
+            counts.setdefault(owner.id, [owner, []])[1].append(item)
+    if not counts:
+        return None
+    owner, items = max(counts.values(), key=lambda pair: len(pair[1]))
+    return BrandLock(
+        manufacturer=owner,
+        is_ours=bool(owner.is_mirtek),
+        models=[
+            (item.normalized_text or "").split(":", 1)[-1].strip()
+            for item in items
+            if is_model_requirement(item)
+        ][:8],
+        critical_mentions=sum(1 for item in items if item.criticality == Criticality.CRITICAL.value),
+        total_mentions=len(items),
+        clause=None,
+        equivalent_allowed=None,
+        found_in_documents=False,
+    )
+
+
+def _lock_by_named_models(
+    db: Session, tender: Tender, manufacturers: list[Manufacturer]
+) -> BrandLock | None:
+    """Запасной путь `detect_brand_lock`: марки в требованиях нет, но документация называет
+    модель из каталога по коду. Берётся производитель с наибольшим числом названных моделей."""
+
+    text = tender_named_text(db, tender)
+    best: BrandLock | None = None
+    for manufacturer in manufacturers:
+        found = named_products(db, manufacturer, text)
+        if not found or (best is not None and len(found) <= best.total_mentions):
+            continue
+        best = BrandLock(
+            manufacturer=manufacturer,
+            is_ours=bool(manufacturer.is_mirtek),
+            models=[item.model_code or item.model_name for item in found][:8],
+            critical_mentions=0,
+            total_mentions=len(found),
+            clause=None,
+            equivalent_allowed=None,
+            found_in_documents=True,
+        )
+    return best
+
+
 def brand_lock_block(lock: BrandLock) -> str:
     who = manufacturer_label(lock.manufacturer)
     lines = ["ЗАТОЧКА ТЗ ПОД ТОВАРНЫЙ ЗНАК (найдено кодом по тексту ТЗ):"]
-    lines.append(
-        f"  ТЗ называет модели производителя «{who}» ({lock.manufacturer.legal_name}): "
-        f"{'; '.join(lock.models)} — в {lock.total_mentions} требованиях к товару, "
-        f"из них критичных {lock.critical_mentions}."
-    )
+    if lock.found_in_documents:
+        lines.append(
+            f"  Документация называет модели производителя «{who}» "
+            f"({lock.manufacturer.legal_name}) по обозначению: {'; '.join(lock.models)}."
+        )
+    else:
+        lines.append(
+            f"  ТЗ называет модели производителя «{who}» ({lock.manufacturer.legal_name}): "
+            f"{'; '.join(lock.models)} — в {lock.total_mentions} требованиях к товару, "
+            f"из них критичных {lock.critical_mentions}."
+        )
     if lock.clause:
         lines.append(f"  В документации: «{lock.clause}».")
     if lock.equivalent_allowed is True:
@@ -420,6 +502,12 @@ def brand_lock_block(lock: BrandLock) -> str:
         lines.append("  Эквивалент не допускается: закупается товар именно этого товарного знака.")
     else:
         lines.append("  Про эквивалент документация молчит.")
+    if lock.exclusive:
+        lines.append(
+            f"  ТЗ требует фирменное ПО или сервисы «{who}» без эквивалента: "
+            f"{'; '.join(lock.exclusive[:5])}. Приборы других производителей по этим пунктам не "
+            "пройдут, даже если эквивалент самого прибора допускается."
+        )
     if lock.is_ours:
         lines.append("  Это наш товарный знак — ТЗ написано под приборы МИРТЕК.")
     elif lock.equivalent_allowed is False:
@@ -483,6 +571,7 @@ def collect_facts(db: Session, tender: Tender) -> ConclusionFacts:
     """Приборы и производители: кандидаты из каталога, итог матрицы, что у нас не так."""
 
     requirements = _product_requirements(db, tender)
+    named_text = tender_named_text(db, tender)
     wins = {
         row.manufacturer_id: row
         for row in db.scalars(
@@ -499,7 +588,9 @@ def collect_facts(db: Session, tender: Tender) -> ConclusionFacts:
         )
         limit = OUR_CANDIDATES if manufacturer.is_mirtek else COMPETITOR_CANDIDATES
         selected = (
-            select_products_for_context(db, manufacturer, requirements, limit=limit)
+            select_products_for_context(
+                db, manufacturer, requirements, limit=limit, named_text=named_text
+            )
             if products
             else []
         )
@@ -1060,7 +1151,9 @@ def compute_conclusion(
     # ТЗ под чужой товарный знак без эквивалента — «не проходим» независимо от ответа модели:
     # характеристики тут ничего не решают.
     lock = facts.brand_lock
-    if lock is not None and not lock.is_ours and lock.equivalent_allowed is False:
+    if lock is not None and not lock.is_ours and (
+        lock.equivalent_allowed is False or lock.exclusive
+    ):
         fit = Fit.NOT_FIT
 
     conclusion: dict = {

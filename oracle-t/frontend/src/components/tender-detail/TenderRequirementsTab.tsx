@@ -2,12 +2,13 @@ import type { Requirement, RequirementKind } from "../../api/types";
 import { criticalityLabel } from "../../utils/format";
 
 /** Вид требования (18.09.2026). Подпись у товара не показывается — это умолчание, а у
- * закупок на поставку он у всех требований; чип нужен, чтобы отличить «к работам» и
- * «к участнику», которые в матрицу соответствия не идут. */
+ * закупок на поставку он у всех требований; чип нужен, чтобы отличить «к работам»,
+ * «к участнику» и «условия поставки», которые в матрицу соответствия не идут. */
 const KIND_LABELS: Record<RequirementKind, string> = {
   product: "к товару",
   service: "к работам",
   participant: "к участнику",
+  supply: "условия поставки",
 };
 
 function KindBadge({ value }: { value: RequirementKind }) {

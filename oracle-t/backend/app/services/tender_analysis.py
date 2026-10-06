@@ -39,6 +39,7 @@ from app.services.audit import log_action
 from app.services.document_service import classify_document, reextract_stale_documents
 from app.services.ai_client import AiQuotaExceededError, chunk_text, run_structured
 from app.services.meter_kind import METER_KINDS, fill_tender_kinds
+from app.services import okpd2_service
 
 # Кусок текста на один запрос. Тендерная документация длиннее «Описания типа», а системный
 # промпт здесь короче (список групп, а не всех ~120 полей), поэтому кусок крупнее, чем в
@@ -101,15 +102,9 @@ _DATE_CANDIDATE_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})(?!\d)")
 # сопутствующие коды (монтажные работы, кабель), но релевантность определяет этот.
 PRIORITY_OKPD2 = "26.51.63.130"
 
-# Коды, по которым закупается продукция производителей из раздела 4.3 ТЗ. Порядок = приоритет.
-RELEVANT_OKPD2_PREFIXES = (
-    "26.51.63.130",  # счётчики электроэнергии — основной
-    "26.51.63.120",  # счётчики жидкости (воды)
-    "26.51.63.110",  # счётчики газа
-    "26.51.63",
-    "26.51.6",
-    "26.51",
-)
+# Коды, по которым закупается продукция производителей из раздела 4.3 ТЗ. Порядок = приоритет:
+# три категории электросчётчиков (.130, .131, .139), вода, газ, затем ветка приборов учёта.
+RELEVANT_OKPD2_PREFIXES = okpd2_service.RELEVANT_PREFIXES
 
 _TENDER_TYPE_VALUES = {t.value for t in TenderType}
 _CRITICALITY_VALUES = {c.value for c in Criticality}
@@ -136,6 +131,14 @@ _REQUIREMENTS_SYSTEM_PROMPT = """Ты анализируешь документ�
 - `participant` — к участнику закупки: лицензии, допуски СРО, членство в реестрах, опыт \
 аналогичных договоров, квалификация и группа допуска персонала, наличие аттестованной \
 лаборатории или средств поверки, отсутствие в РНП.
+- `supply` — условия поставки, которые выполняет поставщик независимо от того, чей прибор \
+он везёт: товар новый, не восстановленный, год выпуска, дата поверки, первичная поверка \
+в стоимости, упаковка, маркировка и опломбировка тары, документы при отгрузке (паспорт, \
+сертификаты, УПД), серийные номера, сроки и порядок доставки, приёмка, претензии, замена \
+брака, возврат стоимости, информация о сервисных центрах. Отличие от `product`: \
+требование `product` выполняется или нет В ЗАВИСИМОСТИ ОТ МОДЕЛИ прибора (характеристика, \
+функция, комплектация самого прибора, гарантийный срок, наличие в реестрах, программное \
+обеспечение), требование `supply` — нет.
 
 Если в закупке нет товара (только услуги), требований `product` не будет — это нормально; \
 извлекай `service` и `participant`. Если есть только товар — наоборот.
@@ -150,7 +153,7 @@ _REQUIREMENTS_SYSTEM_PROMPT = """Ты анализируешь документ�
 2. `normalized_text` — то же требование коротко и однозначно, в виде «параметр: значение». \
 Например: «Класс точности активной энергии: не хуже 1,0», «Гарантия на работы: не менее \
 12 месяцев», «Группа допуска по электробезопасности: не ниже IV до и выше 1000 В».
-3. `kind` — строго одно из: product, service, participant.
+3. `kind` — строго одно из: product, service, participant, supply.
 4. `criticality` — строго одно из: critical, important, minor.
    - critical: без выполнения заявку отклонят (класс точности, номинальные ток/напряжение, \
 наличие в Госреестре СИ, тип прибора, количество фаз, допуски-реестры: реестр российской \
@@ -179,6 +182,33 @@ _REQUIREMENTS_SYSTEM_PROMPT = """Ты анализируешь документ�
 следует — оставь формулировку ТЗ, не угадывай.
 10. Для параметра 3 (габариты) записывай размеры в порядке ширина (b) × длина (a) × \
 высота (c), как в перечне, и указывай, «не более» это или точное значение.
+11. Обозначение прибора. Если документ называет конкретную модель или исполнение прибора \
+(«CE207 R7.849.2.OG.QUVLF GS01 SPDs (или эквивалент)», «МИР С-05.10-230-5(80)», «Меркурий \
+234 ARTM»), извлеки это ОТДЕЛЬНЫМ требованием `product`: `normalized_text` — «Модель \
+прибора: <обозначение точно как в документе>», и допиши « (или эквивалент)», только если \
+в документе так и сказано; `parameter_no` — 0, `criticality` — critical. Обозначение \
+переписывай посимвольно: латиница и кириллица в нём не взаимозаменяемы. В остальных \
+требованиях обозначение тоже не выбрасывай, если оно там есть.
+12. `vendor` — производитель, которому принадлежит названное в требовании фирменное \
+программное обеспечение, сервис, протокол, оборудование или модель прибора. Примеры: \
+«работа через ПО AdminTools», «поддержка M2M-сервера CE Net-Connection» — Энергомера; \
+«Модель прибора: CE207 …» — Энергомера; «конфигуратор MeterTools» — МИРТЕК (если так \
+следует из твоих знаний). Называй производителя, как он назван в списке производителей \
+ниже, если он там есть. Если требование нейтрально (класс точности, СПОДЭС, RS-485, \
+GSM, ПО верхнего уровня «Пирамида», «Энергосфера» и другие системы, которые \
+поддерживают приборы многих производителей) — пустая строка. Не угадывай: если не \
+уверен, кому принадлежит программа, — пустая строка.
+13. `vendor_exclusive` — true, если требование может выполнить ТОЛЬКО продукция `vendor`: \
+фирменная программа или сервис производителя, без оговорки «или эквивалент» \
+(«Работа со счётчиком через интерфейсы связи производится с применением ПО \
+«AdminTools»»). Обозначение модели с «или эквивалент» — false: эквивалент другого \
+производителя допустим. Если `vendor` пустой — false.
+14. Один и тот же параметр в одном фрагменте извлекай один раз, даже если документ \
+повторяет его в разных разделах (технические характеристики, функциональные требования, \
+спецификация): возьми самую полную формулировку.
+
+Производители приборов учёта в справочнике:
+{manufacturers_list}
 
 Параметры для приборов учёта:
 {parameters_list}
@@ -225,6 +255,8 @@ class ExtractedRequirement(pydantic.BaseModel):
     criticality: str
     group_name: str
     parameter_no: int
+    vendor: str
+    vendor_exclusive: bool
 
 
 class RequirementsResult(pydantic.BaseModel):
@@ -243,6 +275,50 @@ class ClassificationResult(pydantic.BaseModel):
     summary: str
 
 
+_CONSOLIDATE_SYSTEM_PROMPT = """Ты получаешь пронумерованный список требований, извлечённых \
+из документации ОДНОЙ закупки по фрагментам. Одно и то же требование в нём встречается \
+несколько раз: техническое задание повторяется в проекте договора и в извещении, а внутри \
+ТЗ один параметр описан и в технических характеристиках, и в функциональных требованиях, \
+и в спецификации.
+
+Найди группы дубликатов — требования, которые проверяют ОДНО И ТО ЖЕ условие с одним и \
+тем же значением, сказанное разными словами: «Гарантийный срок: не менее 7 лет» и \
+«Гарантийный срок эксплуатации — не менее 7 лет с даты подписания УПД»; «Протокол обмена: \
+СПОДЭС» и «Протокол передачи: СПОДЭС»; «Встроенный GSM/GPRS-модем» и «Интерфейсы связи: \
+встроенный GSM/GPRS модем».
+
+Дубликат и тогда, когда одно требование ПОКРЫВАЕТ другое: та же проверка, но с \
+подробностями. «Наличие реле управления нагрузкой: 80 А», «Встроенный расцепитель (реле \
+отключения нагрузки) 80 А» и «Встроенный расцепитель с управлением отключением по \
+программируемым критериям» — одна группа, оставь самое подробное. «Интерфейсы связи: \
+GSM/GPRS, оптопорт» и «Интерфейсы связи: встроенный GSM/GPRS модем, оптопорт» — одна \
+группа. «Ёмкость журнала событий: не менее 100» и «Состав журнала событий …; ёмкость не \
+менее 100» — одна группа. Объединять по покрытию можно, только если оставленное \
+требование содержит ВСЁ, что проверяет поглощённое.
+
+НЕ дубликаты, их не объединяй:
+- разные параметры одного узла: базовый и максимальный ток; глубина хранения месячных и \
+суточных энергий; класс точности по активной и по реактивной энергии;
+- одно условие с разными значениями: «гарантия не менее 5 лет» и «не менее 7 лет» — \
+противоречие в документации должен увидеть человек;
+- общее и частное: «Интерфейсы связи: GSM/GPRS, оптопорт» и «Наличие слота для \
+SIM-карты» — разные проверки;
+- требования разного вида (к товару, к работам, к участнику, условия поставки).
+
+Для каждой группы укажи `keep` — номер самой полной и точной формулировки, и \
+`duplicates` — номера остальных требований группы. Требования без дубликатов не \
+перечисляй. Если дубликатов нет — пустой список."""
+
+
+class DuplicateGroup(pydantic.BaseModel):
+    keep: int
+    duplicates: list[int]
+
+
+class ConsolidationResult(pydantic.BaseModel):
+    groups: list[DuplicateGroup]
+
+
 @dataclass
 class AnalysisOutcome:
     """Итог анализа для отчёта пользователю. Отдельно считаются пропущенные требования:
@@ -253,6 +329,9 @@ class AnalysisOutcome:
     # 0» на закупке услуг раньше читалось как сбой, «к товару: 0, к услугам: 14» — как итог.
     requirements_by_kind: dict[str, int] = field(default_factory=dict)
     requirements_skipped: int = 0
+    # Сколько повторов убрано: дословных (по нормализованной формулировке) и смысловых
+    # (проход модели `_consolidate`).
+    duplicates_removed: int = 0
     chunks_processed: int = 0
     chunks_failed: int = 0
     tender_type: str | None = None
@@ -265,6 +344,7 @@ _KIND_SHORT_LABELS = {
     RequirementKind.PRODUCT.value: "к товару",
     RequirementKind.SERVICE.value: "к услугам",
     RequirementKind.PARTICIPANT.value: "к участнику",
+    RequirementKind.SUPPLY.value: "условия поставки",
 }
 
 
@@ -642,6 +722,7 @@ def _extract_requirements(
         groups_list=_groups_list(),
         parameters_list=parameters_prompt_list(),
         meter_kinds="; ".join(f"«{label}»" for label in METER_KINDS.values()),
+        manufacturers_list=_manufacturers_list(db),
     )
     extracted: list[ExtractedRequirement] = []
     for index, chunk in enumerate(chunks):
@@ -668,7 +749,137 @@ def _extract_requirements(
         outcome.messages.append("Ни один фрагмент документации не удалось разобрать")
         return
 
+    extracted = _drop_exact_duplicates(extracted, outcome)
+    extracted = _consolidate(db, extracted, outcome)
     _replace_requirements(db, tender, extracted, primary_document_id, outcome)
+
+
+def _manufacturers_list(db: Session) -> str:
+    from app.models.manufacturer import Manufacturer
+
+    rows = db.scalars(select(Manufacturer).order_by(Manufacturer.legal_name))
+    return "\n".join(
+        f"- {item.brand_name or item.legal_name} ({item.legal_name})" for item in rows
+    ) or "- (справочник пуст)"
+
+
+_CRITICALITY_RANK = {
+    Criticality.CRITICAL.value: 0,
+    Criticality.IMPORTANT.value: 1,
+    Criticality.MINOR.value: 2,
+}
+
+
+def _merge_into(target: ExtractedRequirement, other: ExtractedRequirement) -> None:
+    """Повтор требования отдаёт оставшемуся то, что в нём сильнее: критичность, номер
+    параметра, привязку к производителю. Иначе «гарантия — критичное» из спецификации
+    потерялось бы, если оставлена формулировка из договора с «важным»."""
+
+    if _CRITICALITY_RANK.get(other.criticality, 1) < _CRITICALITY_RANK.get(target.criticality, 1):
+        target.criticality = other.criticality
+    if not target.parameter_no and other.parameter_no:
+        target.parameter_no = other.parameter_no
+    if not target.group_name and other.group_name:
+        target.group_name = other.group_name
+    if not target.vendor and other.vendor:
+        target.vendor = other.vendor
+    target.vendor_exclusive = target.vendor_exclusive or other.vendor_exclusive
+
+
+def _is_protected(item: ExtractedRequirement) -> bool:
+    return bool((item.vendor or "").strip()) or (item.normalized_text or "").lower().startswith(
+        "модель прибора"
+    )
+
+
+def _same_vendor(item: ExtractedRequirement, other: ExtractedRequirement) -> bool:
+    return (
+        _is_protected(other)
+        and (item.vendor or "").strip().casefold() == (other.vendor or "").strip().casefold()
+        and (item.normalized_text or "").lower().startswith("модель прибора")
+        == (other.normalized_text or "").lower().startswith("модель прибора")
+    )
+
+
+def _drop_exact_duplicates(
+    items: list[ExtractedRequirement], outcome: AnalysisOutcome
+) -> list[ExtractedRequirement]:
+    """Повторы с одинаковой нормализованной формулировкой. Сравнивать дословный `text`
+    мало: ТЗ закупки 32616436166 целиком вложено в проект договора, и «Гарантийный срок: не
+    менее 7 лет» приходило четырежды с разными исходными фразами."""
+
+    kept: dict[tuple[str, str], ExtractedRequirement] = {}
+    result: list[ExtractedRequirement] = []
+    for item in items:
+        key = (item.kind, _dedup_key(item.normalized_text or item.text or ""))
+        if not key[1]:
+            result.append(item)
+            continue
+        if key in kept:
+            _merge_into(kept[key], item)
+            outcome.duplicates_removed += 1
+            continue
+        kept[key] = item
+        result.append(item)
+    return result
+
+
+# Больше требований за раз модель сводит неаккуратно, а столько в одной закупке не бывает
+# почти никогда; хвост сверх предела остаётся как есть.
+MAX_REQUIREMENTS_TO_CONSOLIDATE = 250
+
+
+def _consolidate(
+    db: Session, items: list[ExtractedRequirement], outcome: AnalysisOutcome
+) -> list[ExtractedRequirement]:
+    """Смысловые повторы — отдельным проходом модели по всему списку. Извлечение идёт по
+    фрагментам, и каждый фрагмент не знает, что уже извлечено из других: «Протокол обмена:
+    СПОДЭС» и «Протокол передачи: СПОДЭС», «Встроенный GSM/GPRS-модем» и «Интерфейсы связи:
+    встроенный GSM/GPRS модем». Дубли раздувают матрицу и искажают счёт критичных без ответа.
+
+    Сбой прохода не теряет требований — остаётся список после дословной очистки."""
+
+    if len(items) < 2:
+        return items
+    head = items[:MAX_REQUIREMENTS_TO_CONSOLIDATE]
+    listing = "\n".join(
+        f"{number}. [{_KIND_SHORT_LABELS.get(item.kind, item.kind)}] "
+        f"{item.normalized_text or item.text} — «{(item.text or '')[:200]}»"
+        for number, item in enumerate(head, start=1)
+    )
+    try:
+        result = run_structured(
+            db,
+            system_prompt=_CONSOLIDATE_SYSTEM_PROMPT,
+            user_text=listing,
+            response_model=ConsolidationResult,
+        )
+    except Exception as exc:  # noqa: BLE001 - без сведения повторов анализ всё равно полезен
+        logger.warning(f"Сведение повторов требований не удалось: {exc}")
+        outcome.messages.append(f"Повторы требований сведены только дословно: {exc}")
+        return items
+
+    dropped: set[int] = set()
+    for group in result.groups:
+        keep = group.keep
+        if not 1 <= keep <= len(head) or keep in dropped:
+            continue
+        for number in group.duplicates:
+            if number == keep or not 1 <= number <= len(head) or number in dropped:
+                continue
+            if head[number - 1].kind != head[keep - 1].kind:
+                continue  # промпт запрещает, но цена ошибки — потерянное требование
+            if _is_protected(head[number - 1]) and not _same_vendor(head[number - 1], head[keep - 1]):
+                # Обозначение эталонной модели и фирменное ПО производителя не поглощаются:
+                # на живом прогоне «Модель прибора: CE207 … (или эквивалент)» ушло в «Тип
+                # прибора», и закупка перестала быть «под Энергомеру».
+                continue
+            _merge_into(head[keep - 1], head[number - 1])
+            dropped.add(number)
+    outcome.duplicates_removed += len(dropped)
+    return [
+        item for number, item in enumerate(head, start=1) if number not in dropped
+    ] + items[MAX_REQUIREMENTS_TO_CONSOLIDATE:]
 
 
 def _replace_requirements(
@@ -721,10 +932,18 @@ def _replace_requirements(
             # модель номер: узнаём такие параметры и по формулировке.
             if parameter_no is None:
                 parameter_no = detect_parameter(f"{text_value} {item.normalized_text or ''}")
+        vendor = (item.vendor or "").strip()[:100] or None
+        vendor_exclusive = bool(vendor) and bool(item.vendor_exclusive)
+        if vendor_exclusive and kind == RequirementKind.PRODUCT.value:
+            # Фирменное ПО или сервис чужого производителя: заявку с другим прибором по нему
+            # отклонят, как бы модель ни оценила «важность» формулировки.
+            criticality = Criticality.CRITICAL.value
         db.add(
             Requirement(
                 tender_id=tender.id,
                 source_document_id=primary_document_id,
+                vendor=vendor,
+                vendor_exclusive=vendor_exclusive,
                 text=text_value,
                 normalized_text=(item.normalized_text or "").strip() or None,
                 criticality=criticality,
@@ -755,7 +974,8 @@ def _log(
 ) -> None:
     details = (
         f"Требований сохранено: {outcome.requirements_saved}"
-        f"{kinds_summary(outcome)}; фрагментов разобрано: "
+        f"{kinds_summary(outcome)}; повторов убрано: {outcome.duplicates_removed}; "
+        f"фрагментов разобрано: "
         f"{outcome.chunks_processed}, не удалось: {outcome.chunks_failed}; "
         f"тип конкурса: {outcome.tender_type or '—'}; ОКПД2: {outcome.okpd2_code or '—'}"
     )

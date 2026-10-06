@@ -1,6 +1,8 @@
 import type { LucideIcon } from "lucide-react";
 import {
+  Ban,
   BarChart3,
+  CheckCircle2,
   Boxes,
   Building2,
   KanbanSquare,
@@ -28,6 +30,9 @@ export interface NavItem {
   adminOnly?: boolean;
   /** Пункт только выпадающего меню шапки (в боковой панели его заменяет основной раздел). */
   headerOnly?: boolean;
+  /** Вложенный пункт боковой панели: `to` родителя, под которым он раскрывается (06.10.2026 —
+   * «Релевантные» и «Неактуальные» под «Тендерами», чтобы меню не разрасталось). */
+  parent?: string;
 }
 
 export type NavGroupKey = "tenders" | "market" | "company" | "system";
@@ -55,6 +60,22 @@ export const NAV_ITEMS: NavItem[] = [
     icon: Timer,
     hint: "Срок подачи заявок — в день размещения",
     group: "tenders",
+  },
+  {
+    label: "Релевантные",
+    to: "/tenders?marked=relevant",
+    icon: CheckCircle2,
+    hint: "Отмечены специалистами «Релевантна» — общий список",
+    group: "tenders",
+    parent: "/tenders",
+  },
+  {
+    label: "Неактуальные",
+    to: "/tenders?marked=rejected",
+    icon: Ban,
+    hint: "Отмечены «Неактуально» — уже просмотрены",
+    group: "tenders",
+    parent: "/tenders",
   },
   { label: "Аналитика", to: "/analytics", icon: BarChart3, hint: "Динамика, победители, доли", group: "market" },
   { label: "Каталог продукции", to: "/catalog", icon: Boxes, hint: "Модели производителей и Госреестр", group: "market" },

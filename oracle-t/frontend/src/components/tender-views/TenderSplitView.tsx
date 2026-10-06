@@ -3,6 +3,7 @@ import { Clock, Sparkles, Star } from "lucide-react";
 
 import type { Tender } from "../../api/types";
 import { DecisionMark } from "../DecisionMark";
+import { RelevanceMark } from "../RelevanceMark";
 import { TenderDetailPanel } from "../TenderDetailPanel";
 import { TagRow } from "../tags/TagChip";
 import {
@@ -76,6 +77,11 @@ function SplitListItem({
         </span>
       </div>
 
+      {tender.relevance_status !== "new" && (
+        <div className="mt-1 flex pl-6">
+          <RelevanceMark tender={tender} />
+        </div>
+      )}
       {tender.customer_name && (
         <div className="mt-1 truncate pl-6 text-[11px] text-zinc-500" title={tender.customer_name}>
           {tender.customer_name}
@@ -90,9 +96,11 @@ function SplitListItem({
           </span>
         )}
         {price && <span className="tabular-nums text-zinc-400">{price}</span>}
-        {tender.stage !== "ai_selected" && (
-          <span className="text-zinc-400">· {stageLabel(tender.stage)}</span>
-        )}
+        {tender.stage !== "ai_selected" &&
+          tender.stage !== "under_review" &&
+          tender.stage !== "rejected" && (
+            <span className="text-zinc-400">· {stageLabel(tender.stage)}</span>
+          )}
         {/* «Наша тематика» — иконкой: модель признала предмет профильным. Это не
             рекомендация участвовать — за неё отвечает знак решения слева от названия. */}
         {tender.ai_relevant === true && (

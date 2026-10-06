@@ -191,3 +191,48 @@ def test_selection_without_requirements_keeps_alphabetical_order(db_session):
     selected = select_products_for_context(db_session, manufacturer, [], limit=2)
 
     assert [item.product.model_name for item in selected] == ["Модель A", "Модель B"]
+
+
+def test_model_named_only_in_documents_is_taken_first(db_session):
+    """Закупка 32616436166: ТЗ называет «CE207 R7.849.2.OG.QUVLF GS01 SPDs (или эквивалент)»,
+    а в извлечённых требованиях обозначения нет — модель его выбросила. Эталон ТЗ ищется в
+    тексте документации, и кириллическое «СЕ» в каталоге не мешает латинскому «CE» в ТЗ."""
+
+    manufacturer = _manufacturer(db_session)
+    tender = _tender(db_session)
+    _product(db_session, manufacturer, "CE102M", code="CE102M S7 145-AV", phases="1",
+             values=[("Номинальный ток", "5 (80) А"), ("Номинальное напряжение", "230 В")])
+    wanted = _product(db_session, manufacturer, "СЕ207", code="СЕ207 R7.849.2.OG.QUVLF GS01 SPDS",
+                      phases="1")
+    requirements = _requirements(db_session, tender, "Однофазный счётчик 5(80) А, 230 В")
+    documents = "Требования к счётчику «CE207 R7.849.2.OG.QUVLF GS01 SPDs» (или эквивалент):"
+
+    assert select_products_for_context(
+        db_session, manufacturer, requirements, limit=1
+    )[0].product.id != wanted.id
+    selected = select_products_for_context(
+        db_session, manufacturer, requirements, limit=1, named_text=documents
+    )
+
+    assert selected[0].product.id == wanted.id
+
+
+def test_short_codes_are_not_searched_in_documents(db_session):
+    """Артикул «2026» и код-слово «НЕВА» в тексте договора — не упоминание прибора, а год и
+    обычное слово. В документации ищутся только обозначения из букв и цифр, отдельным словом."""
+
+    manufacturer = _manufacturer(db_session)
+    tender = _tender(db_session)
+    first = _product(db_session, manufacturer, "А-модель", code="АБВГ", phases="1")
+    numeric = _product(db_session, manufacturer, "Б-модель", code="2026", phases="1")
+    word = _product(db_session, manufacturer, "В-модель", code="НЕВА", phases="1")
+    prefix = _product(db_session, manufacturer, "Г-модель", code="CE207", phases="1")
+    requirements = _requirements(db_session, tender, "Однофазный счётчик")
+    documents = "Товар изготовлен не ранее 2026 г. Склад на ул. Нева. Поставка CE2070-M."
+
+    selected = select_products_for_context(
+        db_session, manufacturer, requirements, limit=1, named_text=documents
+    )
+
+    assert selected[0].product.id == first.id
+    assert {numeric.id, word.id, prefix.id}.isdisjoint({item.product.id for item in selected})

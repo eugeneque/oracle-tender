@@ -68,8 +68,28 @@ function WinPercentageCard({
         <span className="truncate text-sm text-zinc-200" title={row.manufacturer_name}>
           {row.manufacturer_name}
           {row.is_mirtek && <span className="ml-1.5 text-[11px] text-indigo-400">наш</span>}
+          {row.tz_reference && (
+            <span
+              className="ml-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[11px] text-emerald-300"
+              title="ТЗ составлено по модели этого производителя"
+            >
+              эталон ТЗ
+            </span>
+          )}
         </span>
-        <span className={`text-lg font-semibold ${percentTextClass(percent)}`}>{percent}%</span>
+        {/* Процент — доля выполненного по оценённым требованиям; при «не проходит» он бывает
+            и 94%, но зелёным его красить нельзя: заявку отклонят по критичному пункту. */}
+        <span
+          className={`text-lg font-semibold ${
+            row.verdict === "fails"
+              ? "text-red-400"
+              : row.verdict === "unknown"
+                ? "text-zinc-400"
+                : percentTextClass(percent)
+          }`}
+        >
+          {percent}%
+        </span>
       </div>
       {row.verdict && (
         <span
@@ -116,6 +136,7 @@ function VerdictSummary({ rows }: { rows: ComplianceMatrix["win_percentages"] })
                 title={row.reason_summary ?? undefined}
               >
                 {row.manufacturer_name}
+                {row.tz_reference && <span className="ml-1 text-[11px] text-emerald-400">(эталон ТЗ)</span>}
                 {index < group.rows.length - 1 ? "," : ""}
               </span>
             ))}

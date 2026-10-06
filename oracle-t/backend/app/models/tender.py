@@ -202,6 +202,15 @@ class Tender(Base):
     assignee_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    # Кто и когда отметил закупку «Релевантна» / «Неактуально» (06.10.2026). Сама отметка —
+    # `relevance_status` поверх этапа; автор нужен, чтобы коллеги видели в списках, что
+    # закупку уже посмотрели, и кто именно.
+    relevance_marked_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    relevance_marked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

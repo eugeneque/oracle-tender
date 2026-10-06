@@ -64,6 +64,8 @@ def _run_analysis(db: Session, tender: Tender, actor: User | None) -> str:
             f"документы с площадки не получены ({documents_error}) — анализ выполнен только "
             "по наименованию; восстановите доступ к площадке и запустите анализ ещё раз"
         )
+    if outcome.duplicates_removed:
+        parts.append(f"повторов убрано: {outcome.duplicates_removed}")
     if outcome.requirements_skipped:
         parts.append(f"пропущено: {outcome.requirements_skipped}")
     if outcome.chunks_failed:

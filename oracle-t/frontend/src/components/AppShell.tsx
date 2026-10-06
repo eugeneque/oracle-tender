@@ -1,5 +1,5 @@
-import { ChevronsLeft, ChevronsRight } from "lucide-react";
-import { LayoutGroup, motion } from "motion/react";
+import { ChevronDown, ChevronsLeft, ChevronsRight } from "lucide-react";
+import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
@@ -14,8 +14,20 @@ import { HeaderNav } from "./nav/HeaderNav";
 import { MyJobsIndicator } from "./nav/MyJobsIndicator";
 import { WhatsNewCard, WhatsNewPill } from "./nav/WhatsNew";
 import { isNavItemActive, visibleNavItems } from "./nav/navConfig";
+import type { NavItem } from "./nav/navConfig";
 
 const COLLAPSED_KEY = "nav.sidebarCollapsed";
+// Какие группы боковой панели раскрыты («Тендеры» → «Релевантные», «Неактуальные»).
+const EXPANDED_KEY = "nav.sidebarExpanded";
+
+function readExpanded(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(EXPANDED_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, boolean>) : {};
+  } catch {
+    return {};
+  }
+}
 
 function readCollapsed(): boolean {
   try {
@@ -107,7 +119,21 @@ function Sidebar() {
 
   // В боковой панели — основные разделы; «Избранное» живёт только в выпадающем меню шапки
   // (здесь до него один клик из меню учётной записи).
-  const items = visibleNavItems(user).filter((item) => !item.headerOnly);
+  const allItems = visibleNavItems(user).filter((item) => !item.headerOnly);
+  const items = allItems.filter((item) => !item.parent);
+  const childrenOf = (item: NavItem) => allItems.filter((child) => child.parent === item.to);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(readExpanded);
+  const toggleGroup = (to: string) => {
+    setExpanded((prev) => {
+      const next = { ...prev, [to]: !prev[to] };
+      try {
+        localStorage.setItem(EXPANDED_KEY, JSON.stringify(next));
+      } catch {
+        // без хранилища группа просто не запомнит состояние
+      }
+      return next;
+    });
+  };
 
   return (
     <motion.aside
@@ -128,27 +154,55 @@ function Sidebar() {
           className="flex flex-col gap-0.5 px-3"
         >
           {items.map((item) => {
-            const Icon = item.icon;
-            const isActive = isNavItemActive(item, pathname, search);
+            const children = childrenOf(item);
+            const childActive = children.some((child) => isNavItemActive(child, pathname, search));
+            // В свёрнутой панели вложенных пунктов не видно — подсвечивается родитель.
+            const isActive =
+              isNavItemActive(item, pathname, search) || (isCollapsed && childActive);
+            // Открытый вложенный раздел раскрывает группу сам, иначе его не видно в меню.
+            const isOpen = !isCollapsed && children.length > 0 && (expanded[item.to] || childActive);
             return (
               <motion.div key={item.to} variants={navItemVariants}>
-                <Link
-                  to={item.to}
-                  className={`relative flex items-center gap-3 whitespace-nowrap rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${
-                    isActive ? "text-white" : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"
-                  }`}
-                  title={item.label}
-                >
-                  {isActive && (
-                    <motion.span
-                      layoutId="sidebar-active"
-                      className="absolute inset-0 rounded-xl border border-white/10 bg-white/[0.07] shadow-sm"
-                      transition={SPRING_SNAPPY}
-                    />
+                <div className="relative flex items-center">
+                  <SidebarLink item={item} isActive={isActive} isCollapsed={isCollapsed} />
+                  {!isCollapsed && children.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => toggleGroup(item.to)}
+                      aria-expanded={isOpen}
+                      title={isOpen ? "Свернуть подразделы" : "Показать подразделы"}
+                      className="absolute right-1.5 z-10 rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
+                    >
+                      <ChevronDown
+                        size={14}
+                        className={`transition-transform duration-200 ${isOpen ? "rotate-180" : ""}`}
+                      />
+                    </button>
                   )}
-                  <Icon size={17} className="relative shrink-0" />
-                  {!isCollapsed && <span className="relative">{item.label}</span>}
-                </Link>
+                </div>
+                <AnimatePresence initial={false}>
+                  {isOpen && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: "auto", opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={SPRING_SNAPPY}
+                      className="overflow-hidden"
+                    >
+                      <div className="mb-0.5 ml-5 mt-0.5 flex flex-col gap-0.5 border-l border-white/[0.06] pl-2">
+                        {children.map((child) => (
+                          <SidebarLink
+                            key={child.to}
+                            item={child}
+                            isActive={isNavItemActive(child, pathname, search)}
+                            isCollapsed={false}
+                            nested
+                          />
+                        ))}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </motion.div>
             );
           })}
@@ -162,6 +216,39 @@ function Sidebar() {
         )}
       </div>
     </motion.aside>
+  );
+}
+
+function SidebarLink({
+  item,
+  isActive,
+  isCollapsed,
+  nested = false,
+}: {
+  item: NavItem;
+  isActive: boolean;
+  isCollapsed: boolean;
+  nested?: boolean;
+}) {
+  const Icon = item.icon;
+  return (
+    <Link
+      to={item.to}
+      className={`relative flex flex-1 items-center gap-3 whitespace-nowrap rounded-xl font-medium transition-colors ${
+        nested ? "px-2.5 py-1.5 text-[13px]" : "px-3 py-2.5 text-sm"
+      } ${isActive ? "text-white" : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"}`}
+      title={item.label}
+    >
+      {isActive && (
+        <motion.span
+          layoutId="sidebar-active"
+          className="absolute inset-0 rounded-xl border border-white/10 bg-white/[0.07] shadow-sm"
+          transition={SPRING_SNAPPY}
+        />
+      )}
+      <Icon size={nested ? 15 : 17} className="relative shrink-0" />
+      {!isCollapsed && <span className="relative">{item.label}</span>}
+    </Link>
   );
 }
 

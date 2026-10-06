@@ -59,6 +59,11 @@ class TenderOut(BaseModel):
     customer_contact_email: str | None = None
     assignee_id: uuid.UUID | None = None
     assignee_name: str | None = None
+    # Кто и когда отметил «Релевантна» / «Неактуально» (06.10.2026) — метка «уже
+    # посмотрели» в списках и разделы «Релевантные» / «Неактуальные».
+    relevance_marked_by_id: uuid.UUID | None = None
+    relevance_marked_by_name: str | None = None
+    relevance_marked_at: datetime | None = None
     # Итоговая AI-оценка по профилю (раздел 5.5.1 ТЗ) — главная метрика списка с
     # 03.09.2026. Как и процент победителя, не колонка таблицы: подставляется
     # `attach_analysis_fields` одним запросом на выдачу.
@@ -164,6 +169,8 @@ class WinPercentageOut(BaseModel):
     # Итог «проходит / с оговорками / не проходит / не хватает данных» (`WinVerdict`);
     # `null` у расчётов до 25.09.2026.
     verdict: str | None = None
+    # ТЗ составлено по модели этого производителя (06.10.2026).
+    tz_reference: bool = False
     calculated_at: datetime
 
 

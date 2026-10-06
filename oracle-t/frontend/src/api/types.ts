@@ -644,6 +644,10 @@ export interface Tender {
   customer_contact_email: string | null;
   assignee_id: string | null;
   assignee_name: string | null;
+  /** Кто и когда отметил «Релевантна» / «Неактуально» (06.10.2026). */
+  relevance_marked_by_id: string | null;
+  relevance_marked_by_name: string | null;
+  relevance_marked_at: string | null;
   /** Итоговая AI-оценка по профилю (раздел 5.5.1 ТЗ) — главная метрика списка.
    * `null` — расчёт ещё не выполнялся. */
   ai_score: string | null;
@@ -690,9 +694,10 @@ export type ComplianceSourceCode =
   | "upper_software"
   | "admission_registry"
   | "astra_catalog"
-  | "expert_rule";
+  | "expert_rule"
+  | "tz_reference";
 
-export type RequirementKind = "product" | "service" | "participant";
+export type RequirementKind = "product" | "service" | "participant" | "supply";
 
 export interface Requirement {
   id: string;
@@ -732,6 +737,8 @@ export interface WinPercentageRow {
   requirements_scored: number;
   /** Проходит ли прибор производителя; null — расчёт до 25.09.2026. */
   verdict: WinVerdictCode | null;
+  /** ТЗ составлено по модели этого производителя («CE207 … или эквивалент»). */
+  tz_reference: boolean;
   calculated_at: string;
 }
 
