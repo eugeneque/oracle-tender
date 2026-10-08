@@ -46,7 +46,6 @@ import { SPRING_SNAPPY, SPRING_SOFT } from "../utils/motion";
 type TabKey =
   | "sources"
   | "gosplan"
-  | "seldon"
   | "tenderplan"
   | "credentials"
   | "relevance"
@@ -64,7 +63,6 @@ interface TabDef {
 const TABS: TabDef[] = [
   { key: "sources", label: "Источники", icon: Globe },
   { key: "gosplan", label: "Госплан", icon: Landmark },
-  { key: "seldon", label: "Селдон", icon: Landmark },
   { key: "tenderplan", label: "Тендерплан", icon: Landmark },
   { key: "relevance", label: "Отбор тендеров", icon: SlidersHorizontal },
   { key: "credentials", label: "Доступы", icon: KeyRound, adminOnly: true },
@@ -94,9 +92,6 @@ const SEARCH_INDEX: SearchEntry[] = [
   { tab: "gosplan", anchor: "gosplan-availability", title: "Сбор из Госплана", hint: "Состояние канала и запуск сбора", keywords: "госплан собрать опрос состояние доступность" },
   { tab: "gosplan", anchor: "gosplan-key", title: "Ключ API Госплана", hint: "Ключ платного тарифа", keywords: "госплан ключ токен apikey api", adminOnly: true },
   { tab: "gosplan", anchor: "gosplan-search", title: "Как Госплан ищет закупки", hint: "ОКПД2, слова, документы из ЕИС", keywords: "госплан окпд2 поиск документы модель" },
-  { tab: "seldon", anchor: "seldon-tariff", title: "Доступ к Seldon.API", hint: "Подключение канала Селдон", keywords: "селдон seldon api доступ договор" },
-  { tab: "seldon", anchor: "seldon-availability", title: "Сбор из Селдона", hint: "Состояние канала и запуск сбора", keywords: "селдон seldon собрать опрос состояние" },
-  { tab: "seldon", anchor: "seldon-key", title: "Ключ Seldon.API", hint: "Ключ, выданный по договору", keywords: "селдон seldon ключ токен api", adminOnly: true },
   { tab: "tenderplan", anchor: "tenderplan-tariff", title: "Доступ к API Тендерплана", hint: "Подключение канала Тендерплан", keywords: "тендерплан tenderplan api доступ" },
   { tab: "tenderplan", anchor: "tenderplan-availability", title: "Сбор из Тендерплана", hint: "Состояние канала и запуск сбора", keywords: "тендерплан tenderplan собрать опрос состояние" },
   { tab: "tenderplan", anchor: "tenderplan-key", title: "Токен Тендерплана", hint: "Персональный токен из личного кабинета", keywords: "тендерплан tenderplan токен ключ pat api", adminOnly: true },
@@ -111,10 +106,10 @@ const SEARCH_INDEX: SearchEntry[] = [
   { tab: "feedback", title: "Ответы специалистов", hint: "Замечания специалистов к заключениям ИИ", keywords: "заключение ии несогласия согласия замечания обратная связь" },
   { tab: "interface", anchor: "interface-dark-theme", title: "Тёмная тема", hint: "Оформление приложения", keywords: "тема светлая тёмная темная оформление цвет" },
   { tab: "interface", anchor: "interface-nav", title: "Вид меню", hint: "Боковое меню или меню в шапке", keywords: "меню сайдбар шапка навигация" },
-  { to: "/integrations", page: "Интеграции", title: "Модели ИИ", hint: "Claude, DeepSeek, YandexGPT — ключи и выбор модели", keywords: "ии ai модель нейросеть ключ routerai deepseek claude yandex провайдер", adminOnly: true },
-  { to: "/integrations", page: "Интеграции", title: "Rusprofile", hint: "Учётная запись для заполнения компании", keywords: "rusprofile русрофиль компания", adminOnly: true },
-  { to: "/integrations", page: "Интеграции", title: "Почта и уведомления", hint: "Ящик, рассылка, журнал отправок", keywords: "почта email уведомления рассылка письма" },
-  { to: "/integrations", page: "Интеграции", title: "Bitrix24", hint: "Выгрузка лидов и ключи API", keywords: "битрикс bitrix crm лиды" },
+  { to: "/integrations", page: "Интеграции", title: "Модели ИИ", hint: "Claude, DeepSeek, YandexGPT, GigaChat — ключи и выбор модели", keywords: "ии ai модель нейросеть ключ routerai deepseek claude yandex gigachat гигачат сбер провайдер", adminOnly: true },
+  { to: "/integrations?tab=rusprofile", page: "Интеграции", title: "Rusprofile", hint: "Учётная запись для заполнения компании", keywords: "rusprofile русрофиль компания", adminOnly: true },
+  { to: "/integrations?tab=mail", page: "Интеграции", title: "Почта и уведомления", hint: "Ящик, рассылка, журнал отправок", keywords: "почта email уведомления рассылка письма" },
+  { to: "/integrations?tab=bitrix", page: "Интеграции", title: "Bitrix24", hint: "Выгрузка лидов и ключи API", keywords: "битрикс bitrix crm лиды" },
   { to: "/logs", page: "Логирование", title: "Журнал операций", hint: "Опросы, анализ, действия пользователей", keywords: "лог журнал ошибки логирование" },
   { to: "/company", page: "Моя компания", title: "Профиль компании", hint: "Реквизиты, допуски, история участий", keywords: "компания инн реквизиты миртек участия" },
   { to: "/users", page: "Пользователи", title: "Пользователи и роли", hint: "Учётные записи сотрудников", keywords: "пользователи роли администратор сотрудники", adminOnly: true },
@@ -392,9 +387,6 @@ export function SettingsPage() {
         <header className="mb-8 flex flex-wrap items-end justify-between gap-5">
           <div>
             <h1 className="text-4xl font-bold tracking-tight text-white">Настройки</h1>
-            <p className="mt-2 text-sm text-zinc-500">
-              Источники закупок, отбор, доступы и вид приложения.
-            </p>
           </div>
           <SettingsSearch isAdmin={isAdmin} sources={sources} onPick={handlePick} />
         </header>
@@ -441,7 +433,7 @@ export function SettingsPage() {
             className="max-w-4xl pb-16"
           >
             {activeTab === "sources" && <SourcesSection isAdmin={isAdmin} active />}
-            {(activeTab === "gosplan" || activeTab === "seldon" || activeTab === "tenderplan") && (
+            {(activeTab === "gosplan" || activeTab === "tenderplan") && (
               <FeedChannelSection feed={activeTab} isAdmin={isAdmin} active />
             )}
             {activeTab === "relevance" && <RelevanceProfileSection isAdmin={isAdmin} />}

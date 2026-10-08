@@ -14,7 +14,6 @@ export function InterfaceSection() {
   return (
     <SettingsPanel
       title="Интерфейс"
-      description="Как выглядит приложение у вас. Эти настройки хранятся в браузере и не меняют ничего у коллег."
     >
       <SettingsGroup id="interface-theme" label="Оформление">
         <SettingCard

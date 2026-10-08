@@ -128,7 +128,7 @@ def cmd_list_sources(_args: argparse.Namespace) -> None:
 def cmd_ping_sources(_args: argparse.Namespace) -> None:
     db = SessionLocal()
     try:
-        ping_all_sources(db)
+        ping_all_sources(db, force=True)
         sources = list_sources(db)
     finally:
         db.close()

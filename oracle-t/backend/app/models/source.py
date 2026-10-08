@@ -45,10 +45,10 @@ class SourceType(str, enum.Enum):
     # каналами не работает (см. `tender_service._upsert_tender`): закупка из ЕИС и та же
     # закупка из Госплана живут двумя строками, каждая в своём канале.
     GOSPLAN = "gosplan"
-    # Сервисы поиска тендеров «Селдон» и «Тендерплан» (решение 30.09.2026) — такие же
-    # отдельные каналы, как Госплан: у каждого своя кнопка на переключателе страницы
-    # тендеров, свой сбор и своя вкладка в настройках.
-    SELDON = "seldon"
+    # Сервис поиска тендеров «Тендерплан» (решение 30.09.2026) — такой же отдельный канал,
+    # как Госплан: своя кнопка на переключателе страницы тендеров, свой сбор и своя вкладка
+    # в настройках. Селдон, заведённый тогда же, убран 08.10.2026 (миграция 0072): Seldon.API
+    # так и не открыли по договору, а пустой канал только путал пользователей.
     TENDERPLAN = "tenderplan"
 
 
@@ -57,13 +57,12 @@ class SourceType(str, enum.Enum):
 # сервису. Имя канала совпадает с типом и ключом его источника.
 FEED_STANDARD = "standard"
 FEED_GOSPLAN = "gosplan"
-FEED_SELDON = "seldon"
 FEED_TENDERPLAN = "tenderplan"
 # Типы источников, которые образуют отдельный канал и не смешиваются со стандартным.
 SEPARATE_FEED_SOURCE_TYPES: frozenset[str] = frozenset(
-    {SourceType.GOSPLAN.value, SourceType.SELDON.value, SourceType.TENDERPLAN.value}
+    {SourceType.GOSPLAN.value, SourceType.TENDERPLAN.value}
 )
-FEEDS: tuple[str, ...] = (FEED_STANDARD, FEED_GOSPLAN, FEED_SELDON, FEED_TENDERPLAN)
+FEEDS: tuple[str, ...] = (FEED_STANDARD, FEED_GOSPLAN, FEED_TENDERPLAN)
 # Для `Query(pattern=...)` эндпоинтов списка, доски, выгрузки и статистики.
 FEED_PATTERN = "^(" + "|".join(FEEDS) + ")$"
 GOSPLAN_SOURCE_KEY = "gosplan"

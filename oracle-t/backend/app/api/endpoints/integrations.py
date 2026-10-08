@@ -12,6 +12,13 @@ from app.schemas.integration_setting import (
     AiProviderKey,
     AiProviderStatus,
     AiProviderSwitch,
+    Bitrix24CheckResult,
+    Bitrix24DealPreview,
+    Bitrix24PushResult,
+    Bitrix24SettingsOut,
+    Bitrix24SettingsUpdate,
+    GigaChatSettingsOut,
+    GigaChatSettingsUpdate,
     RouterAiSettingsOut,
     RouterAiSettingsUpdate,
     RusprofileSettingsOut,
@@ -23,10 +30,13 @@ from app.schemas.integration_setting import (
 from app.services import (
     ai_provider_service,
     api_client_service,
+    bitrix_deal_service,
     rusprofile_service,
     yandex_ai_service,
 )
 from app.services.ai_provider_service import AiNotConfiguredError
+from app.services.bitrix_client import BitrixError, BitrixWebhookFormatError
+from app.services.bitrix_deal_service import BitrixNotConfiguredError, BitrixPushDisabledError
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -119,6 +129,32 @@ def test_routerai_connection(
     return ai_provider_service.test_routerai_connection(db, actor=admin)
 
 
+@router.get("/gigachat", response_model=GigaChatSettingsOut)
+def get_gigachat_settings(
+    db: Session = Depends(get_db), _admin: User = Depends(require_admin)
+) -> GigaChatSettingsOut:
+    return ai_provider_service.get_gigachat_settings_out(db)
+
+
+@router.patch("/gigachat", response_model=GigaChatSettingsOut)
+def update_gigachat_settings(
+    payload: GigaChatSettingsUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> GigaChatSettingsOut:
+    try:
+        return ai_provider_service.update_gigachat_settings(db, payload, actor=admin)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/gigachat/test", response_model=YandexConnectionTestResult)
+def test_gigachat_connection(
+    db: Session = Depends(get_db), admin: User = Depends(require_admin)
+) -> YandexConnectionTestResult:
+    return ai_provider_service.test_gigachat_connection(db, actor=admin)
+
+
 @router.get("/rusprofile", response_model=RusprofileSettingsOut)
 def get_rusprofile_settings(
     db: Session = Depends(get_db), _admin: User = Depends(require_admin)
@@ -143,6 +179,99 @@ def test_rusprofile_connection(
     db: Session = Depends(get_db), admin: User = Depends(require_admin)
 ) -> YandexConnectionTestResult:
     return rusprofile_service.test_connection(db, actor=admin)
+
+
+@router.get("/bitrix24", response_model=Bitrix24SettingsOut)
+def get_bitrix24_settings(
+    db: Session = Depends(get_db), _admin: User = Depends(require_admin)
+) -> Bitrix24SettingsOut:
+    """Подключение к порталу Bitrix24 (08.10.2026): тендеры уходят сделками в выбранную
+    воронку и стадию. Отправка по умолчанию выключена — портал боевой."""
+
+    return Bitrix24SettingsOut(**bitrix_deal_service.get_settings_out(db))
+
+
+@router.patch("/bitrix24", response_model=Bitrix24SettingsOut)
+def update_bitrix24_settings(
+    payload: Bitrix24SettingsUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> Bitrix24SettingsOut:
+    changes = payload.model_dump(include=payload.model_fields_set)
+    try:
+        return Bitrix24SettingsOut(
+            **bitrix_deal_service.update_settings(db, changes, actor=admin)
+        )
+    except (BitrixWebhookFormatError, BitrixNotConfiguredError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/bitrix24/test", response_model=Bitrix24CheckResult)
+def test_bitrix24_connection(
+    db: Session = Depends(get_db), admin: User = Depends(require_admin)
+) -> Bitrix24CheckResult:
+    """Только чтение: стадии воронки и список полей сделки. В CRM ничего не пишется."""
+
+    return Bitrix24CheckResult(**bitrix_deal_service.check_connection(db, actor=admin))
+
+
+@router.get("/bitrix24/deals/{tender_id}/preview", response_model=Bitrix24DealPreview)
+def preview_bitrix24_deal(
+    tender_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+) -> Bitrix24DealPreview:
+    """Какая сделка получится из тендера. Портал не вызывается."""
+
+    try:
+        preview = bitrix_deal_service.preview_deal(db, tender_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return Bitrix24DealPreview(**{**preview, "tender_id": str(preview["tender_id"])})
+
+
+@router.post("/bitrix24/deals/{tender_id}", response_model=Bitrix24PushResult)
+def push_bitrix24_deal(
+    tender_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> Bitrix24PushResult:
+    """Создаёт или обновляет сделку под тендер. Пока отправка выключена — 409.
+
+    Только администратор: на этапе проверки интеграции сделки в боевую CRM кладёт один
+    человек, а не каждый, кто открыл карточку тендера."""
+
+    try:
+        return Bitrix24PushResult(**bitrix_deal_service.push_tender(db, tender_id, actor=admin))
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except BitrixPushDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except BitrixNotConfiguredError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except BitrixError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
+@router.post("/bitrix24/test-deal", response_model=Bitrix24PushResult)
+def push_bitrix24_test_deal(
+    tender_id: uuid.UUID | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> Bitrix24PushResult:
+    """Одна тестовая сделка «[ТЕСТ] …» из последнего (или указанного) тендера — посмотреть на
+    портале, как легли поля. Работает и при выключенной отправке: это явное разовое действие."""
+
+    try:
+        return Bitrix24PushResult(
+            **bitrix_deal_service.push_test_deal(db, actor=admin, tender_id=tender_id)
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except BitrixNotConfiguredError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except BitrixError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
 @router.get("/api-clients", response_model=list[ApiClientOut])

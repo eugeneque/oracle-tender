@@ -138,3 +138,27 @@ def test_ping_retries_before_marking_unavailable_and_treats_429_as_alive(monkeyp
         assert source.availability_status == "available"
     finally:
         db.close()
+
+
+def test_ping_respects_interval_per_source_type():
+    """Пинг раз в минуту каждого сайта загонял Росэлторг и Инкотекс в бан антиDDoS
+    (журнал сервера 01–08.10.2026) — источник проверяется только по своему интервалу."""
+
+    from datetime import datetime, timedelta, timezone
+
+    from app.services.availability_service import is_ping_due
+
+    now = datetime.now(timezone.utc)
+    platform = Source(key="x", name="x", url="https://example.test", type="etp_federal_commercial")
+    catalog = Source(key="y", name="y", url="https://example.test", type="manufacturer_site")
+
+    assert is_ping_due(platform, now)  # ни разу не проверялся
+    platform.availability_checked_at = now - timedelta(minutes=5)
+    assert not is_ping_due(platform, now)
+    platform.availability_checked_at = now - timedelta(minutes=15)
+    assert is_ping_due(platform, now)
+
+    catalog.availability_checked_at = now - timedelta(minutes=30)
+    assert not is_ping_due(catalog, now)
+    catalog.availability_checked_at = now - timedelta(hours=1)
+    assert is_ping_due(catalog, now)

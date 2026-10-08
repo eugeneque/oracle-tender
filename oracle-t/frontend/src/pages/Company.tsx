@@ -64,12 +64,6 @@ export function CompanyPage() {
           }
         />
 
-        <p className="-mt-4 mb-6 max-w-3xl text-xs leading-relaxed text-zinc-500">
-          Юридические данные, допуски и реальная история участия в закупках. На этих данных
-          держатся все три измерения AI-оценки (раздел 5.5.1 ТЗ): без профиля не считаются
-          «Задача» и «Компетенции», без истории участий — «История». Компаний можно завести
-          сколько угодно; оценку питает та, что помечена основной.
-        </p>
 
         <div className="mb-6 inline-flex gap-1 rounded-full border border-white/[0.08] bg-black/30 p-1">
           {TABS.map((item) => (

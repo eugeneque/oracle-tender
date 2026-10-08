@@ -5,6 +5,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { ArrowRight, Check, Plus, Star, X } from "lucide-react";
 import { Link } from "react-router-dom";
 
+import { AiProviderIcon } from "../AiProviderIcon";
 import { EASE_OUT, staggerContainer } from "../../utils/motion";
 import type { Slide, SlideTone } from "../../content/homeSlides";
 
@@ -61,6 +62,58 @@ function StepsVisual() {
 }
 
 const VISUALS: Record<string, () => ReactNode> = {
+  bitrix: () => (
+    <div className="w-full max-w-[250px] space-y-2">
+      <div className="flex gap-1">
+        {["Новый тендер", "Подготовка", "Подана"].map((stage, n) => (
+          <span
+            key={stage}
+            className={`flex-1 truncate rounded-md px-1.5 py-1 text-[9.5px] ${n === 0 ? "bg-sky-500/25 text-sky-200" : "bg-white/[0.06] text-zinc-500"}`}
+          >
+            {stage}
+          </span>
+        ))}
+      </div>
+      <div className="rounded-xl bg-white/[0.05] p-2.5 text-left ring-1 ring-sky-400/30">
+        <div className="truncate text-[11px] text-zinc-200">Поставка ПУ · 0373100…</div>
+        <div className="mt-1 flex items-center justify-between text-[10px] text-zinc-500">
+          <span>4,8 млн ₽</span>
+          <span className="rounded-full bg-amber-500/15 px-1.5 text-amber-300">только чтение</span>
+        </div>
+      </div>
+    </div>
+  ),
+  gigachat: () => (
+    <div className="grid grid-cols-2 gap-1.5 text-[10.5px]">
+      {(["yandex", "claude", "deepseek", "gigachat"] as const).map((provider) => (
+        <span
+          key={provider}
+          className={`flex items-center justify-center rounded-xl p-2 ${provider === "gigachat" ? "bg-emerald-500/15 ring-1 ring-emerald-400/40" : "bg-white/[0.05] opacity-60"}`}
+        >
+          <AiProviderIcon provider={provider} size={20} />
+        </span>
+      ))}
+    </div>
+  ),
+  "integrations-tabs": () => (
+    <div className="w-full max-w-[200px]">
+      <div className="flex gap-2 border-b border-white/10 text-[9.5px]">
+        {["Модели ИИ", "Почта", "Bitrix24"].map((label, n) => (
+          <span key={label} className={`pb-1 ${n === 0 ? "border-b-2 border-violet-400 text-zinc-100" : "text-zinc-500"}`}>
+            {label}
+          </span>
+        ))}
+      </div>
+      <div className="mt-2 flex gap-1.5">
+        <div className="flex-1 space-y-1">
+          {[true, false, false].map((on, n) => (
+            <span key={n} className={`block h-3 rounded ${on ? "bg-violet-500/40" : "bg-white/[0.07]"}`} />
+          ))}
+        </div>
+        <span className="w-1/2 rounded bg-white/[0.05]" />
+      </div>
+    </div>
+  ),
   profiles: () => (
     <div className="w-full max-w-[210px] space-y-1.5 text-[11px]">
       {[
@@ -309,8 +362,10 @@ export function BentoRecap({
       </span>
     </>
   );
+  // Две колонки — только до 1024px: Tailwind выводит `sm:`-варианты в конце таблицы стилей,
+  // и `sm:grid-cols-2` перебивал четыре колонки `.bento` — колонки мозаики выходили разной ширины.
   const heroClass =
-    "bento-tile relative flex min-h-[260px] items-center justify-center overflow-hidden rounded-[28px] sm:col-span-2";
+    "bento-tile relative flex min-h-[260px] items-center justify-center overflow-hidden rounded-[28px] sm:max-lg:col-span-2";
 
   return (
     <>
@@ -318,7 +373,7 @@ export function BentoRecap({
         variants={staggerContainer}
         initial="initial"
         animate="animate"
-        className="bento grid grid-cols-1 gap-3 sm:grid-cols-2"
+        className="bento grid grid-cols-1 gap-3 sm:max-lg:grid-cols-2"
         style={{ "--bento-areas": areas.map((row) => `"${row}"`).join(" ") } as CSSProperties}
       >
         {heroSlide ? (

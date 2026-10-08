@@ -18,7 +18,21 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
-from app.seed.sources_data import SELDON_SOURCE, TENDERPLAN_SOURCE
+from app.seed.sources_data import TENDERPLAN_SOURCE
+
+# Строка Селдона — копией здесь, а не импортом: из `sources_data` она убрана вместе с каналом
+# (08.10.2026, миграция 0072), а история миграций должна накатываться на чистую базу как раньше.
+SELDON_SOURCE: tuple[str, str, str, str, str | None, str, str, str | None] = (
+    "seldon",
+    "Селдон",
+    "https://tender.myseldon.com/",
+    "seldon",
+    "seldon",
+    "not_implemented",
+    "twice_daily",
+    "Seldon.API — выгрузка закупок из системы Seldon. Доступ, документация и ключ выдаются"
+    " по договору (8-800-2000-100); до этого канал пуст, сбор сообщает, чего не хватает.",
+)
 
 revision: str = "0062_seldon_tenderplan_sources"
 down_revision: Union[str, None] = "0061_meter_kinds_hv_only"

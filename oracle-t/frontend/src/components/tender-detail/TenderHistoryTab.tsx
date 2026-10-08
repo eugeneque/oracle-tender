@@ -61,8 +61,7 @@ export function TenderHistoryTab({
         </div>
       ) : entries.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 p-6 text-center text-sm text-zinc-500">
-          Изменений пока не было. Здесь появятся правки классификации, отметки релевантности и
-          комментарии — с указанием автора и времени (раздел 5.6 ТЗ).
+          Изменений пока не было.
         </div>
       ) : (
         <div className="space-y-2">

@@ -32,7 +32,7 @@ class YandexConnectionTestResult(BaseModel):
 
 # --- переключатель ИИ-провайдера и Claude через RouterAI (18.09.2026) --------------------
 
-AiProviderKey = Literal["yandex", "claude", "deepseek"]
+AiProviderKey = Literal["yandex", "claude", "deepseek", "gigachat"]
 
 
 class AiProviderStatus(BaseModel):
@@ -96,6 +96,28 @@ class RouterAiSettingsUpdate(BaseModel):
     base_url: str | None = None
 
 
+class GigaChatSettingsOut(BaseModel):
+    """GigaChat (Сбер, 08.10.2026). Ключ авторизации наружу не отдаётся — только хвост."""
+
+    is_configured: bool
+    auth_key_masked: str | None
+    scope: str
+    model: str
+    base_url: str
+    updated_at: datetime | None
+    updated_by: str | None
+
+
+class GigaChatSettingsUpdate(BaseModel):
+    """PATCH-семантика, как у `RouterAiSettingsUpdate`: пустая строка — сброс к значению по
+    умолчанию (scope, модель, адрес) или очистка (ключ)."""
+
+    auth_key: str | None = None
+    scope: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+
+
 # --- rusprofile.ru (18.09.2026) ----------------------------------------------------------------
 
 
@@ -138,4 +160,74 @@ class RusprofileSyncResult(BaseModel):
     # Часть данных на сайте осталась скрытой (нет подписки или она кончилась) — предупреждение
     # рядом с результатом, чтобы «0 проигрышей» не приняли за факт.
     data_hidden: bool
+    message: str
+
+
+# --- Bitrix24: сделки через входящий вебхук (08.10.2026) ------------------------------------
+
+
+class Bitrix24SettingsOut(BaseModel):
+    """Вебхук наружу не отдаётся: он равносилен паролю к CRM. Только маска без кода и адрес
+    портала — по ним видно, куда подключены."""
+
+    is_configured: bool
+    webhook_masked: str | None
+    portal: str | None
+    category_id: int
+    stage_id: str
+    push_enabled: bool
+    updated_at: datetime | None
+    updated_by: str | None
+    last_check_at: datetime | None
+    last_check_status: str | None
+    last_check_message: str | None
+
+
+class Bitrix24SettingsUpdate(BaseModel):
+    """PATCH: не присланное поле не трогаем; пустой `webhook_url` — отключение портала."""
+
+    webhook_url: str | None = None
+    category_id: int | None = None
+    stage_id: str | None = None
+    push_enabled: bool | None = None
+
+
+class Bitrix24Stage(BaseModel):
+    id: str
+    name: str
+
+
+class Bitrix24FieldRef(BaseModel):
+    key: str
+    title: str
+
+
+class Bitrix24CheckResult(BaseModel):
+    success: bool
+    message: str
+    stages: list[Bitrix24Stage]
+    stage_found: bool
+    # Поля из маппинга, которых на портале нет: их удалили или переименовали.
+    missing_fields: list[Bitrix24FieldRef]
+
+
+class Bitrix24DealFieldValue(BaseModel):
+    key: str
+    title: str
+    value: str
+
+
+class Bitrix24DealPreview(BaseModel):
+    tender_id: str
+    deal_id: int | None
+    # "add" — сделки ещё нет, будет создана в выбранной воронке; "update" — обновятся поля.
+    action: Literal["add", "update"]
+    push_enabled: bool
+    fields: list[Bitrix24DealFieldValue]
+
+
+class Bitrix24PushResult(BaseModel):
+    deal_id: int
+    created: bool
+    url: str
     message: str

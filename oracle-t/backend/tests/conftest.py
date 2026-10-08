@@ -5,6 +5,14 @@ from pathlib import Path
 import pytest
 
 os.environ.setdefault("POSTGRES_DB", "oraclet_test")
+# Тесты создают и удаляют данные — только в отдельной базе с суффиксом `_test`. 30.09.2026
+# прогон с выставленным в терминале POSTGRES_DB=oraclet записал в рабочую базу 13 источников
+# «Тестовая площадка»/«Тестовый источник» с закупками — они всплыли в выборе площадок.
+if not os.environ["POSTGRES_DB"].endswith("_test"):
+    raise pytest.UsageError(
+        f"POSTGRES_DB={os.environ['POSTGRES_DB']}: тесты запускаются только на базе *_test "
+        "(по умолчанию oraclet_test). Снимите переменную: unset POSTGRES_DB"
+    )
 os.environ.setdefault("BOOTSTRAP_ADMIN_USERNAME", "admin")
 os.environ.setdefault("BOOTSTRAP_ADMIN_PASSWORD", "TestAdmin123!")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret")

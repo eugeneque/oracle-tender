@@ -33,6 +33,7 @@ def _reset(client, headers) -> None:
     # Обе таблицы — синглтоны, тестовая БД между запусками не пересоздаётся.
     client.patch("/integrations/yandex-ai-studio", json={"api_key": "", "folder_id": ""}, headers=headers)
     client.patch("/integrations/routerai", json={"api_key": "", "model": "", "deepseek_model": "", "base_url": ""}, headers=headers)
+    client.patch("/integrations/gigachat", json={"auth_key": "", "scope": "", "model": "", "base_url": ""}, headers=headers)
 
 
 def test_status_visible_to_any_user_but_switch_is_admin_only(client, admin_token):
@@ -42,7 +43,7 @@ def test_status_visible_to_any_user_but_switch_is_admin_only(client, admin_token
     assert client.get("/integrations/ai-provider").status_code == 401
     status = client.get("/integrations/ai-provider", headers=user_headers)
     assert status.status_code == 200, status.text
-    assert status.json()["active_provider"] in {"yandex", "claude", "deepseek"}
+    assert status.json()["active_provider"] in {"yandex", "claude", "deepseek", "gigachat"}
     assert "api_key" not in status.text
 
     assert (

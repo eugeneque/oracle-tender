@@ -45,46 +45,31 @@ import { formatDate } from "../utils/format";
 
 type StepKey = "si" | "models" | "learning" | "documents" | "software";
 
-const STEPS: { key: StepKey; title: string; caption: string; about: string }[] = [
+const STEPS: { key: StepKey; title: string; caption: string }[] = [
   {
     key: "si",
     title: "Коды СИ",
     caption: "Госреестр ФГИС",
-    about:
-      "Какие типы приборов производителя утверждены в Госреестре средств измерений. Код СИ связывает модель " +
-      "с «Описанием типа» — главным источником метрологических характеристик. Дальше: привяжите коды к моделям.",
   },
   {
     key: "models",
     title: "Модели",
     caption: "Приборы и характеристики",
-    about:
-      "Приборы производителя по фазности и способу установки. Модели приходят с сайта производителя и из " +
-      "реестра. Нажмите на модель — откроется её карточка: параметры для ПУ, характеристики, реестры допуска.",
   },
   {
     key: "learning",
     title: "Обучение",
     caption: "Аршин и руководства",
-    about:
-      "Дополняет каталог: исполнения из Аршина, которых ещё нет на сайте производителя, характеристики из " +
-      "«Описаний типа» и руководств по эксплуатации. Полный проход — кнопкой «Обучить», по шагам — остальными.",
   },
   {
     key: "documents",
     title: "Документы",
     caption: "Актуальность",
-    about:
-      "Документы, из которых взяты характеристики: даты редакций и еженедельная сверка с источником. " +
-      "Переизданный документ — повод заново разобрать модель.",
   },
   {
     key: "software",
     title: "ПО верхнего уровня",
     caption: "Поддержка в АСКУЭ",
-    about:
-      "В каких АСКУЭ поддержаны приборы производителя — ответ на требование ТЗ «интеграция в ПО верхнего " +
-      "уровня». Отсутствие в списке — тоже ответ.",
   },
 ];
 
@@ -837,7 +822,6 @@ export function CatalogPage() {
 
                 <div className="flex items-start gap-2 px-1 text-xs leading-relaxed text-zinc-400">
                   <span className="whitespace-nowrap text-zinc-600">Шаг {stepIndex + 1} из {STEPS.length}.</span>
-                  <p>{currentStep.about}</p>
                   {stepIndex < STEPS.length - 1 && (
                     <button
                       onClick={() => switchStep(STEPS[stepIndex + 1].key)}

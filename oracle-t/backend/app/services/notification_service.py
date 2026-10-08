@@ -390,11 +390,24 @@ def _dispatch(
     return entry
 
 
+def _can_deliver(settings: NotificationSettings) -> bool:
+    return settings.is_enabled and is_configured(settings)
+
+
 def _already_notified(db: Session, trigger: NotificationTrigger, tender_id: uuid.UUID) -> bool:
+    """Пропущенные (`skipped`) записи повтором не считаются (08.10.2026): пока список
+    получателей был пуст, каждый тендер получал запись «канал не настроен» и навсегда
+    выпадал из рассылки — после заполнения получателей автоматические письма так и не шли,
+    хотя ручная рассылка (адреса прямо в форме) работала."""
+
     return (
         db.execute(
             select(Notification.id)
-            .where(Notification.trigger == trigger.value, Notification.tender_id == tender_id)
+            .where(
+                Notification.trigger == trigger.value,
+                Notification.tender_id == tender_id,
+                Notification.status != NotificationStatus.SKIPPED.value,
+            )
             .limit(1)
         ).first()
         is not None
@@ -517,6 +530,12 @@ def notify_deadlines_soon(db: Session) -> list[Notification]:
 
     settings = get_or_create(db)
     if not settings.trigger_deadline_soon:
+        return []
+    # Ежедневная проверка при неработающем канале писала бы `skipped` по каждому тендеру
+    # каждый день (пропуски больше не гасят повтор — см. `_already_notified`). Письма по
+    # срокам дойдут при первой проверке после настройки канала.
+    if not _can_deliver(settings):
+        logger.info("Напоминания о сроках не отправлены: почтовый канал выключен или не настроен")
         return []
 
     now = datetime.now(timezone.utc)

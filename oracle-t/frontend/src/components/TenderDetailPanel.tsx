@@ -981,7 +981,7 @@ export function TenderDetailPanel({
         <div className="relative mt-3 flex flex-wrap items-center gap-1.5">
           <span
             className={`rounded-md border px-2 py-1 text-[11px] font-medium tabular-nums ${scoreBadgeClass(overall)}`}
-            title="Итоговая AI-оценка по профилю (раздел 5.5.1 ТЗ)"
+            title="Итоговая AI-оценка по профилю"
           >
             {overall === null ? "AI-оценка —" : `AI ${overall}%`}
           </span>

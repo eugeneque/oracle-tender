@@ -127,11 +127,6 @@ export function ProductRegistrySection({
         <ShieldCheck size={13} className="text-indigo-400" />
         Реестры допуска
       </div>
-      <p className="mb-2 text-[11px] text-zinc-600">
-        По этим записям проверяются требования ТЗ «включён в реестр промышленной продукции
-        (ПП 719)», «действующее ЗАК ПАО „Россети“», «ПО в реестре Минцифры». Сверка ручная —
-        по ссылке на реестр; состояние по датам считается автоматически.
-      </p>
 
       {error && (
         <div className="mb-2 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-400">

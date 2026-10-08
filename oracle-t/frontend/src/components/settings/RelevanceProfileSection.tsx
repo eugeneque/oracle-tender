@@ -237,13 +237,6 @@ export function RelevanceProfileSection({ isAdmin }: { isAdmin: boolean }) {
   return (
     <SettingsPanel
       title="Отбор тендеров"
-      description={
-        <>
-          Как закупка попадает в ваш список: что система ищет на площадках, какими профилями
-          отбирает собранное и что отсекает модель. Отсеянное не удаляется — его видно, если
-          снять профиль или проверку моделью.
-        </>
-      }
     >
       {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
       {notice && <SettingsNotice tone="success">{notice}</SettingsNotice>}
@@ -251,7 +244,6 @@ export function RelevanceProfileSection({ isAdmin }: { isAdmin: boolean }) {
       <SettingsGroup
         id="relevance-guide"
         label="Как отбираются тендеры"
-        hint="Слои — в том порядке, в каком их применяет система. Числа по текущей выдаче — в строке над списком тендеров."
       >
         <SelectionGuide />
       </SettingsGroup>
@@ -259,7 +251,6 @@ export function RelevanceProfileSection({ isAdmin }: { isAdmin: boolean }) {
       <SettingsGroup
         id="relevance-terms"
         label="Что ищем на площадках"
-        hint="Фразы сбора. Закупка, которой нет ни по одной фразе, в систему не попадёт — профили её уже не увидят."
       >
         <CollectionTerms isAdmin={isAdmin} />
       </SettingsGroup>
@@ -267,7 +258,6 @@ export function RelevanceProfileSection({ isAdmin }: { isAdmin: boolean }) {
       <SettingsGroup
         id="relevance-profiles"
         label={`Профили отбора${profiles ? ` · ${profiles.length}` : ""}`}
-        hint="Общие действуют у всех по умолчанию (меняет администратор), личные заводит любой сотрудник. Выбор профилей для списка — в меню «Профиль» на странице тендеров."
       >
         <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.02]">
           {profiles === null ? (

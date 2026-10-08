@@ -18,8 +18,11 @@ const inputClass =
  *
  * Пароль отправляется только когда администратор ввёл новое значение: PATCH с одним логином
  * не трогает уже сохранённый пароль (см. RusprofileSettingsUpdate на бэкенде).
+ *
+ * `embedded` (08.10.2026) — блок открыт вкладкой страницы «Интеграции»: заголовок и пояснение
+ * показывает сама вкладка, поэтому сворачиваемая шапка не рисуется, а содержимое раскрыто сразу.
  */
-export function RusprofileSection() {
+export function RusprofileSection({ embedded = false }: { embedded?: boolean } = {}) {
   const [settings, setSettings] = useState<RusprofileSettings | null>(null);
   const [isExpanded, setIsExpanded] = useState(true);
   const [loginInput, setLoginInput] = useState("");
@@ -77,38 +80,39 @@ export function RusprofileSection() {
   };
 
   return (
-    <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.03]">
-      <button
-        onClick={() => setIsExpanded((v) => !v)}
-        className="flex w-full items-center justify-between px-5 py-4 text-left"
-      >
-        <div>
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
-            <Globe size={15} className="text-indigo-400" />
-            Rusprofile
-            {settings && (
-              <span
-                className={`rounded-md border px-2 py-0.5 text-[11px] font-normal ${
-                  settings.is_configured
-                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                    : "border-white/10 text-zinc-500"
-                }`}
-              >
-                {settings.is_configured ? "настроено" : "не настроено"}
-              </span>
-            )}
-          </h2>
-          <p className="mt-0.5 text-xs text-zinc-500">
-            Учётная запись rusprofile.ru: под ней «Моя компания» заполняется с сайта — реквизиты,
-            лицензии, реализованные проекты и история участий с проигрышами, которых нет в ЕИС.
-            Запуск — кнопкой «Обновить из rusprofile» в разделе «Моя компания».
-          </p>
-        </div>
-        <ChevronDown
-          size={18}
-          className={`shrink-0 text-zinc-500 transition-transform ${isExpanded ? "rotate-180" : ""}`}
-        />
-      </button>
+    <div
+      className={`overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] ${
+        embedded ? "[&>*:first-child]:border-t-0" : ""
+      }`}
+    >
+      {!embedded && (
+        <button
+          onClick={() => setIsExpanded((v) => !v)}
+          className="flex w-full items-center justify-between px-5 py-4 text-left"
+        >
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+              <Globe size={15} className="text-indigo-400" />
+              Rusprofile
+              {settings && (
+                <span
+                  className={`rounded-md border px-2 py-0.5 text-[11px] font-normal ${
+                    settings.is_configured
+                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                      : "border-white/10 text-zinc-500"
+                  }`}
+                >
+                  {settings.is_configured ? "настроено" : "не настроено"}
+                </span>
+              )}
+            </h2>
+          </div>
+          <ChevronDown
+            size={18}
+            className={`shrink-0 text-zinc-500 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+          />
+        </button>
+      )}
 
       {isExpanded && (
         <div className="border-t border-white/[0.08] px-5 py-4">
@@ -193,12 +197,6 @@ export function RusprofileSection() {
             </div>
           )}
 
-          <p className="mt-4 text-[11px] leading-relaxed text-zinc-600">
-            Если сайт после нескольких неудачных попыток входа потребует капчу, войдите один раз
-            в браузере под этой учётной записью и повторите проверку. Значения, закрытые
-            подпиской, система не сохраняет — при истёкшей подписке итог синхронизации об этом
-            предупредит.
-          </p>
         </div>
       )}
     </div>

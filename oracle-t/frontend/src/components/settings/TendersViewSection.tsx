@@ -13,7 +13,6 @@ export function TendersViewSection() {
     <SettingsGroup
       id="interface-tenders-view"
       label="Вид списка тендеров"
-      hint="Как показывать закупки на странице «Тендеры». Выбор хранится в этом браузере."
     >
       <div role="radiogroup" aria-label="Вид списка тендеров" className="grid gap-3 sm:grid-cols-3">
         {TENDER_VIEWS.map((item) => {

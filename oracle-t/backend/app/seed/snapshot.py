@@ -172,6 +172,18 @@ def export(path: Path = SNAPSHOT_PATH) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     with engine.connect() as conn:
+        # Снимок уходит в git и оттуда — в каждую новую установку заказчика. 30.09.2026 прогон
+        # тестов записал в рабочую базу разработчика 13 источников «Тестовая площадка» на
+        # example.test с закупками; снятый с такой базы снимок развёз бы их по серверам.
+        leftovers = conn.scalars(
+            text("SELECT key FROM sources WHERE url LIKE '%example.test%' ORDER BY key")
+        ).all()
+        if leftovers:
+            raise SystemExit(
+                "Снимок не снят: в базе остались тестовые источники ("
+                + ", ".join(leftovers)
+                + "). Удалите их вместе с закупками и повторите export."
+            )
         revision = conn.scalar(text("SELECT version_num FROM alembic_version"))
         fks = _foreign_keys(conn)
         user_refs = {(t, col) for t, col, ref in fks if ref in EXCLUDED_TABLES}

@@ -122,6 +122,16 @@ if [ ! -f "$ROOT_DIR/.env" ]; then
   echo "==> .env не найден, создаю из .env.example (замените секреты для боевого использования)"
   cp "$ROOT_DIR/.env.example" "$ROOT_DIR/.env"
 fi
+# Шаблон .env.example рассчитан на Docker: хост базы `db`, пароль `change-me`. Стенд run.sh
+# ходит в Homebrew-Postgres на localhost, базу ниже создаём с паролем oraclet. С шаблонными
+# значениями миграции падали с «could not translate host name "db"» (08.10.2026: .env
+# потерялся при пересоздании папки, run.sh собрал новый из шаблона). Правим только
+# заведомо неверные для этого стенда значения; на сервер (install.sh/update.sh) не влияет.
+if grep -q '^POSTGRES_HOST=db$' "$ROOT_DIR/.env"; then
+  echo "    В .env хост базы «db» (из Docker-шаблона) — для run.sh ставлю localhost"
+  sed -i '' 's/^POSTGRES_HOST=db$/POSTGRES_HOST=localhost/' "$ROOT_DIR/.env"
+  sed -i '' 's/^POSTGRES_PASSWORD=change-me$/POSTGRES_PASSWORD=oraclet/' "$ROOT_DIR/.env"
+fi
 cp "$ROOT_DIR/.env" "$BACKEND_DIR/.env"
 
 if ! "$PG_BIN/psql" -lqt | cut -d '|' -f 1 | grep -qw oraclet; then

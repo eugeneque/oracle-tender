@@ -177,7 +177,7 @@ function SourceCard({
 }
 
 /** Вкладка «Источники»: площадки закупок стандартного канала и источники справочника
- * продукции. Госплан, Селдон и Тендерплан сюда не входят — у каждого своя вкладка и свой
+ * продукции. Госплан и Тендерплан сюда не входят — у каждого своя вкладка и свой
  * канал на странице тендеров, ручные заявки — не площадка. */
 export function SourcesSection({ isAdmin, active }: { isAdmin: boolean; active: boolean }) {
   const { sources, error: loadError, reload } = useSources(active);
@@ -223,11 +223,8 @@ export function SourcesSection({ isAdmin, active }: { isAdmin: boolean; active: 
       title="Источники тендеров"
       description={
         <>
-          Площадки, с которых система собирает закупки для режима «Стандартные ресурсы» на
-          странице тендеров. Опрос идёт по расписанию два раза в день, доступность площадок
-          проверяется автоматически раз в минуту.
           {sources && (
-            <span className="mt-3 flex flex-wrap gap-2">
+            <span className="flex flex-wrap gap-2">
               <StatusPill tone="accent">подключено {connected.length}</StatusPill>
               <StatusPill tone={available === platforms.length ? "ok" : "muted"}>
                 доступно сейчас {available} из {platforms.length}
@@ -255,7 +252,6 @@ export function SourcesSection({ isAdmin, active }: { isAdmin: boolean; active: 
           <SettingsGroup
             id="sources-connected"
             label="Подключённые площадки"
-            hint="Собирают закупки автоматически и по кнопке «Синхронизировать» на странице тендеров."
           >
             {renderCards(connected)}
           </SettingsGroup>
@@ -263,7 +259,6 @@ export function SourcesSection({ isAdmin, active }: { isAdmin: boolean; active: 
             <SettingsGroup
               id="sources-queued"
               label="В очереди на подключение"
-              hint="Доступность проверяется, но сбора пока нет."
             >
               {renderCards(queued)}
             </SettingsGroup>
@@ -272,7 +267,6 @@ export function SourcesSection({ isAdmin, active }: { isAdmin: boolean; active: 
             <SettingsGroup
               id="sources-catalog"
               label="Справочники продукции"
-              hint="Госреестр СИ, сайты производителей, списки ПО верхнего уровня и реестры допуска. Тендеров не отдают — пополняют каталог."
             >
               {renderCards(catalog)}
             </SettingsGroup>

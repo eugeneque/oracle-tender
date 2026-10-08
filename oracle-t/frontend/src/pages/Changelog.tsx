@@ -70,10 +70,6 @@ export function ChangelogPage() {
             <h1 className="mt-1 text-4xl font-semibold tracking-tight text-zinc-50">
               История обновлений
             </h1>
-            <p className="mt-2 max-w-xl text-sm text-zinc-500">
-              Все изменения по датам выкладки — что появилось, что стало удобнее и что исправлено.
-              Подробно о последних нововведениях — в «Что нового?».
-            </p>
           </div>
           <div role="radiogroup" aria-label="Тип изменений" className="flex flex-wrap gap-1.5">
             {filters.map((item) => (

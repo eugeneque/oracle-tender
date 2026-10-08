@@ -3,9 +3,10 @@ import { Link, useSearchParams } from "react-router-dom";
 
 import { AppShell } from "../components/AppShell";
 import { BentoRecap } from "../components/home/BentoRecap";
+import { FixesList } from "../components/home/FixesList";
 import { markWhatsNewSeen } from "../components/nav/WhatsNew";
 import { SegmentedControl } from "../components/ui/SegmentedControl";
-import { ONBOARDING, WHATS_NEW } from "../content/homeSlides";
+import { FIXES, ONBOARDING, WHATS_NEW } from "../content/homeSlides";
 import { useAuth } from "../context/useAuth";
 
 // Страница «Что нового?» (28.09.2026 заменила дашборд): нововведения мозаикой в духе итогов
@@ -20,10 +21,11 @@ const TAB_KEY = "home.tab";
 // Раскладки мозаики на широком экране: четыре колонки, `hero` — центральная плитка.
 // Каждый `id` из homeSlides должен встретиться здесь ровно одной прямоугольной областью.
 const NEWS_AREAS = [
+  "bitrix hero hero gigachat",
+  "bitrix hero hero integrations-tabs",
   "tz-reference tz-reference marked-lists marked-lists",
   "selection selection profiles profiles",
-  "okpd2-tree hero hero minutes",
-  "tenders-header hero hero feeds",
+  "okpd2-tree tenders-header minutes feeds",
   "brand-lock brand-lock job-queue feeds",
   "no-auto-analysis meter-vpu deepseek-fast catalog-hide-eol",
 ];
@@ -104,12 +106,18 @@ export function HomePage() {
         </div>
 
         {tab === "news" ? (
-          <BentoRecap
-            key="news"
-            hero={{ title: "Sova", subtitle: `Сентябрь — октябрь 2026 · ${news.length} нововведений` }}
-            slides={news}
-            areas={isAdmin ? NEWS_AREAS_ADMIN : NEWS_AREAS}
-          />
+          <>
+            <BentoRecap
+              key="news"
+              hero={{
+                title: "Sova",
+                subtitle: `Сентябрь — октябрь 2026 · ${news.length} нововведений · ${FIXES.length} исправлений`,
+              }}
+              slides={news}
+              areas={isAdmin ? NEWS_AREAS_ADMIN : NEWS_AREAS}
+            />
+            <FixesList fixes={FIXES} />
+          </>
         ) : (
           <BentoRecap
             key="guide"

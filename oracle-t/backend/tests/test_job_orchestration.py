@@ -173,7 +173,7 @@ def test_job_started_before_disabling_is_stopped(db_session, admin_user, provide
 
 
 def test_all_models_disabled_refuses_with_clear_text(db_session, admin_user, providers):
-    for provider in ("yandex", "claude", "deepseek"):
+    for provider in ai_provider_service.PROVIDER_LABELS:
         ai_provider_service.set_provider_enabled(db_session, provider, False, actor=admin_user)
 
     with pytest.raises(ai_provider_service.AiModelDisabledError, match="отключены администратором"):
