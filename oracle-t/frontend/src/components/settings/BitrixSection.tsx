@@ -11,6 +11,7 @@ import {
 
 import { ApiError, api, downloadFile } from "../../api/client";
 import type { ApiClient, ApiClientCreated } from "../../api/types";
+import { BitrixDealsBlock } from "./BitrixDealsBlock";
 
 function formatDateTime(value: string | null): string {
   if (!value) return "не использовался";
@@ -20,15 +21,24 @@ function formatDateTime(value: string | null): string {
 /**
  * Раздел «Интеграция с Bitrix24» (Этап 13, раздел 5.10 ТЗ).
  *
- * Два способа отдать данные наружу: файл для ручного импорта и API для будущей интеграции.
- * Реальных вызовов к Bitrix24 нет — ТЗ выносит их во вторую очередь.
+ * Три способа отдать данные наружу: сделки прямо в CRM через вебхук (08.10.2026, только
+ * администратору — `BitrixDealsBlock`), файл лидов для ручного импорта и API для внешних систем.
  *
  * Ключ показывается ровно один раз, сразу после выпуска: в базе лежит только его хеш.
  * Поэтому выданный ключ выделен в отдельный блок с кнопкой копирования и предупреждением —
  * закрыв его, восстановить значение нельзя, можно только выпустить новый.
+ *
+ * `embedded` (08.10.2026) — блок открыт вкладкой страницы «Интеграции»: заголовок и пояснение
+ * показывает сама вкладка, поэтому сворачиваемая шапка не рисуется, а содержимое раскрыто сразу.
  */
-export function BitrixSection({ isAdmin }: { isAdmin: boolean }) {
-  const [isExpanded, setIsExpanded] = useState(false);
+export function BitrixSection({
+  isAdmin,
+  embedded = false,
+}: {
+  isAdmin: boolean;
+  embedded?: boolean;
+}) {
+  const [isExpanded, setIsExpanded] = useState(embedded);
   const [clients, setClients] = useState<ApiClient[] | null>(null);
   const [newName, setNewName] = useState("");
   const [issuedKey, setIssuedKey] = useState<ApiClientCreated | null>(null);
@@ -112,26 +122,28 @@ export function BitrixSection({ isAdmin }: { isAdmin: boolean }) {
   };
 
   return (
-    <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.03]">
-      <button
-        onClick={() => setIsExpanded((v) => !v)}
-        className="flex w-full items-center justify-between px-5 py-4 text-left"
-      >
-        <div>
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
-            <Plug2 size={15} className="text-indigo-400" />
-            Интеграция с Bitrix24
-          </h2>
-          <p className="mt-0.5 text-xs text-zinc-500">
-            Выгрузка тендеров лидами для импорта в CRM и ключи доступа к API для внешних
-            систем (раздел 5.10 ТЗ). Сами вызовы к Bitrix24 — следующий этап.
-          </p>
-        </div>
-        <ChevronDown
-          size={18}
-          className={`shrink-0 text-zinc-500 transition-transform ${isExpanded ? "rotate-180" : ""}`}
-        />
-      </button>
+    <div
+      className={`overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] ${
+        embedded ? "[&>*:first-child]:border-t-0" : ""
+      }`}
+    >
+      {!embedded && (
+        <button
+          onClick={() => setIsExpanded((v) => !v)}
+          className="flex w-full items-center justify-between px-5 py-4 text-left"
+        >
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+              <Plug2 size={15} className="text-indigo-400" />
+              Интеграция с Bitrix24
+            </h2>
+          </div>
+          <ChevronDown
+            size={18}
+            className={`shrink-0 text-zinc-500 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+          />
+        </button>
+      )}
 
       {isExpanded && (
         <div className="border-t border-white/[0.08] px-5 py-4">
@@ -141,13 +153,10 @@ export function BitrixSection({ isAdmin }: { isAdmin: boolean }) {
             </div>
           )}
 
+          {isAdmin && <BitrixDealsBlock />}
+
           <div className="mb-5">
             <div className="text-sm font-medium text-zinc-200">Выгрузка лидов</div>
-            <p className="mt-1 text-xs text-zinc-500">
-              CSV с полями лида: название, компания, сумма, ответственный по региону, номер
-              закупки, ОКПД2, сроки, процент победителя и ссылка. Вторая строка файла —
-              технические имена полей, по ним Bitrix24 сопоставляет колонки при импорте.
-            </p>
             <div className="mt-3 flex items-center gap-3">
               <button
                 onClick={handleExport}

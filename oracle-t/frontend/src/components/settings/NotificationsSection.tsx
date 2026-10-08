@@ -123,7 +123,13 @@ function MailSettings() {
         ) : (
           <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-500/10 px-2.5 py-1 text-xs font-medium text-zinc-400">
             <Clock size={13} />
-            не настроен
+            {/* Причина вслух (08.10.2026): ручная рассылка берёт адреса из формы и работает,
+                а автоматические письма без общего списка получателей молча пропускались. */}
+            {!settings.smtp_host
+              ? "не настроен: нет SMTP-сервера"
+              : !settings.from_address
+                ? "не настроен: нет адреса отправителя"
+                : "не настроен: не указаны «Получатели» — автоматические письма не уходят"}
           </span>
         )}
         <label className="ml-auto flex items-center gap-2 text-xs text-zinc-400">
@@ -224,7 +230,7 @@ function MailSettings() {
         </label>
       </div>
 
-      <div className="mt-5 text-xs font-medium text-zinc-300">Триггеры (раздел 5.8 ТЗ)</div>
+      <div className="mt-5 text-xs font-medium text-zinc-300">Триггеры</div>
       <div className="mt-2 grid gap-2 sm:grid-cols-2">
         {(
           [
@@ -384,11 +390,6 @@ function BroadcastForm({ onSent }: { onSent: () => void }) {
         <Megaphone size={15} className="text-indigo-400" />
         Письмо пользователям
       </div>
-      <p className="mt-1 text-xs text-zinc-500">
-        Произвольное сообщение о новостях платформы. Уходит с того же ящика, что и
-        автоматические уведомления, и попадает в журнал ниже. Адреса, на которые письма уже
-        отправлялись, подсказываются в поле получателей.
-      </p>
 
       {error && (
         <div className="mt-3 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
@@ -459,9 +460,18 @@ function BroadcastForm({ onSent }: { onSent: () => void }) {
  * Раздел «Уведомления»: журнал отправок — всем пользователям, настройки почты — только
  * администратору. Свёрнут по умолчанию, как и «Логирование»: рассылка работает сама, и
  * заглядывают сюда, когда письмо не пришло или пришло не то.
+ *
+ * `embedded` (08.10.2026) — блок открыт вкладкой страницы «Интеграции»: заголовок и пояснение
+ * показывает сама вкладка, поэтому сворачиваемая шапка не рисуется, а содержимое раскрыто сразу.
  */
-export function NotificationsSection({ isAdmin }: { isAdmin: boolean }) {
-  const [isExpanded, setIsExpanded] = useState(false);
+export function NotificationsSection({
+  isAdmin,
+  embedded = false,
+}: {
+  isAdmin: boolean;
+  embedded?: boolean;
+}) {
+  const [isExpanded, setIsExpanded] = useState(embedded);
   const [entries, setEntries] = useState<NotificationEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
@@ -484,27 +494,28 @@ export function NotificationsSection({ isAdmin }: { isAdmin: boolean }) {
   }, [isExpanded, loadEntries]);
 
   return (
-    <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.03]">
-      <button
-        onClick={() => setIsExpanded((v) => !v)}
-        className="flex w-full items-center justify-between px-5 py-4 text-left"
-      >
-        <div>
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
-            <Bell size={15} className="text-indigo-400" />
-            Уведомления
-          </h2>
-          <p className="mt-0.5 text-xs text-zinc-500">
-            Письма по триггерам раздела 5.8 ТЗ: новый релевантный тендер, высокий процент
-            победителя, скорое закрытие приёма заявок, критические ошибки. Ниже — журнал
-            отправок{isAdmin ? " и настройки почтового ящика" : ""}.
-          </p>
-        </div>
-        <ChevronDown
-          size={18}
-          className={`shrink-0 text-zinc-500 transition-transform ${isExpanded ? "rotate-180" : ""}`}
-        />
-      </button>
+    <div
+      className={`overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] ${
+        embedded ? "[&>*:first-child]:border-t-0" : ""
+      }`}
+    >
+      {!embedded && (
+        <button
+          onClick={() => setIsExpanded((v) => !v)}
+          className="flex w-full items-center justify-between px-5 py-4 text-left"
+        >
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+              <Bell size={15} className="text-indigo-400" />
+              Уведомления
+            </h2>
+          </div>
+          <ChevronDown
+            size={18}
+            className={`shrink-0 text-zinc-500 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+          />
+        </button>
+      )}
 
       {isExpanded && (
         <>

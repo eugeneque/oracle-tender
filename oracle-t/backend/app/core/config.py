@@ -134,6 +134,11 @@ class Settings(BaseSettings):
     notify_recipients: str = ""
     notify_admin_recipients: str = ""
 
+    # GigaChat (08.10.2026): путь к PEM с корнем НУЦ Минцифры (Russian Trusted Root CA) — им
+    # подписан сертификат API Сбера, в стандартном наборе `certifi` его нет. Пусто — системный
+    # набор. Сервер, а не ключ: поэтому здесь, а не в БД. См. app/services/gigachat_client.py.
+    gigachat_ca_bundle: str = ""
+
     @property
     def database_url(self) -> str:
         return (

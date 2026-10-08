@@ -87,7 +87,6 @@ export function RegionResponsiblesSection() {
   return (
     <SettingsPanel
       title="Ответственные по регионам"
-      description="ФИО ответственного и его руководителя для каждого региона. Эти два поля попадают в Excel-выгрузку (Приложение D ТЗ) — в тендерных данных их нет, и взять их больше неоткуда."
     >
       {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
 

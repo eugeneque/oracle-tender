@@ -184,9 +184,13 @@ class FabrikantAdapter(SourceAdapter):
             browser = playwright.chromium.launch()
             try:
                 page = browser.new_page(user_agent=DEFAULT_USER_AGENT)
-                page.goto(url, wait_until="networkidle", timeout=30000)
+                # `domcontentloaded`, а не `networkidle` (08.10.2026): «тишины в сети» на
+                # выдаче Фабриканта не бывает — счётчики и фоновые запросы идут постоянно, и
+                # на сервере 9 фраз из 13 всю неделю падали по таймауту 30 с, хотя карточки
+                # давно были на странице. Готовность выдачи и так проверяет ожидание карточек.
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 try:
-                    page.wait_for_selector(CARD_SELECTOR, timeout=10000)
+                    page.wait_for_selector(CARD_SELECTOR, timeout=20000)
                 except Exception:
                     return  # по этому ключевому слову результатов нет — не фатально
 

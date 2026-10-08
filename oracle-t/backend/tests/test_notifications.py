@@ -434,3 +434,32 @@ def test_notification_log_entry_is_readable(db_session, configured_mail):
     # В теле письма должно быть достаточно, чтобы принять решение, не открывая систему.
     assert tender.external_id in (entry.body or "")
     assert tender.title in (entry.body or "")
+
+
+def test_skipped_entry_does_not_block_later_delivery(db_session, configured_mail):
+    """Тендер, попавший под триггер, пока получатели были не заданы, получает письмо после
+    настройки канала: запись `skipped` не считается отправленным уведомлением (08.10.2026)."""
+
+    settings = notification_service.get_or_create(db_session)
+    settings.recipients = None
+    db_session.flush()
+
+    tender = _tender(db_session)
+    skipped = notification_service.notify_new_relevant_tender(db_session, tender)
+    assert skipped is not None and skipped.status == NotificationStatus.SKIPPED.value
+
+    settings.recipients = "sales@example.test"
+    db_session.flush()
+    sent = notification_service.notify_new_relevant_tender(db_session, tender)
+
+    assert sent is not None and sent.status == NotificationStatus.SENT.value
+    assert len(configured_mail) == 1
+
+
+def test_deadline_check_writes_nothing_while_channel_is_unconfigured(db_session, configured_mail):
+    settings = notification_service.get_or_create(db_session)
+    settings.recipients = None
+    db_session.flush()
+    _tender(db_session, application_end=datetime.now(timezone.utc) + timedelta(days=2))
+
+    assert notification_service.notify_deadlines_soon(db_session) == []

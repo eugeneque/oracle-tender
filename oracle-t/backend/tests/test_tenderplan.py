@@ -1,4 +1,4 @@
-"""Каналы «Тендерплан» и «Селдон» (решение 30.09.2026): разбор выдачи и отдельность каналов.
+"""Канал «Тендерплан» (решение 30.09.2026): разбор выдачи и отдельность каналов.
 
 Без сети: форма ответа взята из OpenAPI Тендерплана (tenderplan.ru/api/doc/, 30.09.2026).
 """
@@ -9,7 +9,6 @@ from decimal import Decimal
 
 from sqlalchemy import func, select
 
-from app.adapters.seldon import SeldonAdapter
 from app.adapters.tenderplan import TenderplanAdapter, tenderplan_id
 from app.models.source import FEED_PATTERN, SEPARATE_FEED_SOURCE_TYPES, Source
 from app.services.tender_service import feed_condition_for, poll_source
@@ -102,16 +101,12 @@ def test_tenderplan_without_token_explains_itself(monkeypatch):
     assert "токен" in outcome.errors[0].message
 
 
-def test_seldon_reports_missing_api():
-    outcome = SeldonAdapter().list_new_tenders(None)
-
-    assert outcome.tenders == []
-    assert "Seldon.API" in outcome.errors[0].message
-
-
 def test_feeds_cover_new_channels():
-    assert {"seldon", "tenderplan"} <= SEPARATE_FEED_SOURCE_TYPES
-    assert "tenderplan" in FEED_PATTERN and "seldon" in FEED_PATTERN
+    assert "tenderplan" in SEPARATE_FEED_SOURCE_TYPES
+    assert "tenderplan" in FEED_PATTERN
+    # Селдон убран 08.10.2026 — канал с таким именем больше не принимается.
+    assert "seldon" not in SEPARATE_FEED_SOURCE_TYPES
+    assert "seldon" not in FEED_PATTERN
 
 
 def test_each_external_feed_is_separate(monkeypatch):
@@ -156,7 +151,6 @@ def test_each_external_feed_is_separate(monkeypatch):
         assert count("standard") == 1
         assert count("gosplan") == 1
         assert count("tenderplan") == 1
-        assert count("seldon") == 0
     finally:
         db.close()
 

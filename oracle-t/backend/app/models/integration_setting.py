@@ -49,7 +49,7 @@ class AiProviderSettings(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    # "yandex" | "claude" | "deepseek" — см. PROVIDER_LABELS в app/services/ai_provider_service.py.
+    # "yandex" | "claude" | "deepseek" | "gigachat" — см. PROVIDER_LABELS в app/services/ai_provider_service.py.
     active_provider: Mapped[str] = mapped_column(String(20), nullable=False, default="yandex")
     routerai_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Путь до модели в терминах RouterAI («anthropic/claude-opus-5»). Настраивается, чтобы
@@ -58,6 +58,12 @@ class AiProviderSettings(Base):
     # То же для DeepSeek (28.09.2026): ключ и адрес шлюза общие с Claude, модель своя.
     deepseek_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     routerai_base_url: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # GigaChat (Сбер, 08.10.2026) — напрямую, не через RouterAI: ключ авторизации меняется на
+    # токен на 30 минут, версия API (scope) — по договору. Ключ зашифрован (`app/core/crypto.py`).
+    gigachat_auth_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gigachat_scope: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    gigachat_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    gigachat_base_url: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Модели, выключенные администратором намертво (29.09.2026): `{"deepseek": {"at": ISO,
     # "by": "ФИО"}}`. В выключенную модель не уходит ни один запрос, а задачи, начатые до
     # выключения, останавливаются на следующем обращении (см. `app/services/ai_client.py`).
@@ -95,6 +101,47 @@ class RusprofileSettings(Base):
     # "ok" | "error" — и текст, который увидит администратор.
     last_sync_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     last_sync_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    updated_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+
+
+class Bitrix24Settings(Base):
+    """Подключение к порталу Bitrix24 МИРТЕК (08.10.2026): тендеры уходят в CRM сделками.
+
+    Входящий вебхук (`https://<портал>/rest/<пользователь>/<токен>/`) — это и адрес, и пароль
+    сразу: с ним можно читать и менять всю CRM от имени пользователя, поэтому он хранится
+    зашифрованным (`app/core/crypto.py`) и наружу не отдаётся, только маска.
+
+    Портал у заказчика один и сразу боевой (тестового нет, копия снимается ночью), поэтому
+    отправка по умолчанию выключена (`push_enabled`): настроить, проверить подключение и
+    посмотреть, какая сделка получится, можно без единой записи в CRM. Включает отправку
+    администратор отдельно и осознанно.
+
+    Таблица — синглтон, как и соседние."""
+
+    __tablename__ = "bitrix24_settings"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Воронка и стадия, куда встают новые сделки. По умолчанию — тестовая воронка «Тендеры —
+    # тест ИИ» (5) и стадия «Парсинг опубликованных тендеров», которые завёл администратор
+    # портала под эту интеграцию.
+    category_id: Mapped[int] = mapped_column(nullable=False, default=5, server_default="5")
+    stage_id: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="C5:PARSING", server_default="C5:PARSING"
+    )
+    push_enabled: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
+    last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_check_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_check_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

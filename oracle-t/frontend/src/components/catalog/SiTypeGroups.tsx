@@ -15,35 +15,25 @@ const SI_SOURCE_LABELS: Record<string, string> = {
 // Раньше все коды шли одним списком, а три разных случая — неоднозначность реестра,
 // «не электросчётчик», истёкшее свидетельство — выглядели одинаковой пометкой «требует ручной
 // проверки». Группы отвечают на вопрос «что с этим кодом делать».
-const GROUPS: { key: GroupKey; title: string; about: string; collapsed: boolean }[] = [
+const GROUPS: { key: GroupKey; title: string; collapsed: boolean }[] = [
   {
     key: "pending",
     title: "Ждут подтверждения",
-    about:
-      "Найдены автопоиском в ФГИС. Проверьте, что код относится к этому производителю, и подтвердите: " +
-      "подтверждённую запись повторный автопоиск не перезаписывает, а сама она переходит в «Действующие».",
     collapsed: false,
   },
   {
     key: "confirmed",
     title: "Действующие",
-    about: "Подтверждены человеком или заведены вручную; свидетельство об утверждении типа действует.",
     collapsed: false,
   },
   {
     key: "expired",
     title: "Свидетельство истекло",
-    about:
-      "Приборы этих типов нельзя предлагать в новую закупку. Подтверждение этого не меняет — срок берётся из реестра. " +
-      "Если Росстандарт продлит свидетельство, ревалидация принесёт новый срок и код сам вернётся в действующие.",
     collapsed: true,
   },
   {
     key: "offScope",
     title: "Не электросчётчики",
-    about:
-      "Теплосчётчики, счётчики воды и газа, УСПД и прочее, что реестр отдаёт по производителю. " +
-      "Записи сохранены, но к моделям каталога не привязываются.",
     collapsed: true,
   },
 ];
@@ -90,7 +80,6 @@ export function SiTypeGroups({ siTypes, isAdmin, busy, onVerify, onFetchDescript
               {group.title}
               <span className="font-normal tabular-nums text-zinc-500">{items.length}</span>
             </button>
-            <p className="mt-0.5 pl-5 text-[11px] leading-relaxed text-zinc-500">{group.about}</p>
             {expanded && (
               <table className="mt-1 w-full text-left text-sm">
                 <tbody>

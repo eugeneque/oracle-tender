@@ -67,7 +67,6 @@ export function NavLayoutSection() {
     <SettingsGroup
       id="interface-nav"
       label="Вид меню"
-      hint="Где показывать разделы приложения. Если карточке тендера тесно, выберите меню в шапке. Выбор хранится в этом браузере."
     >
       <div role="radiogroup" aria-label="Вид меню" className="grid gap-3 sm:grid-cols-2">
         {OPTIONS.map((option) => {

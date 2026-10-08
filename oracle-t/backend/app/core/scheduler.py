@@ -15,12 +15,12 @@ from __future__ import annotations
 
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.cron import CronTrigger as _CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
 from app.core.config import get_settings
-from app.core.timezones import now_msk
+from app.core.timezones import MOSCOW_TZ, now_msk
 from app.db.session import SessionLocal
 from app.services.availability_service import ping_all_sources
 from app.services.log_service import purge_old_entries
@@ -28,6 +28,15 @@ from app.services.notification_service import notify_deadlines_soon
 from app.services.tender_service import check_pending_ai_relevance, poll_all_active_sources
 
 _scheduler: BackgroundScheduler | None = None
+
+
+def CronTrigger(**fields) -> _CronTrigger:  # noqa: N802 - заменяет класс APScheduler по месту
+    """Cron-триггер по Москве. Без явного `timezone` APScheduler 3.x берёт пояс МАШИНЫ, а не
+    пояс планировщика: на Mac разработчика это Москва, а на сервере заказчика — UTC, и опрос
+    «в 09:00 и 14:00» шёл в 12:00 и 17:00 по Москве, уведомления о сроках — в 12:30
+    (журнал сервера 01–08.10.2026). Все расписания в настройках задаются по Москве."""
+
+    return _CronTrigger(timezone=MOSCOW_TZ, **fields)
 
 
 def _run_poll_job() -> None:

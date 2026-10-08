@@ -1,4 +1,5 @@
-"""Проверка доступности источников тендеров — раз в минуту (`app/core/scheduler.py`),
+"""Проверка доступности источников тендеров — площадки раз в 15 минут, справочники раз в час
+(планировщик заглядывает ежеминутно, см. `PING_INTERVAL` и `app/core/scheduler.py`),
 независимо от того, реализован ли для площадки адаптер: пользователю нужно видеть в
 «Настройках», какие из 12 площадок отвечают прямо сейчас, чтобы осмысленно выбирать
 следующую волну подключения (раздел 9 ТЗ, Этап 2 → Этап 12) и понимать разовые сбои вроде
@@ -7,7 +8,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import select
@@ -21,6 +22,24 @@ from app.services.audit import log_action
 PING_TIMEOUT_SECONDS = 10.0
 PING_ATTEMPTS = 2
 PING_RETRY_PAUSE_SECONDS = 3.0
+
+# Как часто проверять один источник (08.10.2026). Раньше — каждую минуту каждый сайт: 1440
+# запросов в сутки с ботовым User-Agent на одну площадку. По журналу сервера за 01–08.10
+# антиDDoS Росэлторга пускал нас ~12 минут и закрывал на ~2 часа (цикл повторялся весь день),
+# и плановый опрос попадал в бан — «Connection refused» по всем фразам; Инкотекс отвечал 503
+# всё чаще (36 смен состояния 02.10 → 217 за 08.10). Сам пинг и вызывал недоступность,
+# которую показывал. Пятнадцать минут для площадок хватает, чтобы видеть сбой в «Настройках»;
+# справочники продукции опрашиваются раз в сутки–неделю, им достаточно часа.
+PING_INTERVAL = timedelta(minutes=15)
+PING_INTERVAL_CATALOG = timedelta(hours=1)
+CATALOG_SOURCE_TYPES = frozenset(
+    {
+        SourceType.FGIS.value,
+        SourceType.MANUFACTURER_SITE.value,
+        SourceType.UPPER_SOFTWARE.value,
+        SourceType.ADMISSION_REGISTRY.value,
+    }
+)
 
 
 def _describe_error(exc: Exception) -> str:
@@ -100,7 +119,20 @@ def ping_source(db: Session, source: Source) -> None:
     db.commit()
 
 
-def ping_all_sources(db: Session) -> None:
+def is_ping_due(source: Source, now: datetime) -> bool:
+    if source.availability_checked_at is None:
+        return True
+    interval = PING_INTERVAL_CATALOG if source.type in CATALOG_SOURCE_TYPES else PING_INTERVAL
+    return now - source.availability_checked_at >= interval
+
+
+def ping_all_sources(db: Session, *, force: bool = False) -> None:
+    """Планировщик зовёт это раз в минуту, но каждый источник проверяется только когда
+    подошёл его интервал (`PING_INTERVAL*`) — проверки сами расходятся во времени, а не
+    бьют по всем сайтам разом. `force` — для ручной проверки из CLI."""
+
+    now = datetime.now(timezone.utc)
     # Источник ручных заявок — не сайт: у него нет адреса, который можно было бы проверить.
     for source in db.scalars(select(Source).where(Source.type != SourceType.MANUAL.value)).all():
-        ping_source(db, source)
+        if force or is_ping_due(source, now):
+            ping_source(db, source)

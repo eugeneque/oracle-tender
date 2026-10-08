@@ -82,7 +82,7 @@ const FEED_STORAGE_KEY = "oraclet_tender_feed";
 
 /** Канал сбора (28.09.2026): «Стандартные ресурсы» — площадки из «Настройки → Источники
  * тендеров», остальные — закупки, собранные через API внешнего сервиса (Госплан, с 30.09 —
- * Селдон и Тендерплан). Каналы не смешиваются, и выбор запоминается: кто сравнивает
+ * Тендерплан). Каналы не смешиваются, и выбор запоминается: кто сравнивает
  * каналы, возвращается к тому же. */
 const FEED_OPTIONS: { value: TenderFeed; label: string; hint: string }[] = [
   {
@@ -91,7 +91,6 @@ const FEED_OPTIONS: { value: TenderFeed; label: string; hint: string }[] = [
     hint: "Закупки с площадок из «Настройки → Источники тендеров»",
   },
   { value: "gosplan", label: "Госплан", hint: "Закупки, собранные через API Госплана" },
-  { value: "seldon", label: "Селдон", hint: "Закупки, собранные через Seldon.API" },
   { value: "tenderplan", label: "Тендерплан", hint: "Закупки, собранные через API Тендерплана" },
 ];
 
@@ -182,7 +181,7 @@ function TenderCard({
           className={`rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${scoreBadgeClass(
             percentValue(tender.ai_score),
           )}`}
-          title="AI-оценка по профилю (раздел 5.5.1 ТЗ)"
+          title="AI-оценка по профилю"
         >
           {percentValue(tender.ai_score) === null ? "AI —" : `AI ${percentValue(tender.ai_score)}%`}
         </span>
@@ -1232,7 +1231,7 @@ export function TendersPage() {
       minutesOnly: markedInUrl ? false : prev.minutesOnly,
     }));
   }, [markedInUrl, filters.markedList]);
-  // Ссылка «Тендеры Госплана» (Селдона, Тендерплана) из настроек (`?feed=gosplan`): канал
+  // Ссылка «Тендеры Госплана» (Тендерплана) из настроек (`?feed=gosplan`): канал
   // уже выбран начальным состоянием, параметр только запоминается и снимается с адреса.
   useEffect(() => {
     const requested = parseTenderFeed(searchParams.get("feed"));
@@ -1363,7 +1362,7 @@ export function TendersPage() {
     [],
   );
 
-  // Площадки стандартного канала: Госплан, Селдон и Тендерплан — отдельные каналы со своей
+  // Площадки стандартного канала: Госплан и Тендерплан — отдельные каналы со своей
   // кнопкой сбора, в фильтре «Площадки» и в «Площадках для синхронизации» им не место.
   const standardSources = sources.filter((s) => !isExternalFeedSource(s.type));
   // Общие профили по умолчанию — то, что выбрано, пока человек не трогал меню «Профиль».
@@ -1371,6 +1370,16 @@ export function TendersPage() {
     .filter((item) => item.is_default && item.is_active)
     .map((item) => item.id);
   const selectedProfileIds = filters.relevanceProfileIds ?? defaultProfileIds;
+  // Личный профиль, выбранный поверх общих по умолчанию, их заменяет. Иначе он дописывался
+  // к общим, и при «любой» выдача оставалась их объединением — профиль ничего не сужал, и
+  // казалось, что фильтр не работает. Общие можно вернуть галочками явно.
+  const applyProfileSelection = (ids: string[]) => {
+    const personal = ids.filter((id) => !defaultProfileIds.includes(id));
+    updateFilters({
+      relevanceProfileIds:
+        filters.relevanceProfileIds === null && personal.length > 0 ? personal : ids,
+    });
+  };
   const profilesLabel =
     filters.relevanceProfileIds === null
       ? "Общие профили"
@@ -1748,7 +1757,7 @@ export function TendersPage() {
             isDefaultSelection={filters.relevanceProfileIds === null}
             label={profilesLabel}
             mode={filters.relevanceProfileMode}
-            onChange={(ids) => updateFilters({ relevanceProfileIds: ids })}
+            onChange={applyProfileSelection}
             onResetToDefault={() => updateFilters({ relevanceProfileIds: null })}
             onModeChange={(mode) => updateFilters({ relevanceProfileMode: mode })}
             onManage={() => setIsProfilesOpen(true)}
@@ -2051,7 +2060,7 @@ export function TendersPage() {
           profiles={relevanceProfiles}
           sources={sources}
           activeIds={selectedProfileIds}
-          onApply={(ids) => updateFilters({ relevanceProfileIds: ids })}
+          onApply={applyProfileSelection}
           onChanged={() => void reloadRelevanceProfiles()}
           onClose={() => setIsProfilesOpen(false)}
         />

@@ -340,10 +340,6 @@ export function ProductDrawer({
               )}
             </div>
             <div className="px-4 py-3">
-              <p className="mb-3 text-[11px] text-zinc-500">
-                {view === "parameters" ? "Параметры файла тендерного отдела «Параметры для ПУ», в его порядке." : "Полный справочник Приложения C ТЗ."}{" "}
-                Извлечённое ИИ требует проверки, ручной ввод имеет приоритет.
-              </p>
               {busy === "load" ? (
                 <p className="text-xs text-zinc-500">Загружаю…</p>
               ) : view === "parameters" ? (

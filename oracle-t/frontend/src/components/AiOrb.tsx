@@ -12,7 +12,8 @@ import type { AiProviderKey } from "../api/types";
  * известная проблема для части пользователей, и системная настройка на этот счёт есть.
  *
  * `variant` — гамма под активного провайдера: розово-голубая у YandexGPT, оранжевая у
- * Claude, синяя у DeepSeek (см. `.ai-orb--claude`, `.ai-orb--deepseek` в index.css).
+ * Claude, синяя у DeepSeek, зелёная у GigaChat (см. `.ai-orb--claude`, `.ai-orb--deepseek`,
+ * `.ai-orb--gigachat` в index.css).
  * Меняются только цвета пятен, не геометрия.
  */
 export function AiOrb({

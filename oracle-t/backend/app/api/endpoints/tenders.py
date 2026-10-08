@@ -145,7 +145,7 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
     feed: str | None = Query(
         default=None,
         pattern=FEED_PATTERN,
-        description="Канал сбора: standard — площадки из настроек, gosplan/seldon/tenderplan — внешний сервис",
+        description="Канал сбора: standard — площадки из настроек, gosplan/tenderplan — внешний сервис",
     ),
 ) -> TenderFilters:
     """Общий разбор фильтров для списка и доски.

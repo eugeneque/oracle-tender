@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Clock, PlayCircle, Power } from "lucide-react";
+import { CheckCircle2, Clock, PlayCircle } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
-import type { AiProviderKey, RouterAiSettings } from "../../api/types";
+import type { AiProviderKey, GigaChatSettings, RouterAiSettings } from "../../api/types";
 import {
   chooseDefaultAiProvider,
   chooseMyAiProvider,
@@ -77,13 +77,8 @@ export function AiProviderSwitcher({ scope }: { scope: "me" | "default" }) {
       const label = AI_PROVIDERS.find((item) => item.key === requested)?.label ?? requested;
       return `${label} отключена администратором — запросы идут через ${status.label}. Когда её включат, ваш выбор вернётся сам.`;
     }
-    if (scope === "default") {
-      return `Действует для задач по расписанию и пользователей без собственного выбора. Свою модель каждый выбирает в учётной записи или прямо в карточке тендера.`;
-    }
-    if (status.source === "user") {
-      return `Ваши запросы к ИИ идут через ${status.label}${status.model ? ` (${status.model})` : ""}. Другие пользователи это не затрагивает.`;
-    }
-    return `Вы ничего не выбирали — действует системная модель по умолчанию (${status.default_label}). Выберите свою, если хотите работать иначе.`;
+    // 08.10.2026: постоянные пояснения убраны — подпись остаётся только для предупреждений.
+    return null;
   })();
 
   return (
@@ -155,48 +150,65 @@ export function AiProviderSwitcher({ scope }: { scope: "me" | "default" }) {
   );
 }
 
-/** Карточка провайдера: подсвечивается, когда он — системная модель по умолчанию, в его же цвете. */
+/**
+ * Карточка провайдера — правая половина раздела «Модели ИИ» (редизайн 08.10.2026): шапка со
+ * знаком, подписью и статусом, под ней форма ключей. Подсвечивается в цвете провайдера, когда
+ * он — системная модель по умолчанию. `providers` — знаки в шапке: у RouterAI их два, один
+ * ключ обслуживает и Claude, и DeepSeek.
+ */
 export function ProviderCard({
   provider,
+  providers,
   title,
+  subtitle,
   isActive,
   isConfigured,
   children,
 }: {
   provider: AiProviderKey;
+  providers?: AiProviderKey[];
   title: string;
+  subtitle?: string;
   isActive: boolean;
   isConfigured: boolean;
   children: React.ReactNode;
 }) {
   const activeBorder = AI_PROVIDER_ACCENT[provider].card;
+  const icons = providers ?? [provider];
   return (
     <div
-      className={`rounded-xl border p-4 ${isActive ? activeBorder : "border-white/[0.08] bg-white/[0.02]"}`}
+      className={`rounded-2xl border p-5 ${isActive ? activeBorder : "border-white/[0.08] bg-white/[0.03]"}`}
     >
-      <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-zinc-200">
-        <AiProviderIcon provider={provider} size={18} />
-        {title}
-        {isConfigured ? (
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-400">
-            <CheckCircle2 size={13} />
-            настроено
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-500/10 px-2.5 py-1 text-xs font-medium text-zinc-400">
-            <Clock size={13} />
-            не настроено
-          </span>
-        )}
-        {isActive && (
-          <span
-            className={`ml-auto rounded-full px-2.5 py-1 text-[11px] font-medium ${
-              AI_PROVIDER_ACCENT[provider].pill
-            }`}
-          >
-            по умолчанию
-          </span>
-        )}
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="flex h-11 shrink-0 items-center gap-1.5 rounded-xl bg-white/[0.05] px-2.5">
+          {icons.map((key) => (
+            <AiProviderIcon key={key} provider={key} size={22} />
+          ))}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="text-[15px] font-semibold text-zinc-100">{title}</div>
+          {subtitle && <div className="mt-0.5 text-xs text-zinc-500">{subtitle}</div>}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {isActive && (
+            <span
+              className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${AI_PROVIDER_ACCENT[provider].pill}`}
+            >
+              по умолчанию
+            </span>
+          )}
+          {isConfigured ? (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-400">
+              <CheckCircle2 size={13} />
+              настроено
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-500/10 px-2.5 py-1 text-xs font-medium text-zinc-400">
+              <Clock size={13} />
+              не настроено
+            </span>
+          )}
+        </div>
       </div>
       {children}
     </div>
@@ -297,7 +309,9 @@ export function RouterAiCard() {
   return (
     <ProviderCard
       provider={defaultRouterAi ?? "claude"}
+      providers={["claude", "deepseek"]}
       title="RouterAI · Claude и DeepSeek"
+      subtitle="Один ключ RouterAI обслуживает обе модели"
       isActive={defaultRouterAi !== null}
       isConfigured={settings?.is_configured ?? false}
     >
@@ -340,9 +354,8 @@ export function RouterAiCard() {
         </label>
       </div>
       <p className="mt-2 text-xs text-zinc-500">
-        {settings ? `API: ${settings.base_url}/chat/completions` : ""}
         {settings?.updated_at
-          ? ` · изменено ${formatDateTime(settings.updated_at)}${settings.updated_by ? `, ${settings.updated_by}` : ""}`
+          ? `Изменено ${formatDateTime(settings.updated_at)}${settings.updated_by ? `, ${settings.updated_by}` : ""}`
           : ""}
       </p>
 
@@ -379,14 +392,191 @@ export function RouterAiCard() {
   );
 }
 
+/** Версии API GigaChat — по договору со Сбером (физлицо, юрлицо по предоплате, по постоплате). */
+const GIGACHAT_SCOPES: { value: string; label: string }[] = [
+  { value: "GIGACHAT_API_B2B", label: "Юрлицо, предоплата (B2B)" },
+  { value: "GIGACHAT_API_CORP", label: "Юрлицо, постоплата (CORP)" },
+  { value: "GIGACHAT_API_PERS", label: "Физлицо (PERS)" },
+];
+
+/**
+ * GigaChat (Сбер, 08.10.2026) — задел: ключ у заказчика ещё оформляется. Карточка уже здесь,
+ * чтобы после получения ключа осталось вписать его и нажать «Проверить подключение».
+ * Ключ авторизации — из личного кабинета Сбера (Base64 от Client ID:Client Secret).
+ */
+export function GigaChatCard() {
+  const status = useAiProvider();
+  const [settings, setSettings] = useState<GigaChatSettings | null>(null);
+  const [authKeyInput, setAuthKeyInput] = useState("");
+  const [scopeInput, setScopeInput] = useState("GIGACHAT_API_B2B");
+  const [modelInput, setModelInput] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [isTesting, setIsTesting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const apply = (data: GigaChatSettings) => {
+    setSettings(data);
+    setScopeInput(data.scope);
+    setModelInput(data.model);
+  };
+
+  useEffect(() => {
+    api
+      .get<GigaChatSettings>("/integrations/gigachat")
+      .then(apply)
+      .catch((err) =>
+        setError(err instanceof ApiError ? err.message : "Не удалось загрузить настройки GigaChat"),
+      );
+  }, []);
+
+  const handleSave = async () => {
+    setError(null);
+    setTestResult(null);
+    setIsSaving(true);
+    try {
+      // Ключ уходит только если введён заново — PATCH-семантика, как у RouterAI.
+      const payload: { scope: string; model: string; auth_key?: string } = {
+        scope: scopeInput,
+        model: modelInput,
+      };
+      if (authKeyInput !== "") payload.auth_key = authKeyInput;
+      apply(await api.patch<GigaChatSettings>("/integrations/gigachat", payload));
+      setAuthKeyInput("");
+      void refreshAiProvider();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось сохранить настройки");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleTest = async () => {
+    setError(null);
+    setTestResult(null);
+    setIsTesting(true);
+    try {
+      setTestResult(
+        await api.post<{ success: boolean; message: string }>("/integrations/gigachat/test"),
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось выполнить проверку подключения");
+    } finally {
+      setIsTesting(false);
+    }
+  };
+
+  const inputClass =
+    "mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/50 focus:outline-none";
+
+  return (
+    <ProviderCard
+      provider="gigachat"
+      title="GigaChat · Сбер"
+      subtitle="Ключ авторизации из личного кабинета Сбера"
+      isActive={status?.default_provider === "gigachat"}
+      isConfigured={settings?.is_configured ?? false}
+    >
+      {error && (
+        <div className="mt-3 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
+          {error}
+        </div>
+      )}
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <label className="block text-xs text-zinc-400">
+          Ключ авторизации
+          <input
+            type="password"
+            value={authKeyInput}
+            onChange={(e) => setAuthKeyInput(e.target.value)}
+            placeholder={settings?.auth_key_masked ?? "Base64 из личного кабинета"}
+            autoComplete="off"
+            className={inputClass}
+          />
+        </label>
+        <label className="block text-xs text-zinc-400">
+          Версия API
+          <select
+            value={scopeInput}
+            onChange={(e) => setScopeInput(e.target.value)}
+            className={inputClass}
+          >
+            {GIGACHAT_SCOPES.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block text-xs text-zinc-400 sm:col-start-2">
+          Модель
+          <input
+            type="text"
+            value={modelInput}
+            onChange={(e) => setModelInput(e.target.value)}
+            placeholder="GigaChat-2-Max"
+            className={inputClass}
+          />
+        </label>
+      </div>
+      <p className="mt-2 text-xs text-zinc-500">
+        {settings?.updated_at
+          ? `Изменено ${formatDateTime(settings.updated_at)}${settings.updated_by ? `, ${settings.updated_by}` : ""}`
+          : ""}
+      </p>
+
+      <div className="mt-4 flex items-center gap-3">
+        <button
+          onClick={() => void handleSave()}
+          disabled={isSaving}
+          className="rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-medium text-snow hover:bg-emerald-500 disabled:opacity-50"
+        >
+          {isSaving ? "Сохраняю…" : "Сохранить"}
+        </button>
+        <button
+          onClick={() => void handleTest()}
+          disabled={isTesting || !settings?.is_configured}
+          className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3.5 py-2 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+        >
+          <PlayCircle size={13} />
+          {isTesting ? "Проверяю…" : "Проверить подключение"}
+        </button>
+      </div>
+
+      {testResult && (
+        <div
+          className={`mt-4 rounded-lg border px-4 py-2.5 text-sm ${
+            testResult.success
+              ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
+              : "border-red-500/20 bg-red-500/10 text-red-400"
+          }`}
+        >
+          <p className="whitespace-pre-line">{testResult.message}</p>
+        </div>
+      )}
+    </ProviderCard>
+  );
+}
+
 /**
  * Отключение моделей администратором (29.09.2026) — «намертво»: в отключённую модель не
  * уходит ни одного запроса ни от кого, разборы, начатые через неё, останавливаются на
  * следующем обращении к модели (их ответы не используются), а новые идут через замену —
  * модель по умолчанию или первую включённую. Личный выбор пользователей сохраняется: после
  * включения каждый вернётся к своей модели.
+ *
+ * С 08.10.2026 это ещё и навигация раздела «Модели ИИ»: строка выбирает, чьи ключи показать
+ * справа (Claude и DeepSeek открывают общую карточку RouterAI), переключатель в строке —
+ * доступность. Раньше доступность была отдельным блоком, а все карточки стояли друг под
+ * другом, и страница росла вниз с каждым новым провайдером.
  */
-export function AiModelAvailability() {
+export function AiModelList({
+  selected,
+  onSelect,
+}: {
+  selected: AiProviderKey;
+  onSelect: (provider: AiProviderKey) => void;
+}) {
   const status = useAiProvider();
   const [busy, setBusy] = useState<AiProviderKey | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -416,35 +606,78 @@ export function AiModelAvailability() {
   const allOff = status !== null && AI_PROVIDERS.every((item) => disabled.includes(item.key));
 
   return (
-    <div className="mt-5 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
-      <div className="flex items-center gap-2 text-sm font-medium text-zinc-200">
-        <Power size={15} className="text-zinc-400" />
-        Доступность моделей
+    <div>
+      <div className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400">
+        Модели
       </div>
-      <p className="mt-1 text-xs text-zinc-500">
-        Отключённая модель не получает запросов ни от кого: идущие через неё разборы
-        останавливаются, новые идут через другую включённую модель.
-      </p>
-      <div className="mt-3 divide-y divide-white/[0.06]">
+      <div className="space-y-1.5" role="listbox" aria-label="Модели ИИ">
         {AI_PROVIDERS.map((item) => {
           const isOff = disabled.includes(item.key);
+          const isConfigured = status?.configured_providers.includes(item.key) ?? false;
+          const isDefault = status?.default_provider === item.key;
+          const isSelected = selected === item.key;
           const info = status?.disabled_info?.[item.key];
+          const state = isOff
+            ? `отключена${info?.at ? ` ${formatDateTime(info.at)}` : ""}${info?.by ? `, ${info.by}` : ""}`
+            : isConfigured
+              ? "настроено"
+              : "не настроено";
           return (
-            <div key={item.key} className="flex items-center gap-3 py-2.5">
-              <AiProviderIcon provider={item.key} size={18} />
-              <div className="min-w-0 flex-1">
-                <p className={`text-sm ${isOff ? "text-zinc-500 line-through" : "text-zinc-200"}`}>{item.label}</p>
-                <p className="text-[11px] text-zinc-500">
-                  {isOff
-                    ? `отключена${info?.at ? ` ${formatDateTime(info.at)}` : ""}${info?.by ? `, ${info.by}` : ""}`
-                    : "включена"}
-                </p>
-              </div>
+            <div
+              key={item.key}
+              className={`flex items-center gap-3 rounded-xl border pr-3 transition-colors ${
+                isSelected
+                  ? "border-white/[0.14] bg-white/[0.07]"
+                  : "border-transparent hover:bg-white/[0.04]"
+              }`}
+            >
+              <button
+                type="button"
+                role="option"
+                aria-selected={isSelected}
+                onClick={() => onSelect(item.key)}
+                className="flex min-w-0 flex-1 items-center gap-3 py-2.5 pl-2.5 text-left"
+              >
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/[0.05]">
+                  <AiProviderIcon
+                    provider={item.key}
+                    size={22}
+                    className={isOff ? "opacity-40 grayscale" : undefined}
+                  />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-2">
+                    <span
+                      className={`truncate text-sm font-medium ${isOff ? "text-zinc-500 line-through" : "text-zinc-100"}`}
+                    >
+                      {item.label}
+                    </span>
+                    {isDefault && (
+                      <span
+                        className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${AI_PROVIDER_ACCENT[item.key].pill}`}
+                      >
+                        по умолчанию
+                      </span>
+                    )}
+                  </span>
+                  <span className="mt-0.5 flex items-center gap-1.5 truncate text-[11px] text-zinc-500">
+                    <span
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                        isOff ? "bg-zinc-600" : isConfigured ? "bg-emerald-400" : "bg-amber-400/70"
+                      }`}
+                    />
+                    <span className="truncate">
+                      {item.hint} · {state}
+                    </span>
+                  </span>
+                </span>
+              </button>
               <button
                 type="button"
                 role="switch"
                 aria-checked={!isOff}
                 aria-label={`${item.label}: ${isOff ? "включить" : "отключить"}`}
+                title={isOff ? "Включить модель" : "Отключить модель для всех"}
                 disabled={!status || busy !== null}
                 onClick={() => void toggle(item.key, isOff)}
                 className={`relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-50 ${

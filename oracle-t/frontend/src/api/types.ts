@@ -68,11 +68,12 @@ export const MANUAL_SOURCE_TYPE = "manual";
 export const GOSPLAN_SOURCE_TYPE = "gosplan";
 export const GOSPLAN_SOURCE_KEY = "gosplan";
 
-/** Внешние каналы сбора: Госплан (28.09.2026), Селдон и Тендерплан (30.09.2026). У каждого
- * свой источник (имя канала = тип = ключ источника), своя кнопка на переключателе страницы
- * тендеров и своя вкладка в настройках. */
-export type ExternalFeed = "gosplan" | "seldon" | "tenderplan";
-export const EXTERNAL_FEEDS: readonly ExternalFeed[] = ["gosplan", "seldon", "tenderplan"];
+/** Внешние каналы сбора: Госплан (28.09.2026) и Тендерплан (30.09.2026). У каждого свой
+ * источник (имя канала = тип = ключ источника), своя кнопка на переключателе страницы
+ * тендеров и своя вкладка в настройках. Селдон убран 08.10.2026: Seldon.API так и не открыли,
+ * а сохранённый у кого-то канал «seldon» `parseTenderFeed` сбрасывает на стандартный. */
+export type ExternalFeed = "gosplan" | "tenderplan";
+export const EXTERNAL_FEEDS: readonly ExternalFeed[] = ["gosplan", "tenderplan"];
 
 /** Источник образует отдельный канал — в «Источниках тендеров» и фильтре площадок ему не место. */
 export function isExternalFeedSource(type: string): boolean {
@@ -504,9 +505,10 @@ export interface YandexConnectionTestResult {
   message: string;
 }
 
-/** Провайдер ИИ-модуля (18.09.2026): YandexGPT, Claude или DeepSeek (28.09.2026) через RouterAI. Выбор — у каждого
- * пользователя свой; без него действует системная модель по умолчанию. */
-export type AiProviderKey = "yandex" | "claude" | "deepseek";
+/** Провайдер ИИ-модуля (18.09.2026): YandexGPT, Claude или DeepSeek (28.09.2026) через RouterAI,
+ * GigaChat (08.10.2026, задел — ждёт ключа). Выбор — у каждого пользователя свой; без него
+ * действует системная модель по умолчанию. */
+export type AiProviderKey = "yandex" | "claude" | "deepseek" | "gigachat";
 
 /** Какая модель обслуживает запросы текущего пользователя. `source` — откуда она взялась:
  * личный выбор (`user`) или системная по умолчанию (`default`). */
@@ -531,6 +533,17 @@ export interface RouterAiSettings {
   api_key_masked: string | null;
   model: string;
   deepseek_model: string;
+  base_url: string;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+/** GigaChat (Сбер, 08.10.2026): ключ авторизации наружу не отдаётся — только хвост. */
+export interface GigaChatSettings {
+  is_configured: boolean;
+  auth_key_masked: string | null;
+  scope: string;
+  model: string;
   base_url: string;
   updated_at: string | null;
   updated_by: string | null;
@@ -1789,4 +1802,36 @@ export interface TenderRegistryCheck {
       }
     >;
   }[];
+}
+
+/** Подключение к порталу Bitrix24 (08.10.2026): тендеры уходят сделками в воронку. */
+export interface Bitrix24Settings {
+  is_configured: boolean;
+  webhook_masked: string | null;
+  portal: string | null;
+  category_id: number;
+  stage_id: string;
+  push_enabled: boolean;
+  updated_at: string | null;
+  updated_by: string | null;
+  last_check_at: string | null;
+  last_check_status: "ok" | "error" | null;
+  last_check_message: string | null;
+}
+
+/** Итог «Проверить подключение» — только чтение стадий и полей сделки. */
+export interface Bitrix24CheckResult {
+  success: boolean;
+  message: string;
+  stages: { id: string; name: string }[];
+  stage_found: boolean;
+  missing_fields: { key: string; title: string }[];
+}
+
+/** Итог отправки сделки (в том числе тестовой) в Bitrix24. */
+export interface Bitrix24PushResult {
+  deal_id: number;
+  created: boolean;
+  url: string;
+  message: string;
 }
