@@ -14,20 +14,145 @@
 from __future__ import annotations
 
 
+from apscheduler.events import (
+    EVENT_JOB_ERROR,
+    EVENT_JOB_EXECUTED,
+    EVENT_JOB_MAX_INSTANCES,
+    EVENT_JOB_MISSED,
+    EVENT_JOB_SUBMITTED,
+    JobExecutionEvent,
+    JobSubmissionEvent,
+)
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger as _CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
+from app.core import activity
 from app.core.config import get_settings
 from app.core.timezones import MOSCOW_TZ, now_msk
 from app.db.session import SessionLocal
+from app.models.log import LogLevel
+from app.services.audit import log_action
 from app.services.availability_service import ping_all_sources
 from app.services.log_service import purge_old_entries
 from app.services.notification_service import notify_deadlines_soon
-from app.services.tender_service import check_pending_ai_relevance, poll_all_active_sources
+from app.services.tender_service import (
+    check_pending_ai_relevance,
+    list_pollable_sources,
+    poll_all_active_sources,
+)
 
 _scheduler: BackgroundScheduler | None = None
+
+# Допуск на опоздание запуска (14.10.2026). По умолчанию в APScheduler 3.x он равен ОДНОЙ
+# секунде: запуск, не стартовавший ровно вовремя (занятый пул, машина проснулась после сна,
+# долгая сборка мусора), молча пропускался — след оставался только в stdout uvicorn, а в
+# «Журнале» опроса просто не было. Час — с запасом на любую задержку, но не настолько много,
+# чтобы утренний опрос, сорвавшийся на ночь, внезапно стартовал днём поверх ручного.
+MISFIRE_GRACE_SECONDS = 3600
+JOB_DEFAULTS = {
+    "misfire_grace_time": MISFIRE_GRACE_SECONDS,
+    # Несколько пропущенных запусков одного задания — один догоняющий, а не очередь подряд.
+    "coalesce": True,
+    # Опрос площадок идёт десятки минут: второй экземпляр поверх первого лишь удвоил бы
+    # нагрузку на площадки и гонялся бы за теми же записями.
+    "max_instances": 1,
+}
+
+# Человеческие названия заданий для журнала: «poll_sources_morning» пользователю ничего не
+# говорит. Ключ — префикс id задания (у автозаполнения их несколько: catalog_autofill_1…).
+_JOB_LABELS = {
+    "poll_sources": "Плановый опрос площадок",
+    "catalog_autofill": "Автозаполнение каталога",
+    "catalog_sites_sync": "Обход каталогов сайтов производителей",
+    "catalog_learning": "Обучение справочника",
+    "upper_software_sync": "Чтение списков ПО верхнего уровня",
+    "fgis_revalidation": "Ревалидация карточек ФГИС",
+    "document_registry_check": "Сверка документов по СИ",
+    "registry_poll": "Сверка с реестрами допуска",
+    "notify_deadlines": "Уведомления о сроках подачи",
+    "purge_logs": "Уборка журнала",
+    "tender_gap_repair": "Достройка матриц соответствия",
+    "catalog_lookup_queue": "Подбор задач очереди справочника",
+}
+# Ежеминутный пинг доступности в журнал о пропусках не пишется: следующий придёт через
+# минуту, а запись на каждый пропуск при подвисшем пуле засыпала бы журнал.
+_QUIET_JOBS = {"ping_sources"}
+
+
+def _job_label(job_id: str) -> str:
+    for prefix, label in _JOB_LABELS.items():
+        if job_id.startswith(prefix):
+            return label
+    return job_id
+
+
+def _journal(action: str, result: str, details: str, level: LogLevel = LogLevel.INFO) -> None:
+    """Запись планировщика в журнал операций — тем же путём, что и `poll_source:<key>`.
+    Своя сессия: слушатель событий и задания работают в потоках APScheduler, вне запроса.
+    Сбой записи не должен ронять ни задание, ни поток планировщика."""
+
+    db = SessionLocal()
+    try:
+        log_action(db, component="scheduler", action=action, result=result, level=level, details=details)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - журнал не должен ронять планировщик
+        logger.warning(f"Не удалось записать в журнал «{action}»: {exc}")
+    finally:
+        db.close()
+
+
+def _on_job_skipped(event: JobExecutionEvent | JobSubmissionEvent) -> None:
+    """Пропущенный запуск — WARNING в журнале (14.10.2026): коллеги по выгрузке журнала за
+    13–14.10 не могли отличить «опроса не было по расписанию» от «опрос сорвался».
+    Пропуск по сроку приходит `JobExecutionEvent` с одним временем, отказ из-за ещё идущего
+    экземпляра — `JobSubmissionEvent` со списком."""
+
+    if event.job_id in _QUIET_JOBS:
+        return
+    when = getattr(event, "scheduled_run_time", None) or next(
+        iter(getattr(event, "scheduled_run_times", None) or []), None
+    )
+    when_text = when.astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M") if when else "?"
+    if event.code == EVENT_JOB_MAX_INSTANCES:
+        reason = "предыдущий запуск ещё не закончился"
+    else:
+        reason = f"не стартовал в пределах {MISFIRE_GRACE_SECONDS // 60} мин после срока"
+    details = f"{_job_label(event.job_id)} на {when_text} МСК пропущен: {reason}"
+    logger.warning(details)
+    _journal(f"job_missed:{event.job_id}", "skipped", details, level=LogLevel.WARNING)
+
+
+# Задания, ход которых виден всем в центре уведомлений шапки (14.10.2026): долгие и
+# заметные по результату. Автозаполнение и обучение справочника сюда не входят — они только
+# ставят задачи в очередь справочника, а её ход центр уведомлений берёт из БД.
+_TRACKED_JOBS = (
+    "poll_sources",
+    "catalog_sites_sync",
+    "upper_software_sync",
+    "fgis_revalidation",
+    "document_registry_check",
+    "registry_poll",
+)
+
+
+def _tracked_key(job_id: str) -> str | None:
+    return next((prefix for prefix in _TRACKED_JOBS if job_id.startswith(prefix)), None)
+
+
+def _on_job_activity(event: JobExecutionEvent | JobSubmissionEvent) -> None:
+    """Старт и окончание заметных заданий — в реестр идущих процессов (`app.core.activity`).
+    Слушатель, а не обёртка каждой функции: заданий много, а правило для всех одно."""
+
+    key = _tracked_key(event.job_id)
+    if key is None:
+        return
+    if event.code == EVENT_JOB_SUBMITTED:
+        activity.start(key, _job_label(event.job_id))
+    else:
+        exception = getattr(event, "exception", None)
+        activity.finish(key, error=f"Завершилось ошибкой: {exception}" if exception else None)
 
 
 def CronTrigger(**fields) -> _CronTrigger:  # noqa: N802 - заменяет класс APScheduler по месту
@@ -40,9 +165,30 @@ def CronTrigger(**fields) -> _CronTrigger:  # noqa: N802 - заменяет кл
 
 
 def _run_poll_job() -> None:
+    # Старт и окончание — в журнал (14.10.2026): по одним записям `poll_source:<key>` не
+    # видно, был ли плановый прогон вообще, а при нуле площадок их и вовсе нет.
     db = SessionLocal()
     try:
-        results = poll_all_active_sources(db)
+        _journal(
+            "scheduled_poll",
+            "started",
+            f"Плановый опрос запущен: площадок {len(list_pollable_sources(db))}",
+        )
+        try:
+            results = poll_all_active_sources(db)
+        except Exception as exc:
+            db.rollback()
+            _journal("scheduled_poll", "error", f"Плановый опрос прерван ошибкой: {exc}", LogLevel.ERROR)
+            raise
+        created = sum(result.created for result in results)
+        failed = sum(1 for result in results if result.errors)
+        _journal(
+            "scheduled_poll",
+            "success" if not failed else "partial_error",
+            f"Плановый опрос завершён: площадок {len(results)}, создано {created}, "
+            f"обновлено {sum(result.updated for result in results)}, площадок с ошибками {failed}",
+            LogLevel.INFO if not failed else LogLevel.WARNING,
+        )
         logger.info(f"Плановый опрос источников завершён: {results}")
         check_pending_ai_relevance(db)
     finally:
@@ -148,7 +294,11 @@ def _run_catalog_sites_job() -> None:
 
     db = SessionLocal()
     try:
-        for adapter_key in (catalog_site_sync.MIRTEK_ADAPTER_KEY, *PROFILES):
+        adapter_keys = (catalog_site_sync.MIRTEK_ADAPTER_KEY, *PROFILES)
+        for index, adapter_key in enumerate(adapter_keys):
+            activity.progress(
+                "catalog_sites_sync", done=index, total=len(adapter_keys), message=f"Сайт: {adapter_key}"
+            )
             site = catalog_site_sync.resolve_site(db, adapter_key)
             if site is None:
                 logger.warning(
@@ -195,15 +345,18 @@ def _run_catalog_learning_job() -> None:
     один проход — минуты (документы, обращения к модели), и делать это в HTTP-запросе или
     прямо здесь без очереди значило бы потерять ход работы при перезапуске."""
 
-    from app.services import catalog_learning, catalog_queue_service
+    from app.services import catalog_autofill, catalog_learning, catalog_queue_service
 
     db = SessionLocal()
     try:
         queued = catalog_learning.enqueue_all(db)
-        counters = catalog_queue_service.process_queue(
-            db, adapter_key=catalog_learning.ADAPTER_KEY, limit=max(queued, 1)
+        # Выполняет поток очереди справочника, а не планировщик: при включённом
+        # автозаполнении тот же поток ведёт быстрый проход, и два потока опрашивали бы
+        # производителей параллельно (с 14.10.2026 этот проход идёт и при автозаполнении).
+        catalog_queue_service.submit(
+            lambda: catalog_autofill._process_all(with_upper_software=False)
         )
-        logger.info(f"Обучение справочника: поставлено {queued}, обработано {counters}")
+        logger.info(f"Обучение справочника: поставлено в очередь {queued}")
     except Exception as exc:  # noqa: BLE001 - сбой обучения не должен ронять планировщик
         logger.warning(f"Обучение справочника завершилось ошибкой: {exc}")
     finally:
@@ -314,7 +467,11 @@ def start_scheduler() -> BackgroundScheduler | None:
     finally:
         db.close()
 
-    scheduler = BackgroundScheduler(timezone="Europe/Moscow")
+    scheduler = BackgroundScheduler(timezone="Europe/Moscow", job_defaults=JOB_DEFAULTS)
+    scheduler.add_listener(_on_job_skipped, EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES)
+    scheduler.add_listener(
+        _on_job_activity, EVENT_JOB_SUBMITTED | EVENT_JOB_EXECUTED | EVENT_JOB_ERROR
+    )
     for label, time_str in (
         ("morning", settings.scheduler_morning_time),
         ("afternoon", settings.scheduler_afternoon_time),
@@ -383,7 +540,9 @@ def start_scheduler() -> BackgroundScheduler | None:
             id="document_registry_check",
             replace_existing=True,
         )
-    if settings.catalog_learning_enabled and not autofill:
+    # Второй проход (характеристики из документов моделью ИИ) — раз в неделю и при
+    # автозаполнении: суточный опрос с 14.10.2026 идёт без модели (`catalog_autofill.enqueue_all`).
+    if settings.catalog_learning_enabled:
         hour, minute = _parse_hh_mm(settings.catalog_learning_time)
         scheduler.add_job(
             _run_catalog_learning_job,

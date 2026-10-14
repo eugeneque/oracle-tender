@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from datetime import date, datetime, timedelta, timezone
@@ -294,7 +295,15 @@ def handle_task(db: Session, task: CatalogLookupTask) -> TaskOutcome:
         )
     manufacturer, adapter = site
 
-    outcome = sync_catalog(db, manufacturer=manufacturer, adapter=adapter, use_ai=True)
+    def report(done: int, total: int, current: str | None) -> None:
+        # Ход обхода — в `details` задачи: интерфейс опрашивает очередь и рисует полосу
+        # «N из M» с оставшимся временем (14.10.2026). Без этого после нажатия кнопки было
+        # только «займёт несколько минут» и непонятно, сколько ещё ждать. Новый словарь, а
+        # не правка старого: JSONB-колонка не замечает изменений внутри словаря.
+        task.details = {"progress": {"done": done, "total": total, "current": current}}
+        db.commit()
+
+    outcome = sync_catalog(db, manufacturer=manufacturer, adapter=adapter, on_progress=report)
     return TaskOutcome(
         message=(
             f"Создано моделей: {outcome.products_created}, обновлено: {outcome.products_updated}, "
@@ -396,17 +405,19 @@ def sync_catalog(
     manufacturer: Manufacturer | None = None,
     adapter=None,
     actor: User | None = None,
-    use_ai: bool = True,
+    use_ai: bool = False,
     full_refresh: bool = False,
+    on_progress: Callable[[int, int, str | None], None] | None = None,
 ) -> SyncOutcome:
     """Полный обход каталога одного производителя с сохранением в справочник.
 
     `manufacturer`/`adapter` не заданы — обходится каталог МИРТЕК: так вызывает плановая
     задача и старый код, которому знать про профили сайтов незачем.
 
-    `use_ai=False` отключает разбор «Ключевых особенностей» моделью — нужен там, где
-    YandexGPT недоступен или не настроен: остальные данные карточки при этом собираются
-    полностью, а не теряются вместе с недоступной интеграцией.
+    `use_ai=True` включает разбор свободного текста «Ключевых особенностей» моделью ИИ. С
+    14.10.2026 по умолчанию выключен: обход сайта идёт дважды в день, а текст давал ~5%
+    значений с сайта (674 из 12 830) — то же обычно есть в таблице карточки, «Описании типа»
+    и руководстве. Таблица характеристик и документы собираются полностью и без него.
 
     `full_refresh=True` перезагружает каждую карточку, даже недавно обойдённую. По умолчанию
     свежие пропускаются (см. `FRESH_CARD_MAX_AGE`): страница категории и так сообщает, жива
@@ -443,8 +454,20 @@ def sync_catalog(
 
     seen_urls: set[str] = set()
     started_at = datetime.now(timezone.utc)
+    total = len(catalog.items)
 
-    for item in catalog.items:
+    def progress(done: int, current: str | None) -> None:
+        # Сбой отчёта о ходе не должен срывать сам обход.
+        if on_progress is None:
+            return
+        try:
+            on_progress(done, total, current)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Ход обхода каталога не записан: {exc}")
+
+    progress(0, None)
+    for index, item in enumerate(catalog.items, start=1):
+        progress(index - 1, item.model_name)
         fresh = _fresh_product(db, item, since=started_at, full_refresh=full_refresh)
         if fresh is not None:
             # Карточку не перезагружаем: запись обновлялась недавно, а на странице категории
@@ -510,6 +533,7 @@ def sync_catalog(
     if callable(close):
         close()
 
+    progress(total, "Привязка моделей к кодам СИ")
     outcome.marked_for_review = _mark_disappeared(
         db, manufacturer, seen_urls=seen_urls, since=started_at, actor_id=actor_id
     )

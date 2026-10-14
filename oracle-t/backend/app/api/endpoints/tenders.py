@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -115,6 +116,7 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
         pattern="^(relevant|rejected)$",
         description="Раздел «Релевантные» (relevant) или «Неактуальные» (rejected): уже отмеченные специалистами",
     ),
+    analyzed: bool = Query(default=False, description="Только разобранные: с извлечёнными требованиями"),
     region: list[str] | None = Query(default=None, description="Коды регионов (заказчика или поставки)"),
     federal_district: list[int] | None = Query(default=None),
     tender_type: list[str] | None = Query(default=None),
@@ -168,6 +170,7 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
         only_ai_selected=only_ai_selected,
         same_day_deadline=same_day,
         marked=marked,
+        analyzed=analyzed,
         region_codes=region or [],
         federal_district_codes=federal_district or [],
         tender_types=tender_type or [],
@@ -220,6 +223,7 @@ def get_tenders(
         limit=limit,
         offset=offset,
         status_counts=count_tenders_by_status(db, filters=filters),
+        analyzed_total=count_tenders(db, filters=replace(filters, analyzed=True)),
     )
 
 

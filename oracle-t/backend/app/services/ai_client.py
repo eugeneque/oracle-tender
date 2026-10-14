@@ -25,7 +25,9 @@ import pydantic
 from sqlalchemy.orm import Session
 
 from app.services import gigachat_client, routerai_client, yandex_ai_client
+from app.models.log import LogLevel
 from app.models.user import User
+from app.services.ai_log_service import log_ai_event
 from app.services.ai_context import JobCancelled, current_user_id, job_started_at
 from app.services.ai_provider_service import (
     PROVIDER_GIGACHAT,
@@ -35,10 +37,12 @@ from app.services.ai_provider_service import (
     AiModelDisabledError,
     AiNotConfiguredError,
     AiQuotaExceededError,
+    AiUnavailableError,
     disabled_since,
     get_active_provider,
     get_gigachat_credentials,
     get_routerai_credentials,
+    input_budget_chars as _input_budget_chars,
     is_provider_configured,
     is_provider_enabled,
     requested_provider,
@@ -50,8 +54,11 @@ __all__ = [
     "AiModelDisabledError",
     "AiNotConfiguredError",
     "AiQuotaExceededError",
+    "AiUnavailableError",
     "active_model",
     "chunk_text",
+    "fit_chars",
+    "input_budget_chars",
     "run_structured",
 ]
 
@@ -67,8 +74,58 @@ def run_structured(
     """Structured output (JSON по схеме `response_model`) от активного провайдера.
 
     Ошибка «ключ не задан» у любого из них — `AiNotConfiguredError`, остальное поднимается как
-    есть: вызывающий сервис сам решает, как логировать и изолировать сбой (раздел 5.9 ТЗ)."""
+    есть: вызывающий сервис сам решает, как логировать и изолировать сбой (раздел 5.9 ТЗ).
+    Итоговый отказ при этом всегда попадает в журнал ИИ (`ai_log_service`, 14.10.2026) —
+    вызывающие сервисы пишут его по-разному или не пишут вовсе. Остановка задачи
+    (`JobCancelled`) — не ошибка модели и в журнал ИИ не идёт."""
 
+    try:
+        return _run_structured(
+            db,
+            system_prompt=system_prompt,
+            user_text=user_text,
+            response_model=response_model,
+            temperature=temperature,
+        )
+    except Exception as exc:
+        _log_failure(db, exc, getattr(response_model, "__name__", None))
+        raise
+
+
+def _log_failure(db: Session, exc: Exception, operation: str | None) -> None:
+    if isinstance(exc, AiModelDisabledError):
+        action, level = "Модель отключена администратором", LogLevel.WARNING
+    elif isinstance(exc, AiNotConfiguredError):
+        action, level = "Модель не настроена", LogLevel.ERROR
+    elif isinstance(exc, AiQuotaExceededError):
+        action, level = "Лимит провайдера исчерпан, запасной модели нет", LogLevel.ERROR
+    else:
+        action, level = "Запрос к модели не выполнен", LogLevel.ERROR
+    provider = model = None
+    try:
+        provider, model = active_model(db)
+    except Exception:  # noqa: BLE001 - сессия могла упасть вместе с запросом; журнал важнее
+        pass
+    log_ai_event(
+        db,
+        action=action,
+        error=exc,
+        level=level,
+        result="error",
+        provider=provider,
+        model=model,
+        operation=operation,
+    )
+
+
+def _run_structured(
+    db: Session,
+    *,
+    system_prompt: str,
+    user_text: str,
+    response_model: type[ResponseT],
+    temperature: float = 0.0,
+) -> ResponseT:
     _stop_if_disabled_during_job(db)
     _stop_if_cancelled()
     provider = get_active_provider(db)
@@ -107,7 +164,7 @@ def run_structured(
                 db, PROVIDER_YANDEX
             ):
                 raise
-            _warn_quota_fallback(provider, exc)
+            _warn_quota_fallback(db, provider, exc)
         else:
             _discard_if_disabled_meanwhile(db, provider, called_at)
             return result
@@ -170,7 +227,7 @@ def _discard_if_disabled_meanwhile(db: Session, provider: str, called_at: dateti
 _quota_warned_at: float = 0.0
 
 
-def _warn_quota_fallback(provider: str, exc: Exception) -> None:
+def _warn_quota_fallback(db: Session, provider: str, exc: Exception) -> None:
     """Одно предупреждение в 10 минут, а не на каждый вызов: при исчерпанном лимите их сотни."""
 
     global _quota_warned_at
@@ -179,12 +236,21 @@ def _warn_quota_fallback(provider: str, exc: Exception) -> None:
     from loguru import logger
 
     yandex_ai_client._note_fallback(
-        f"{PROVIDER_LABELS.get(provider, provider)} недоступен (исчерпан лимит или баланс) — "
+        f"{PROVIDER_LABELS.get(provider, provider)} недоступен (исчерпан лимит, отклонён ключ "
+        "или нет связи) — "
         "ответ дал YandexGPT"
     )
     if time.monotonic() - _quota_warned_at > 600:
         _quota_warned_at = time.monotonic()
         logger.warning(f"{exc} — запросы переключены на YandexGPT до пополнения лимита")
+        log_ai_event(
+            db,
+            action="Провайдер недоступен — запросы переключены на YandexGPT",
+            error=exc,
+            level=LogLevel.WARNING,
+            result="fallback",
+            provider=provider,
+        )
 
 
 def active_model(db: Session) -> tuple[str, str | None]:
@@ -205,6 +271,25 @@ def active_model(db: Session) -> tuple[str, str | None]:
         except AiNotConfiguredError:
             return provider, None
     return provider, yandex_ai_client.DEFAULT_MODEL
+
+
+def input_budget_chars(db: Session) -> int:
+    """Сколько символов (системный промпт + сообщение) помещается в запрос к модели, которая
+    обслужит текущее обращение (14.10.2026) — от её окна контекста и потолка ответа
+    (`ai_provider_service.get_model_limits`). Подмену на YandexGPT при исчерпанном лимите
+    RouterAI это не учитывает: куски документации и карточки уже ограничены сверху так, что
+    помещаются и в его окно."""
+
+    return _input_budget_chars(db, get_active_provider(db))
+
+
+def fit_chars(db: Session, desired: int, *, reserved: int) -> int:
+    """Длина куска текста для запроса: `desired`, если помещается в окно активной модели
+    вместе с `reserved` (промпт, обвязка сообщения), иначе — сколько помещается. Не меньше
+    2000 символов: кусок короче бесполезен, и честнее получить отказ провайдера с понятным
+    текстом, чем разобрать документ по строчке."""
+
+    return min(desired, max(2_000, input_budget_chars(db) - reserved))
 
 
 def chunk_text(text: str, *, max_chars: int, overlap: int = 200) -> list[str]:

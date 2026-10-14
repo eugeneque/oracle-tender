@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,30 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 @pytest.fixture(scope="session", autouse=True)
 def _migrated_test_database() -> None:
-    subprocess.run(["alembic", "upgrade", "head"], cwd=BACKEND_DIR, check=True)
+    """Каждый прогон начинается с чистой базы: схема пересоздаётся и накатывается миграциями.
+
+    14.10.2026: `db_session` откатывает свои изменения, но HTTP-тесты (`client`) коммитят
+    напрямую — за прошлые прогоны в oraclet_test набралось 4466 производителей, 36797 закупок,
+    6505 источников, 2568 пользователей. `evaluate_tender` перебирает всех производителей базы,
+    и test_compliance_service.py шёл ~7 минут вместо секунд. Пересоздание схемы (а не TRUNCATE)
+    сохраняет заготовки, которые кладут сами миграции (общие профили отбора и т. п.).
+    Защита от рабочей базы — проверка суффикса `_test` в начале файла и повторно здесь."""
+
+    from sqlalchemy import create_engine, text
+
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    assert settings.postgres_db.endswith("_test"), settings.postgres_db
+    engine = create_engine(settings.database_url, future=True)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DROP SCHEMA public CASCADE"))
+            conn.execute(text("CREATE SCHEMA public"))
+    finally:
+        engine.dispose()
+    # `sys.executable -m alembic`, а не `alembic`: без активированного venv команды нет в PATH.
+    subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=BACKEND_DIR, check=True)
 
 
 @pytest.fixture()

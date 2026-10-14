@@ -40,6 +40,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -78,6 +79,12 @@ from app.seed.meter_parameters import (
     parameter_hint,
 )
 from app.services.meter_kind import kind_group, kind_labels, kinds_from_text, product_kinds
+from app.services.compliance_numeric import (
+    CatalogModel,
+    ENABLED as NUMERIC_ENABLED,
+    prejudge,
+    requirement_checks,
+)
 from app.services.product_relevance import select_products_for_context, tender_named_text
 from app.services.tz_reference import (
     TzReference,
@@ -86,7 +93,7 @@ from app.services.tz_reference import (
     match_manufacturer,
     names_reference_model,
 )
-from app.services.ai_client import run_structured
+from app.services.ai_client import input_budget_chars, run_structured
 from app.services.ai_provider_service import AiNotConfiguredError, AiQuotaExceededError
 
 # Вес требования по критичности (раздел 5.5 ТЗ, п.1 методики).
@@ -104,6 +111,10 @@ STATUS_SCORES: dict[str, float] = {
     ComplianceStatus.PARTIAL.value: 0.5,
     ComplianceStatus.NOT_MEETS.value: 0.0,
 }
+
+# Уверенность вердикта, вынесенного кодом по значению из каталога: выше порога проверки
+# человеком, но ниже 1 — значение в каталоге само извлечено автоматически.
+PREJUDGED_CONFIDENCE = 0.9
 
 # Ниже этого порога уверенности вердикт помечается «требует проверки человеком»
 # (раздел 5.5 ТЗ, п.4).
@@ -257,6 +268,8 @@ class ComplianceOutcome:
     entries_saved: int = 0
     requirements_total: int = 0
     manual_fallback_used: int = 0
+    # Требования, решённые кодом без модели (`prejudge_numeric`).
+    prejudged: int = 0
     needs_review: int = 0
     messages: list[str] = field(default_factory=list)
 
@@ -459,6 +472,203 @@ def _cap_context(blocks: list[str]) -> str:
         return text
     cut = text.rfind("\n", 0, MAX_CONTEXT_CHARS)
     return text[: cut if cut > 0 else MAX_CONTEXT_CHARS]
+
+
+# --- карточка под пачку требований (14.10.2026) --------------------------------------------
+#
+# Карточка производителя по живой базе — в среднем 37 тыс. символов, у каждого десятого —
+# все 70 тыс.; с руководствами — 67 тыс. в среднем. Она уходила целиком в каждую пачку из 20
+# требований, хотя пачке о габаритах и реле не нужны строки каталога про температуру и
+# межповерочный интервал. Это главная статья расхода токенов, и с ней матрица не помещается в
+# окно 32 тыс. (ускоритель с локальной моделью). Теперь каждой пачке отдаётся своя выборка:
+# всё, что про эти требования, плюс то, что нужно всегда. Карточка короче предела уходит как
+# есть — отбор не трогает то, что и так помещается.
+
+# Сколько карточки отдавать модели на одну пачку. 24 тыс. символов (~10 тыс. токенов): втрое
+# меньше прежнего потолка, но с запасом против потери нужного факта — строк каталога у шести
+# моделей бывает две-три сотни, и уже требованию «GSM-модем» с «классом точности» и «реле»
+# релевантны десятки из них. Меньше — только если не помещается в окно модели.
+FOCUS_TARGET_CHARS = 24_000
+# Блок длиннее этого (выдержка из «Описания типа», структура условного обозначения) режется
+# на куски, и в карточку попадают только нужные; заголовок блока идёт с любым из них.
+_SPLIT_BLOCK_CHARS = 1_500
+_PIECE_CHARS = 700
+# Начало блока карточки — строка с пометкой источника.
+_BLOCK_START = re.compile(r"^\[(si_type|catalog|manual|software|registry|astra|tz)\]")
+# Факты, без которых вердикт не вынести, — в карточке всегда: по ним правила 7, 8, 13
+# системного промпта решают «нет в списке — не соответствует», и потеря строки превратила бы
+# проверенное «нет» в «нет данных». Их немного: они уже отобраны по требованиям закупки.
+_PINNED_TAGS = ("[tz]", "[software]", "[registry]", "[astra]")
+_WORD = re.compile(r"[0-9a-zа-я]+")
+# Слитные обозначения дают и целое слово, и части: «RS485» совпадёт и с «RS485», и с
+# «RS-485»; «300x170x75» — с «300 мм».
+_WORD_PART = re.compile(r"[0-9]+|[a-zа-я]+")
+_STOP_WORDS = frozenset(
+    "для при или без над под как что это его она они быть должен должна должно должны "
+    "наличие наличии менее более чем также либо который которая которые всех всего".split()
+)
+
+
+@dataclass
+class _ContextUnit:
+    """Кусок карточки: целый блок или часть длинного. `header` — номер единицы-заголовка
+    своего блока (для частей длинного), без которой кусок в карточку не попадает."""
+
+    text: str
+    pinned: bool = False
+    header: int | None = None
+    stems: frozenset[str] = frozenset()
+
+
+def _stems(text: str) -> frozenset[str]:
+    """Основы слов для сравнения требования с карточкой: русские слова обрезаются до шести
+    букв («интерфейсом» и «интерфейсы» совпадут), латиница и числа — целиком (`gsm`, `485`,
+    `230`). Грубо, но без словарей и предсказуемо — отбор лишь решает, что положить в
+    карточку, а не выносит вердикт."""
+
+    result = set()
+    for token in _WORD.findall(text.lower().replace("ё", "е")):
+        parts = _WORD_PART.findall(token)
+        for word in parts if len(parts) > 1 else [token]:
+            if word in _STOP_WORDS:
+                continue
+            if word.isdigit() or word.isascii():
+                if len(word) >= 2:
+                    result.add(word)
+                continue
+            if len(word) >= 3:
+                result.add(word[:6])
+        if len(parts) > 1 and token.isascii():
+            result.add(token)
+    return frozenset(result)
+
+
+def _context_units(context: str) -> list[_ContextUnit]:
+    blocks: list[list[str]] = []
+    for line in context.split("\n"):
+        if not blocks or _BLOCK_START.match(line):
+            blocks.append([line])
+        else:
+            blocks[-1].append(line)
+
+    units: list[_ContextUnit] = []
+    for lines in blocks:
+        text = "\n".join(lines)
+        first = lines[0]
+        # Короткие факты типа СИ (номер в Госреестре, МПИ) и тип прибора модели — по ним
+        # правила 10 и 15 сверяют тип и Госреестр, а места они почти не занимают.
+        pinned = (
+            first.startswith(_PINNED_TAGS)
+            or (len(lines) == 1 and first.startswith("[si_type]"))
+            or ": тип прибора — " in first
+        )
+        if len(text) <= _SPLIT_BLOCK_CHARS:
+            units.append(_ContextUnit(text=text, pinned=pinned, stems=_stems(text)))
+            continue
+        header_index = len(units)
+        units.append(_ContextUnit(text=first, pinned=pinned, stems=_stems(first)))
+        piece: list[str] = []
+        piece_length = 0
+        for line in lines[1:]:
+            if piece and piece_length + len(line) > _PIECE_CHARS:
+                piece_text = "\n".join(piece)
+                units.append(
+                    _ContextUnit(text=piece_text, pinned=pinned, header=header_index, stems=_stems(piece_text))
+                )
+                piece, piece_length = [], 0
+            piece.append(line)
+            piece_length += len(line) + 1
+        if piece:
+            piece_text = "\n".join(piece)
+            units.append(
+                _ContextUnit(text=piece_text, pinned=pinned, header=header_index, stems=_stems(piece_text))
+            )
+    return units
+
+
+def focus_context(context: str, requirements: list[Requirement], limit: int) -> str:
+    """Карточка производителя не длиннее `limit`, собранная под эти требования.
+
+    Порядок: закреплённые факты → куски, нужные требованиям, **по кругу**: сначала лучший
+    кусок для каждого требования, затем второй и так далее → остальное, пока есть место.
+    По кругу, а не по общему счёту: при общем счёте длинные выдержки «Описания типа», где
+    встречаются слова половины требований, вытесняли короткие строки каталога, и требование
+    о массе теряло строку «Масса — 1,5 кг» (проверено на 488 прошлых вердиктах, 14.10.2026).
+    Лучший кусок для требования — с наибольшим числом общих с ним слов на длину; редкие
+    слова весят больше (`gsm` в карточке в двух строках, «счётчик» — в каждой).
+
+    Выбранное выводится в исходном порядке карточки, пропуск внутри длинного блока
+    помечается «[…]» — модель видит, что выдержка неполная."""
+
+    if len(context) <= limit:
+        return context
+    units = _context_units(context)
+    queries = [
+        _stems(requirement.normalized_text or requirement.text or "")
+        | _stems(parameter_hint(_parameter_of(requirement)) or "")
+        for requirement in requirements
+    ]
+    frequency: dict[str, int] = {}
+    for unit in units:
+        for stem in unit.stems:
+            frequency[stem] = frequency.get(stem, 0) + 1
+
+    def weight(stem: str) -> float:
+        return math.log(1 + len(units) / frequency[stem])
+
+    chosen: set[int] = set()
+    used = 0
+
+    def take(index: int) -> None:
+        nonlocal used
+        header = units[index].header
+        need = [index] if header is None else [header, index]
+        cost = sum(len(units[item].text) + 1 for item in need if item not in chosen)
+        if used + cost <= limit:
+            chosen.update(need)
+            used += cost
+
+    for index, unit in enumerate(units):
+        if unit.pinned:
+            take(index)
+
+    rankings: list[list[int]] = []
+    for query in queries:
+        scored = []
+        for index, unit in enumerate(units):
+            if unit.pinned:
+                continue
+            common = unit.stems & query
+            if common:
+                value = sum(weight(stem) for stem in common) / math.sqrt(len(unit.text) + 40)
+                scored.append((-value, index))
+        rankings.append([index for _, index in sorted(scored)])
+    depth = 0
+    while any(depth < len(ranking) for ranking in rankings) and used < limit:
+        for ranking in rankings:
+            if depth < len(ranking):
+                take(ranking[depth])
+        depth += 1
+    for index, unit in enumerate(units):
+        if index not in chosen:
+            take(index)
+
+    lines: list[str] = []
+    previous: int | None = None
+    for index in sorted(chosen):
+        if units[index].header is not None and previous != index - 1:
+            lines.append("[…]")
+        lines.append(units[index].text)
+        previous = index
+    return "\n".join(lines)
+
+
+def _focus_limit(db: Session, requirements: list[Requirement]) -> int:
+    """Предел карточки на пачку: `FOCUS_TARGET_CHARS` или меньше, если окно модели (за
+    вычетом промпта, требований и потолка ответа) не вмещает и этого."""
+
+    reserved = len(_SYSTEM_PROMPT) + len(_requirements_block(requirements)) + 200
+    return max(4_000, min(FOCUS_TARGET_CHARS, input_budget_chars(db) - reserved))
 
 
 def _parameter_of(requirement: Requirement) -> int | None:
@@ -706,6 +916,7 @@ def _evaluate_in_parallel(
             verdicts, local_outcome = future.result()
             manufacturer = by_id[futures[future]]
             outcome.manual_fallback_used += local_outcome.manual_fallback_used
+            outcome.prejudged += local_outcome.prejudged
             outcome.messages.extend(local_outcome.messages)
             finish(manufacturer, verdicts)
             done += 1
@@ -809,7 +1020,19 @@ def _evaluate_manufacturer(
             for index in range(1, len(requirements) + 1)
         }
 
-    verdicts = _ask_in_batches(db, manufacturer, requirements, context, outcome)
+    # Однозначные числовые требования решает код — модели уходят только остальные
+    # (14.10.2026, раздел 59 ARCHITECTURE.md, `app/services/compliance_numeric.py`).
+    verdicts = prejudge_numeric(db, tender, manufacturer, requirements)
+    outcome.prejudged += len(verdicts)
+    asked = [index for index in range(1, len(requirements) + 1) if index not in verdicts]
+    if asked:
+        answered = _ask_in_batches(
+            db, manufacturer, [requirements[index - 1] for index in asked], context, outcome
+        )
+        for position, index in enumerate(asked, start=1):
+            if position in answered:
+                answered[position].number = index
+                verdicts[index] = answered[position]
 
     unresolved = [
         index
@@ -1304,6 +1527,62 @@ def apply_expert_rules(
             )
 
 
+def catalog_models(db: Session, manufacturer: Manufacturer) -> list[CatalogModel]:
+    """Модели производителя со значениями характеристик для предрешения кодом. Без
+    руководства: оно — третий шаг сопоставления, только для оставшихся без ответа."""
+
+    products = list(
+        db.scalars(
+            select(Product).where(Product.manufacturer_id == manufacturer.id).order_by(Product.model_name)
+        )
+    )
+    by_product: dict[uuid.UUID, list[ProductCharacteristic]] = {}
+    if products:
+        for characteristic in db.scalars(
+            select(ProductCharacteristic).where(
+                ProductCharacteristic.product_id.in_([product.id for product in products])
+            )
+        ):
+            by_product.setdefault(characteristic.product_id, []).append(characteristic)
+    models = []
+    for product in products:
+        characteristics = by_product.get(product.id, [])
+        values = {
+            item.field_name: item.value
+            for item in characteristics
+            if item.value and item.source != "user_manual"
+        }
+        if values:
+            groups = {kind_group(code) for code in product_kinds(product, characteristics)}
+            models.append(CatalogModel(product.model_name, values, groups))
+    return models
+
+
+def prejudge_numeric(
+    db: Session, tender: Tender, manufacturer: Manufacturer, requirements: list[Requirement]
+) -> dict[int, RequirementVerdict]:
+    """Вердикты кодом по однозначным числовым требованиям (номер → вердикт). Только
+    «соответствует» по факту из каталога; остальное — модели (см. `compliance_numeric`)."""
+
+    texts = [(index, item.normalized_text or item.text or "") for index, item in enumerate(requirements, start=1)]
+    if not any(requirement_checks(text) for _, text in texts):
+        return {}
+    models = catalog_models(db, manufacturer)
+    groups = {kind_group(code) for code in (tender.meter_kinds or [])} or None
+    verdicts: dict[int, RequirementVerdict] = {}
+    for index, text in texts:
+        found = prejudge(text, models, groups, NUMERIC_ENABLED)
+        if found is not None:
+            verdicts[index] = RequirementVerdict(
+                number=index,
+                status=found.status,
+                source="catalog",
+                explanation=found.explanation,
+                confidence=PREJUDGED_CONFIDENCE,
+            )
+    return verdicts
+
+
 def _ask_in_batches(
     db: Session,
     manufacturer: Manufacturer,
@@ -1321,7 +1600,9 @@ def _ask_in_batches(
     verdicts: dict[int, RequirementVerdict] = {}
     for offset in range(0, len(requirements), REQUIREMENTS_PER_REQUEST):
         batch = requirements[offset : offset + REQUIREMENTS_PER_REQUEST]
-        batch_verdicts = _ask_model(db, manufacturer, batch, context, outcome)
+        # Каждой пачке — своя выборка из карточки (14.10.2026, `focus_context`).
+        batch_context = focus_context(context, batch, _focus_limit(db, batch))
+        batch_verdicts = _ask_model(db, manufacturer, batch, batch_context, outcome)
         for local_number, verdict in batch_verdicts.items():
             global_number = offset + local_number
             verdict.number = global_number
@@ -1336,9 +1617,10 @@ def _ask_model(
     context: str,
     outcome: ComplianceOutcome,
 ) -> dict[int, RequirementVerdict]:
-    # Карточка — первой, требования — после (06.10.2026). Карточка одна на все пачки
-    # производителя, и одинаковое начало запроса провайдер берёт из кэша (у DeepSeek —
-    # автоматически, в разы дешевле); при обратном порядке начало менялось с каждой пачкой.
+    # Карточка — первой, требования — после (06.10.2026): одинаковое начало запроса провайдер
+    # берёт из кэша (у DeepSeek — автоматически, в разы дешевле). С 14.10.2026 карточка у
+    # пачек своя (`focus_context`), и из кэша идёт системный промпт, а карточка — только
+    # когда она короче предела и уходит целиком; зато она втрое короче.
     user_text = (
         f"КАРТОЧКА ПРОИЗВОДИТЕЛЯ «{manufacturer.brand_name or manufacturer.legal_name}»:\n{context}\n\n"
         f"ТРЕБОВАНИЯ ЗАКУПКИ:\n{_requirements_block(requirements)}"
@@ -1614,6 +1896,7 @@ def _log(
         f"Производителей обработано: {outcome.manufacturers_processed}; ячеек матрицы: "
         f"{outcome.entries_saved}; требований: {outcome.requirements_total}; "
         f"через руководство: {outcome.manual_fallback_used}; "
+        f"решено кодом без модели: {outcome.prejudged}; "
         f"требуют проверки человеком: {outcome.needs_review}"
     )
     if outcome.messages:

@@ -1,7 +1,9 @@
 from fastapi import APIRouter
 
 from app.api.endpoints import (
+    activity,
     ai_feedback,
+    ai_usage,
     analytics,
     auth,
     company_participations,
@@ -31,6 +33,7 @@ api_router.include_router(users.router)
 api_router.include_router(sources.router)
 api_router.include_router(tenders.router)
 api_router.include_router(ai_feedback.router)
+api_router.include_router(ai_usage.router)
 api_router.include_router(tags.router)
 api_router.include_router(integrations.router)
 api_router.include_router(manufacturers.router)
@@ -42,6 +45,7 @@ api_router.include_router(company_participations.router)
 api_router.include_router(analytics.router)
 api_router.include_router(export.router)
 api_router.include_router(logs.router)
+api_router.include_router(activity.router)
 api_router.include_router(notifications.router)
 api_router.include_router(relevance.router)
 api_router.include_router(integration_api.router)

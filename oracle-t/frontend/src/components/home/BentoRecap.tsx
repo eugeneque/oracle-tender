@@ -2,7 +2,7 @@ import { motion } from "motion/react";
 import type { Variants } from "motion/react";
 import { useCallback, useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { ArrowRight, Check, Plus, Star, X } from "lucide-react";
+import { ArrowRight, Check, Clock3, Plus, Search, Star, X, Zap } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { AiProviderIcon } from "../AiProviderIcon";
@@ -62,6 +62,336 @@ function StepsVisual() {
 }
 
 const VISUALS: Record<string, () => ReactNode> = {
+  "ai-usage": () => (
+    <div className="w-full max-w-[200px] space-y-3">
+      <div className="flex h-16 items-end gap-1">
+        {[35, 55, 30, 80, 45, 100, 60].map((h, n) => (
+          <span
+            key={n}
+            className={`flex-1 rounded-t-[4px] ${n === 5 ? "bg-violet-400" : "bg-violet-500/30"}`}
+            style={{ height: `${h}%` }}
+          />
+        ))}
+      </div>
+      <div className="space-y-1.5 text-[10.5px]">
+        {[
+          ["Разбор документации", "62%"],
+          ["Матрица соответствия", "27%"],
+          ["Каталог", "11%"],
+        ].map(([label, share]) => (
+          <div key={label} className="flex items-center justify-between rounded-lg bg-white/[0.05] px-2.5 py-1.5">
+            <span className="truncate text-zinc-300">{label}</span>
+            <span className="tabular-nums text-violet-300">{share}</span>
+          </div>
+        ))}
+      </div>
+      <div className="text-[10px] text-zinc-500">прогноз на месяц · 4,1 млн токенов</div>
+    </div>
+  ),
+  "ai-errors": () => (
+    <div className="w-full max-w-[210px] space-y-1.5 text-left text-[10.5px]">
+      {[
+        ["Таймаут", "2 из 3", "bg-amber-400"],
+        ["Не по схеме", "повтор", "bg-amber-400"],
+        ["Лимит", "отказ", "bg-rose-400"],
+      ].map(([label, note, dot]) => (
+        <div key={label} className="flex items-center gap-2 rounded-lg bg-white/[0.05] px-2.5 py-1.5">
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} />
+          <span className="min-w-0 flex-1 truncate text-zinc-200">{label}</span>
+          <span className="truncate text-[9.5px] text-zinc-500">{note}</span>
+        </div>
+      ))}
+    </div>
+  ),
+  "analyzed-only": () => (
+    <div className="flex flex-col items-center gap-2.5">
+      <div className="flex items-end gap-4">
+        {[
+          ["128", "в списке", "text-zinc-100"],
+          ["34", "разобрано", "text-emerald-300"],
+        ].map(([count, label, tone]) => (
+          <span key={label} className="flex flex-col items-center">
+            <span className={`text-2xl font-semibold tabular-nums ${tone}`}>{count}</span>
+            <span className="text-[10px] text-zinc-500">{label}</span>
+          </span>
+        ))}
+      </div>
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-3 py-1 text-[11px] text-emerald-200 ring-1 ring-emerald-400/40">
+        <Check size={11} /> Разобранные
+      </span>
+    </div>
+  ),
+  "model-sources": () => (
+    <div className="flex w-full max-w-[420px] gap-2.5 text-left text-[10.5px]">
+      <div className="flex-1 space-y-1">
+        {[
+          ["Ток макс.", "80 А", "сайт", false],
+          ["Класс точности", "1/1", "ГРСИ", false],
+          ["Степень защиты", "IP54", "ИИ", true],
+          ["Интерфейсы", "RS-485, NB-IoT", "сайт", false],
+        ].map(([label, value, source, unchecked]) => (
+          <div key={String(label)} className="flex items-center gap-2 rounded-lg bg-white/[0.05] px-2.5 py-1.5">
+            <span className="min-w-0 flex-1 truncate text-zinc-500">{label}</span>
+            <span className="flex items-center gap-1 text-zinc-100">
+              {value}
+              {unchecked && <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />}
+            </span>
+            <span className="w-9 shrink-0 text-right text-[9.5px] text-amber-300/80">{source}</span>
+          </div>
+        ))}
+      </div>
+      <div className="hidden w-[42%] flex-col gap-1.5 rounded-xl bg-white/[0.04] p-2.5 ring-1 ring-amber-400/25 sm:flex">
+        <span className="text-[10px] font-medium text-zinc-300">Источники данных</span>
+        <span className="flex items-center gap-1.5 text-zinc-400"><Check size={10} className="text-emerald-300" />Сайт производителя</span>
+        <span className="flex items-center gap-1.5 text-zinc-400"><Check size={10} className="text-emerald-300" />Описание типа</span>
+        <span className="flex items-center gap-1.5 text-zinc-500"><X size={10} className="text-rose-300" />Руководство — загрузите PDF</span>
+      </div>
+    </div>
+  ),
+  "top-search": () => (
+    <div className="w-full max-w-[200px] space-y-2 text-left">
+      <div className="flex items-center gap-2 rounded-full bg-white/[0.08] px-3 py-1.5 text-[11px] text-zinc-200 ring-1 ring-sky-400/40">
+        <Search size={12} className="text-sky-300" />
+        счетчик
+      </div>
+      {["Поставка счётчиков ЭЭ", "Счётчики АСКУЭ, монтаж"].map((title) => (
+        <div key={title} className="truncate rounded-lg bg-white/[0.05] px-2.5 py-1.5 text-[10.5px] text-zinc-400">
+          {title.split(/(Счётчик|счётчик)/).map((part, n) =>
+            /ётчик/.test(part) ? <mark key={n} className="rounded-sm bg-sky-400/25 text-sky-100">{part}</mark> : part,
+          )}
+        </div>
+      ))}
+    </div>
+  ),
+  schedule: () => (
+    <div className="flex w-full max-w-[200px] flex-col items-center gap-2.5">
+      <div className="flex gap-2">
+        {["06:00", "20:00"].map((time) => (
+          <span key={time} className="flex items-center gap-1.5 rounded-xl bg-indigo-500/15 px-2.5 py-1.5 text-sm font-semibold tabular-nums text-indigo-200">
+            <Clock3 size={13} /> {time}
+          </span>
+        ))}
+      </div>
+      <div className="relative h-1.5 w-full rounded-full bg-white/[0.07]">
+        <span className="absolute -top-0.5 h-2.5 w-2.5 rounded-full bg-indigo-400" style={{ left: "25%" }} />
+        <span className="absolute -top-0.5 h-2.5 w-2.5 rounded-full bg-indigo-400" style={{ left: "83%" }} />
+      </div>
+      <span className="text-[10px] text-zinc-500">по Москве · запуск и итог — в журнале</span>
+    </div>
+  ),
+  "requirements-view": () => (
+    <div className="flex w-full max-w-[420px] gap-2.5 text-left text-[10.5px]">
+      <div className="flex-1 space-y-1">
+        <span className="block text-[9.5px] uppercase tracking-wider text-sky-300/80">Метрология</span>
+        {["Класс точности 1/2", "Межповерочный интервал 16 лет"].map((text, n) => (
+          <div key={text} className="flex items-center gap-2 rounded-lg bg-white/[0.05] px-2 py-1.5">
+            <span className="w-3 text-right tabular-nums text-zinc-500">{n + 1}</span>
+            <span className="truncate text-zinc-200">{text}</span>
+          </div>
+        ))}
+        <span className="block pt-0.5 text-[9.5px] uppercase tracking-wider text-sky-300/80">Связь</span>
+        <div className="flex items-center gap-2 rounded-lg bg-white/[0.05] px-2 py-1.5">
+          <span className="w-3 text-right tabular-nums text-zinc-500">3</span>
+          <span className="truncate text-zinc-200">RS-485, оптопорт</span>
+        </div>
+      </div>
+      <div className="hidden flex-1 overflow-hidden rounded-xl bg-white/[0.04] sm:block">
+        <div className="grid grid-cols-[1fr_auto_auto] gap-x-2 gap-y-1 p-2 text-[10px]">
+          <span className="text-zinc-500">Требование</span>
+          <span className="text-zinc-300">МИРТЕК</span>
+          <span className="text-zinc-300">Энергомера</span>
+          {[
+            ["1", "bg-emerald-400", "bg-emerald-400"],
+            ["2", "bg-emerald-400", "bg-amber-400"],
+            ["3", "bg-emerald-400", "bg-rose-400"],
+          ].map(([n, a, b]) => (
+            <div key={n} className="contents">
+              <span className="text-zinc-500">№ {n}</span>
+              <span className="flex justify-center"><span className={`mt-1 h-1.5 w-1.5 rounded-full ${a}`} /></span>
+              <span className="flex justify-center"><span className={`mt-1 h-1.5 w-1.5 rounded-full ${b}`} /></span>
+            </div>
+          ))}
+          <span className="pt-1 text-zinc-500">Итог</span>
+          <span className="pt-1 text-center tabular-nums text-emerald-300">100%</span>
+          <span className="pt-1 text-center tabular-nums text-amber-300">67%</span>
+        </div>
+      </div>
+    </div>
+  ),
+  registries: () => (
+    <div className="flex flex-col items-center gap-1.5">
+      {["ГИСП · ПП 719", "ЗАК Россетей"].map((label) => (
+        <span key={label} className="flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1.5 text-[11px] text-emerald-200 ring-1 ring-emerald-400/30">
+          <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-emerald-400 text-snow"><Check size={9} /></span>
+          {label}
+        </span>
+      ))}
+      <span className="pt-1 text-[10px] text-zinc-500">сверка раз в неделю</span>
+    </div>
+  ),
+  "catalog-lean": () => (
+    <div className="w-full max-w-[190px] space-y-2 text-left text-[10px]">
+      <div>
+        <div className="mb-1 flex justify-between text-zinc-500"><span>было</span><span className="tabular-nums">≈ 900 тыс.</span></div>
+        <span className="block h-2 w-full rounded-full bg-white/15" />
+      </div>
+      <div>
+        <div className="mb-1 flex justify-between text-zinc-300"><span>стало</span><span className="tabular-nums text-emerald-300">≈ 90 тыс.</span></div>
+        <span className="block h-2 w-[12%] rounded-full bg-emerald-400" />
+      </div>
+      <span className="block pt-0.5 text-zinc-500">токенов в неделю на каталог</span>
+    </div>
+  ),
+  "marked-lists": () => (
+    <div className="grid w-full max-w-[400px] grid-cols-2 gap-2.5 text-left text-[10.5px]">
+      {[
+        { label: "Релевантные", count: 12, dot: "bg-emerald-400", ring: "ring-emerald-400/30" },
+        { label: "Неактуальные", count: 5, dot: "bg-zinc-500", ring: "ring-white/10" },
+      ].map((list) => (
+        <div key={list.label} className={`rounded-xl bg-white/[0.04] p-2.5 ring-1 ${list.ring}`}>
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="text-zinc-200">{list.label}</span>
+            <span className="tabular-nums text-zinc-500">{list.count}</span>
+          </div>
+          {[80, 62, 70].map((w) => (
+            <div key={w} className="flex items-center gap-1.5 py-1">
+              <span className={`h-1.5 w-1.5 rounded-full ${list.dot}`} />
+              <span className="h-1.5 rounded-full bg-white/15" style={{ width: `${w}%` }} />
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  ),
+  "tz-reference": () => (
+    <div className="w-full max-w-[380px] space-y-1.5 text-left text-[10.5px]">
+      {[
+        { name: "МИРТЕК-32-РУ", note: "эталон ТЗ", pct: "100%", cls: "bg-emerald-500/15 ring-1 ring-emerald-400/40", tone: "text-emerald-300" },
+        { name: "Энергомера CE308", note: "эквивалент · с оговорками", pct: "74%", cls: "bg-white/[0.05]", tone: "text-amber-300" },
+        { name: "Матрица NP73", note: "не проходит", pct: "41%", cls: "bg-white/[0.05]", tone: "text-rose-300" },
+      ].map((row) => (
+        <div key={row.name} className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 ${row.cls}`}>
+          <span className="min-w-0 flex-1 truncate text-zinc-200">{row.name}</span>
+          <span className="truncate text-[9.5px] text-zinc-500">{row.note}</span>
+          <span className={`w-9 text-right tabular-nums ${row.tone}`}>{row.pct}</span>
+        </div>
+      ))}
+    </div>
+  ),
+  selection: () => (
+    <div className="w-full max-w-[380px] space-y-1.5 text-left text-[10.5px]">
+      {[
+        ["Собрано", "2 140", 100],
+        ["Профили", "312", 46],
+        ["Модель", "96", 24],
+        ["В списке", "41", 12],
+      ].map(([label, count, w], n) => (
+        <div key={String(label)} className="flex items-center gap-2">
+          <span className="w-16 shrink-0 text-zinc-500">{label}</span>
+          <span className="h-4 flex-1">
+            <span
+              className={`flex h-full items-center justify-end rounded-md pr-1.5 text-[9.5px] tabular-nums ${n === 3 ? "bg-indigo-400 text-snow" : "bg-indigo-500/25 text-indigo-200"}`}
+              style={{ width: `${Math.max(Number(w), 14)}%` }}
+            >
+              {count}
+            </span>
+          </span>
+        </div>
+      ))}
+    </div>
+  ),
+  "brand-lock": () => (
+    <div className="w-full max-w-[360px] space-y-2 text-left">
+      <div className="rounded-xl bg-white/[0.05] p-2.5 text-[10.5px] leading-relaxed text-zinc-400">
+        Счётчик <span className="rounded bg-rose-400/20 px-1 text-rose-200">Энергомера CE208</span> — 450 шт.,{" "}
+        <span className="rounded bg-rose-400/20 px-1 text-rose-200">эквивалент не допускается</span>
+      </div>
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-500/15 px-2.5 py-1 text-[10.5px] text-rose-200">
+        <X size={11} /> ТЗ под чужой товарный знак
+      </span>
+    </div>
+  ),
+  feeds: () => (
+    <div className="w-full max-w-[180px] space-y-1.5 text-left text-[11px]">
+      {[
+        ["ЕИС", false],
+        ["Сбербанк-АСТ", false],
+        ["Госплан", false],
+        ["Тендерплан", true],
+      ].map(([name, isNew]) => (
+        <div
+          key={String(name)}
+          className={`flex items-center justify-between rounded-lg px-2.5 py-1.5 ${isNew ? "bg-sky-500/15 ring-1 ring-sky-400/40" : "bg-white/[0.05]"}`}
+        >
+          <span className={isNew ? "text-sky-100" : "text-zinc-400"}>{name}</span>
+          {isNew ? <span className="text-[9.5px] text-sky-300">новый</span> : <span className="h-1.5 w-1.5 rounded-full bg-emerald-400/70" />}
+        </div>
+      ))}
+    </div>
+  ),
+  "no-auto-analysis": () => (
+    <div className="w-full max-w-[180px] space-y-1.5 text-[10.5px]">
+      {["Документы", "Карточка площадки"].map((label) => (
+        <div key={label} className="flex items-center gap-2 rounded-lg bg-white/[0.05] px-2.5 py-1.5 text-zinc-300">
+          <Check size={11} className="text-emerald-300" /> {label}
+        </div>
+      ))}
+      <div className="rounded-full border border-dashed border-white/20 py-1.5 text-center text-zinc-400">Разобрать — по кнопке</div>
+    </div>
+  ),
+  "job-queue": () => (
+    <div className="w-full max-w-[190px] space-y-1.5 text-left text-[10.5px]">
+      {[
+        ["0373100…41", 70],
+        ["3245000…07", 25],
+      ].map(([id, progress]) => (
+        <div key={String(id)} className="rounded-lg bg-white/[0.05] px-2.5 py-1.5">
+          <div className="flex items-center justify-between">
+            <span className="font-mono text-zinc-300">{id}</span>
+            <span className="text-[9.5px] text-rose-300">Отменить</span>
+          </div>
+          <span className="mt-1 block h-1 rounded-full bg-white/10">
+            <span className="block h-full rounded-full bg-amber-400" style={{ width: `${progress}%` }} />
+          </span>
+        </div>
+      ))}
+    </div>
+  ),
+  "meter-vpu": () => (
+    <div className="flex flex-col items-center gap-2 text-[11px]">
+      <span className="rounded-full bg-white/[0.06] px-3 py-1 text-zinc-500 line-through decoration-rose-400/70">Счётчик ЭЭ</span>
+      <span className="rounded-full bg-amber-500/15 px-3 py-1 text-amber-200 ring-1 ring-amber-400/40">ВПУ · 6–10 кВ</span>
+    </div>
+  ),
+  "deepseek-fast": () => (
+    <div className="flex flex-col items-center gap-2">
+      <div className="flex items-center gap-2 tabular-nums">
+        <span className="text-sm text-zinc-500 line-through">18 мин</span>
+        <ArrowRight size={13} className="text-zinc-600" />
+        <span className="text-2xl font-semibold text-sky-200">3,5 мин</span>
+      </div>
+      <span className="flex items-center gap-1.5 text-[10.5px] text-zinc-500">
+        <AiProviderIcon provider="deepseek" size={14} /> полный разбор <Zap size={11} className="text-sky-300" />
+      </span>
+    </div>
+  ),
+  "catalog-hide-eol": () => (
+    <div className="w-full max-w-[180px] space-y-2 text-[10.5px]">
+      <div className="flex rounded-full bg-white/[0.06] p-0.5">
+        <span className="flex-1 rounded-full bg-rose-500/25 py-1 text-center text-rose-100">В выпуске</span>
+        <span className="flex-1 py-1 text-center text-zinc-500">Все</span>
+      </div>
+      {[
+        ["МИРТЕК-12-РУ", true],
+        ["МИРТЕК-1-РУ", false],
+      ].map(([name, active]) => (
+        <div key={String(name)} className={`flex items-center justify-between rounded-lg bg-white/[0.05] px-2.5 py-1.5 ${active ? "text-zinc-200" : "text-zinc-600"}`}>
+          <span className={active ? "" : "line-through"}>{name}</span>
+          {!active && <span className="text-[9px]">снят</span>}
+        </div>
+      ))}
+    </div>
+  ),
   bitrix: () => (
     <div className="w-full max-w-[250px] space-y-2">
       <div className="flex gap-1">

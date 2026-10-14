@@ -140,6 +140,7 @@ def enqueue(
         product_id=product_id,
         si_type_id=si_type_id,
         model_name=model_name,
+        created_by_id=actor_id,
         details={},
     )
     db.add(task)

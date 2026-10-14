@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -48,6 +49,7 @@ from app.models.manufacturer import (
     SiType,
 )
 from app.services import characteristic_extraction, characteristic_values, si_type_linking
+from app.services.ai_client import AiQuotaExceededError
 from app.services.audit import log_action
 
 COMPONENT = "product_catalog"
@@ -59,6 +61,42 @@ DOCUMENT_SOURCE = "any"
 # Сколько знаков документа отдавать модели. «Описание типа» — 10-25 листов; технические
 # характеристики стоят в первой половине, дальше — знаки утверждения, комплектность, поверка.
 MAX_DESCRIPTION_CHARS = 45_000
+
+
+
+def _heading(*names: str) -> re.Pattern[str]:
+    return re.compile(r"^\s*(" + "|".join(names) + r")\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+# Разделы «Описания типа», в которых характеристик прибора нет никогда: идентификация ПО
+# (версии и контрольные суммы), знак утверждения, методики, правообладатель, испытательный
+# центр. Шаблон документа задан Росстандартом, заголовки стоят отдельными строками.
+# Вырезаются скриптом до вызова модели (14.10.2026): на 194 описаниях в базе это 16% текста,
+# за которые модель ничего не возвращала. Пара «начало — конец»: вырезается от начала до
+# следующего полезного раздела; если конец не найден, раздел остаётся — лучше лишнее, чем
+# потерянная таблица характеристик.
+_BOILERPLATE_SECTIONS: tuple[tuple[re.Pattern[str], re.Pattern[str] | None], ...] = (
+    (_heading("Программное обеспечение"), _heading("Метрологические и технические характеристики")),
+    (_heading("Знак утверждения типа"), _heading("Нормативные (и технические )?документы.*", "Нормативные правовые.*")),
+    (_heading("Правообладатель"), _heading("Изготовитель")),
+    (_heading("Испытательный центр"), None),
+)
+_PAGE_LINE_RE = re.compile(r"^\s*(Лист № ?\d+|Всего листов \d+)\s*$", re.MULTILINE)
+
+
+def strip_boilerplate(text: str) -> str:
+    """«Описание типа» без разделов, где не бывает характеристик (см. выше)."""
+
+    for start, end in _BOILERPLATE_SECTIONS:
+        head = start.search(text)
+        if head is None:
+            continue
+        tail = end.search(text, head.end()) if end is not None else None
+        if end is not None and tail is None:
+            continue
+        text = text[: head.start()] + (text[tail.start():] if tail is not None else "")
+    return _PAGE_LINE_RE.sub("", text)
+
 
 # Значение версии для типов, у которых реестр версию не сообщает: сравнивать нужно с чем-то
 # стабильным, иначе NULL != NULL заставлял бы перечитывать документ каждый проход.
@@ -106,7 +144,14 @@ def ingest_description_types(
 
         version = si_type.description_type_version or _NO_VERSION
         stale = refresh or si_type.description_type_extracted_version != version
-        targets = [p for p in products if stale or not _has_fgis_characteristics(db, p)]
+        # Модель без характеристик читается заново, только если эту редакцию она ещё не
+        # получала: пустой результат по той же редакции не изменится, а стоит токенов
+        # (14.10.2026, `Product.fgis_description_read_version`).
+        targets = [
+            p
+            for p in products
+            if stale or (not _has_fgis_characteristics(db, p) and p.fgis_description_read_version != version)
+        ]
         if not targets:
             outcome.skipped_up_to_date += 1
             db.commit()
@@ -139,9 +184,15 @@ def ingest_description_types(
         try:
             reading = characteristic_extraction.read_characteristics(
                 db,
-                text=si_type.description_type_text[:MAX_DESCRIPTION_CHARS],
+                text=strip_boilerplate(si_type.description_type_text)[:MAX_DESCRIPTION_CHARS],
                 document_source=DOCUMENT_SOURCE,
             )
+        except AiQuotaExceededError as exc:
+            # Лимит, отклонённый ключ, нет связи — следующие описания получат тот же отказ.
+            outcome.failed += 1
+            outcome.messages.append(f"Разбор моделью остановлен: {exc}")
+            logger.warning(f"Аршин: разбор «Описаний типа» остановлен: {exc}")
+            break
         except Exception as exc:  # noqa: BLE001 - недоступность модели не должна ронять проход
             outcome.failed += 1
             outcome.messages.append(f"{si_type.si_code}: разбор моделью не удался: {exc}")
@@ -154,6 +205,7 @@ def ingest_description_types(
             saved += _decode_modification(db, si_type, product, outcome)
             outcome.characteristics_saved += saved
             outcome.products_updated += 1
+            product.fgis_description_read_version = version
 
         si_type.description_type_extracted_version = version
         db.commit()

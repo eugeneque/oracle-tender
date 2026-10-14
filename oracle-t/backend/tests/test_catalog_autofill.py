@@ -218,7 +218,8 @@ def test_empty_manufacturers_go_first_and_enrichment_after_all(db_session, manuf
     order = [m.id for m in catalog_autofill.queue_order(db_session)]
     assert order.index(empty.id) < order.index(manufacturer.id)
 
-    catalog_autofill.enqueue_all(db_session)
+    # Второй проход (модель ИИ) ставится ручным запуском; плановый — без него, ниже.
+    catalog_autofill.enqueue_all(db_session, with_learning=True)
     tasks = list(
         db_session.scalars(
             select(CatalogLookupTask)
@@ -230,6 +231,23 @@ def test_empty_manufacturers_go_first_and_enrichment_after_all(db_session, manuf
     assert keys == [catalog_autofill.ADAPTER_KEY] * 2 + [catalog_autofill.ENRICH_KEY] * 2
     status = {r["manufacturer_id"]: r for r in catalog_autofill.status_by_manufacturer(db_session)}
     assert status[empty.id]["enriching"] is True
+
+
+def test_scheduled_run_skips_ai_enrichment(db_session, manufacturer, steps):
+    """Плановый опрос (без автора) не ставит второй проход с моделью ИИ: он раз в неделю
+    или по кнопке (14.10.2026 — дважды в день он перечитывал те же документы)."""
+
+    from sqlalchemy import select
+
+    from app.models.catalog_queue import CatalogLookupTask
+
+    catalog_autofill.enqueue_all(db_session)
+    keys = set(
+        db_session.scalars(
+            select(CatalogLookupTask.adapter_key).where(CatalogLookupTask.manufacturer_id == manufacturer.id)
+        )
+    )
+    assert keys == {catalog_autofill.ADAPTER_KEY}
 
 
 def test_enqueue_all_during_a_run_does_not_requeue_finished(db_session, manufacturer, steps):

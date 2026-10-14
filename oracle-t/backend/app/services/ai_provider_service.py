@@ -23,6 +23,7 @@ RouterAI (`app/services/gigachat_client.py`). Ключ у заказчика е�
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -81,6 +82,44 @@ DEFAULT_GIGACHAT_MODEL = "GigaChat-2-Max"
 DEFAULT_GIGACHAT_BASE_URL = "https://gigachat.devices.sberbank.ru/api/v1"
 
 
+@dataclass(frozen=True)
+class ModelLimits:
+    """Окно контекста модели и потолок её ответа, в токенах (14.10.2026)."""
+
+    context_tokens: int
+    max_output_tokens: int
+
+
+# Окно и потолок ответа по умолчанию. До 14.10.2026 потолок ответа был зашит в клиенты, а
+# предел карточки производителя — в матрицу (70 тыс. символов под окно YandexGPT); на модели
+# с окном 32 тыс. (ускоритель с Qwen) запрос с потолком ответа 16 тыс. в окно не помещался.
+# Теперь администратор задаёт оба числа на модель, а объём текста в запросе считается от них
+# (`input_budget_chars`).
+# - YandexGPT: окно 32 768 («number of input tokens must be no more than 32768», 25.09.2026);
+#   8000 — потолок ответа моделей YandexGPT: без него длинный JSON обрывался посреди строки.
+# - Claude через RouterAI: окно 1 млн по данным RouterAI; ответ 16 тыс. покрывает самые
+#   длинные списки требований, обрыв ловится по `finish_reason` и лечится повтором.
+# - DeepSeek, GigaChat: 128 тыс. — СВЕРИТЬ по тарифу; ответ — как у Claude.
+DEFAULT_MODEL_LIMITS: dict[str, ModelLimits] = {
+    PROVIDER_YANDEX: ModelLimits(context_tokens=32_768, max_output_tokens=8_000),
+    PROVIDER_CLAUDE: ModelLimits(context_tokens=1_000_000, max_output_tokens=16_000),
+    PROVIDER_DEEPSEEK: ModelLimits(context_tokens=128_000, max_output_tokens=16_000),
+    PROVIDER_GIGACHAT: ModelLimits(context_tokens=128_000, max_output_tokens=16_000),
+}
+MIN_CONTEXT_TOKENS = 4_096
+MAX_CONTEXT_TOKENS = 2_000_000
+MIN_OUTPUT_TOKENS = 256
+
+# Сколько символов нашего текста приходится на токен — для перевода окна в объём текста.
+# Оценка снизу: на русском техническом тексте YandexGPT принимал карточку в 70 тыс. символов
+# с промптом и требованиями (~79 тыс.) в окне 32 768, то есть не меньше 2,4 символа на
+# токен. Фактическое отношение по каждой модели видно в «Детализации ИИ» (по счётчикам
+# провайдеров), и если оно заметно выше — константу можно поднять.
+CHARS_PER_TOKEN = 2.4
+# Запас на служебные токены разметки сообщений и схему ответа, которые в длину текста не входят.
+SAFETY_TOKENS = 1_000
+
+
 class AiNotConfiguredError(RuntimeError):
     """У активного провайдера не заполнены учётные данные. Общий предок для ошибок обоих
     провайдеров: вызывающий код (эндпоинты, фоновые задачи) ловит его и показывает
@@ -92,6 +131,15 @@ class AiQuotaExceededError(RuntimeError):
     сетевого сбоя, повтор тут не поможет — вызывающий код прекращает обращения и показывает
     текст как есть (28.09.2026: ключ RouterAI упёрся в месячный лимит 1 500 руб., а карточка
     писала «модель не вернула ни одного раздела — попробуйте ещё раз»)."""
+
+
+class AiUnavailableError(AiQuotaExceededError):
+    """Провайдер отклонил ключ (HTTP 401/403) — повтор тоже не поможет. Сетевой сбой сюда
+    не относится: он бывает разовым, и клиенты повторяют запрос сами. Наследник `AiQuotaExceededError` намеренно — у них одно
+    поведение: запрос переключается на YandexGPT, если тот подключён, а фоновые разборы
+    прекращают обращения после первого же отказа. До 14.10.2026 такой отказ считался сбоем
+    одного куска: разбор каталога с отклонённым ключом сделал 1 485 обращений за 2,5 часа,
+    по одному на каждый кусок каждого документа."""
 
 
 class AiModelDisabledError(AiNotConfiguredError):
@@ -257,6 +305,128 @@ def _is_configured(db: Session, provider: str) -> bool:
 
 def is_provider_configured(db: Session, provider: str) -> bool:
     return _is_configured(db, provider)
+
+
+# --- окно контекста (14.10.2026) -----------------------------------------------------------
+
+
+def _stored_limits(db: Session | None) -> dict:
+    # Отдельным SELECT, как `get_disabled_providers`: фоновая задача живёт долго, а правка
+    # окна администратором должна действовать со следующего запроса. Без сессии (клиент
+    # модели вызван вне БД, как в тестах фильтра Yandex) — значения по умолчанию.
+    if db is None:
+        return {}
+    return (
+        db.execute(
+            select(AiProviderSettings.model_limits).where(AiProviderSettings.id == _SINGLETON_ID)
+        ).scalar_one_or_none()
+        or {}
+    )
+
+
+def get_model_limits(db: Session | None, provider: str) -> ModelLimits:
+    """Окно и потолок ответа модели: заданные администратором поверх значений по умолчанию.
+    Испорченное значение в БД (не число) молча заменяется умолчанием — из-за него не должен
+    вставать весь разбор."""
+
+    default = DEFAULT_MODEL_LIMITS.get(provider, DEFAULT_MODEL_LIMITS[PROVIDER_YANDEX])
+    stored = _stored_limits(db).get(provider) or {}
+
+    def _value(key: str, fallback: int) -> int:
+        try:
+            return int(stored.get(key) or fallback)
+        except (TypeError, ValueError):
+            return fallback
+
+    return ModelLimits(
+        context_tokens=_value("context_tokens", default.context_tokens),
+        max_output_tokens=_value("max_output_tokens", default.max_output_tokens),
+    )
+
+
+def input_budget_chars(db: Session, provider: str) -> int:
+    """Сколько символов текста (системный промпт + сообщение) помещается в один запрос к
+    модели: окно минус потолок ответа и служебный запас, в пересчёте на символы. Потолок
+    ответа вычитается целиком: у OpenAI-совместимых серверов (vLLM на ускорителе) вход и
+    `max_tokens` делят одно окно, и запрос, где их сумма больше окна, отклоняется сразу."""
+
+    limits = get_model_limits(db, provider)
+    tokens = limits.context_tokens - limits.max_output_tokens - SAFETY_TOKENS
+    return max(0, int(tokens * CHARS_PER_TOKEN))
+
+
+def limits_overview(db: Session) -> list[dict]:
+    """Окно и потолок ответа всех моделей для страницы «Интеграции»: текущие, по умолчанию и
+    сколько символов это даёт на запрос."""
+
+    stored = _stored_limits(db)
+    rows = []
+    for provider, label in PROVIDER_LABELS.items():
+        limits = get_model_limits(db, provider)
+        default = DEFAULT_MODEL_LIMITS[provider]
+        rows.append(
+            {
+                "provider": provider,
+                "label": label,
+                "context_tokens": limits.context_tokens,
+                "max_output_tokens": limits.max_output_tokens,
+                "default_context_tokens": default.context_tokens,
+                "default_max_output_tokens": default.max_output_tokens,
+                "is_default": provider not in stored,
+                "input_budget_chars": input_budget_chars(db, provider),
+            }
+        )
+    return rows
+
+
+def update_model_limits(
+    db: Session,
+    provider: str,
+    *,
+    context_tokens: int | None,
+    max_output_tokens: int | None,
+    actor: User,
+) -> list[dict]:
+    """Задаёт окно и потолок ответа модели. Оба `None` — вернуть значения по умолчанию.
+    Ошибки проверки — `ValueError` с текстом для пользователя: окно меньше потолка ответа
+    оставило бы на сам текст ноль символов, и каждый разбор падал бы уже у провайдера."""
+
+    if provider not in PROVIDER_LABELS:
+        raise ValueError(f"Неизвестный провайдер: {provider}")
+    settings = _get_or_create(db)
+    limits = dict(settings.model_limits or {})
+    if context_tokens is None and max_output_tokens is None:
+        limits.pop(provider, None)
+        details = f"{PROVIDER_LABELS[provider]}: окно контекста — по умолчанию"
+    else:
+        default = DEFAULT_MODEL_LIMITS[provider]
+        context = context_tokens or default.context_tokens
+        output = max_output_tokens or default.max_output_tokens
+        if not MIN_CONTEXT_TOKENS <= context <= MAX_CONTEXT_TOKENS:
+            raise ValueError(
+                f"Окно контекста — от {MIN_CONTEXT_TOKENS:,} до {MAX_CONTEXT_TOKENS:,} токенов".replace(",", " ")
+            )
+        if output < MIN_OUTPUT_TOKENS or output > context // 2:
+            raise ValueError(
+                f"Потолок ответа — от {MIN_OUTPUT_TOKENS} токенов и не больше половины окна "
+                f"({context // 2:,} токенов): остальное окно нужно под сам текст".replace(",", " ")
+            )
+        limits[provider] = {"context_tokens": context, "max_output_tokens": output}
+        details = f"{PROVIDER_LABELS[provider]}: окно {context}, ответ до {output} токенов"
+    # Новый словарь — JSONB без MutableDict изменений внутри не видит.
+    settings.model_limits = limits
+    settings.updated_by_id = actor.id
+    log_action(
+        db,
+        component="integrations",
+        action="update_ai_model_limits",
+        result="success",
+        level=LogLevel.INFO,
+        details=details,
+        user_id=actor.id,
+    )
+    db.commit()
+    return limits_overview(db)
 
 
 def _model_name(db: Session, provider: str) -> str | None:
@@ -490,6 +660,11 @@ def test_routerai_connection(db: Session, *, actor: User) -> YandexConnectionTes
         details=result.message,
         user_id=actor.id,
     )
+    if not result.success:
+        # Отказ проверки — тоже ошибка обращения к модели: в журнал ИИ (14.10.2026).
+        from app.services.ai_log_service import log_ai_event
+
+        log_ai_event(db, action="Проверка подключения не прошла", error=result.message)
     db.commit()
     return result
 
@@ -591,5 +766,10 @@ def test_gigachat_connection(db: Session, *, actor: User) -> YandexConnectionTes
         details=result.message,
         user_id=actor.id,
     )
+    if not result.success:
+        # Отказ проверки — тоже ошибка обращения к модели: в журнал ИИ (14.10.2026).
+        from app.services.ai_log_service import log_ai_event
+
+        log_ai_event(db, action="Проверка подключения не прошла", error=result.message)
     db.commit()
     return result

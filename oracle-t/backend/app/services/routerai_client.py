@@ -30,14 +30,15 @@ from app.services.ai_provider_service import (
     PROVIDER_DEEPSEEK,
     PROVIDER_LABELS,
     AiQuotaExceededError,
+    AiUnavailableError,
+    get_model_limits,
     get_routerai_credentials,
 )
+from app.services.ai_usage_service import record_call, usage_from_openai
 
 DEFAULT_TIMEOUT_SECONDS = 180.0
-# Потолок длины ответа. Самые длинные ответы — списки требований из документации (десятки
-# пунктов с нормализованным текстом); 16 тыс. токенов покрывают их с запасом, а обрыв по
-# лимиту ловится по `finish_reason` и лечится повтором, как у Yandex.
-MAX_OUTPUT_TOKENS = 16_000
+# Потолок длины ответа — из настроек модели (`ai_provider_service.get_model_limits`, 14.10.2026):
+# у Claude с окном в миллион хватает 16 тыс., у модели с окном 32 тыс. столько не помещается.
 
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 3.0
@@ -63,6 +64,10 @@ ResponseT = TypeVar("ResponseT", bound=pydantic.BaseModel)
 class RouterAiError(RuntimeError):
     """Шлюз ответил ошибкой. Текст — из тела ответа: там причина (неверный ключ, нет средств,
     модель недоступна), а код статуса сам по себе мало что говорит."""
+
+
+class RouterAiUnavailableError(RouterAiError, AiUnavailableError):
+    """Ключ отклонён (HTTP 401/403) — см. `AiUnavailableError`."""
 
 
 class RouterAiQuotaError(RouterAiError, AiQuotaExceededError):
@@ -152,6 +157,11 @@ def _chat_completion(
                 f"(HTTP {response.status_code}: {detail}). Повтор не поможет — поднимите лимит "
                 f"в кабинете RouterAI или переключитесь на YandexGPT"
             )
+        if response.status_code in (401, 403):
+            raise RouterAiUnavailableError(
+                f"RouterAI отклонил ключ (HTTP {response.status_code}: {detail}). Повтор не "
+                f"поможет — проверьте ключ на странице «Интеграции»"
+            )
         raise RouterAiError(f"HTTP {response.status_code}: {detail}")
     return response.json()
 
@@ -197,6 +207,8 @@ def run_structured(
 
     api_key, model, base_url = get_routerai_credentials(db, provider)
     name = f"{PROVIDER_LABELS.get(provider, provider)} (RouterAI)"
+    max_tokens = get_model_limits(db, provider).max_output_tokens
+    prompt_chars = len(system_prompt) + len(user_text)
 
     schema = _strict_schema(response_model.model_json_schema())
     response_format = {
@@ -212,6 +224,26 @@ def run_structured(
     raw_text = ""
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         started = time.monotonic()
+        payload: dict[str, Any] | None = None
+        raw_text = ""
+
+        def _record(status: str, error: Exception | None = None) -> None:
+            # Каждая попытка — отдельная запись: повтор оплачивается так же, как первый запрос.
+            record_call(
+                db,
+                provider=provider,
+                model=model,
+                operation=response_model.__name__,
+                prompt_chars=prompt_chars,
+                completion_chars=len(raw_text),
+                usage=usage_from_openai(payload),
+                duration_s=time.monotonic() - started,
+                status=status,
+                attempt=attempt,
+                attempts=RETRY_ATTEMPTS,
+                error=str(error) if error else None,
+            )
+
         try:
             payload = _chat_completion(
                 api_key=api_key,
@@ -219,7 +251,7 @@ def run_structured(
                 base_url=base_url,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=MAX_OUTPUT_TOKENS,
+                max_tokens=max_tokens,
                 response_format=response_format,
                 timeout=DEFAULT_TIMEOUT_SECONDS,
                 extra_body=_PROVIDER_EXTRA_BODY.get(provider),
@@ -234,10 +266,14 @@ def run_structured(
             raw_text = _strip_fences(_message_text(choice.get("message") or {}))
             if choice.get("finish_reason") == "length":
                 raise RouterAiError("ответ оборван по лимиту токенов")
-            return response_model.model_validate(_coerce_shape(raw_text, response_model))
-        except AiQuotaExceededError:
+            result = response_model.model_validate(_coerce_shape(raw_text, response_model))
+            _record("success")
+            return result
+        except AiQuotaExceededError as exc:
+            _record("quota", exc)
             raise
         except (pydantic.ValidationError, ValueError) as exc:
+            _record("invalid", exc)
             last_error = exc
             logger.warning(
                 f"{name} вернул ответ, не соответствующий схеме "
@@ -245,6 +281,7 @@ def run_structured(
                 f"начало ответа: {raw_text[:300]!r}"
             )
         except Exception as exc:  # noqa: BLE001 - сетевые сбои и лимиты тоже лечатся повтором
+            _record("invalid" if payload is not None else "error", exc)
             last_error = exc
             logger.warning(
                 f"Обращение к {name} не удалось (попытка {attempt} из "

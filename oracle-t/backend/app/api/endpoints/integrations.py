@@ -8,6 +8,8 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.integration import ApiClientCreate, ApiClientCreated, ApiClientOut
 from app.schemas.integration_setting import (
+    AiModelLimitsOut,
+    AiModelLimitsUpdate,
     AiProviderEnabledUpdate,
     AiProviderKey,
     AiProviderStatus,
@@ -104,6 +106,37 @@ def set_ai_provider_enabled(
     ни одного запроса, а начатые через неё задачи останавливаются."""
 
     return ai_provider_service.set_provider_enabled(db, provider, payload.enabled, actor=admin)
+
+
+@router.get("/ai-limits", response_model=list[AiModelLimitsOut])
+def get_ai_model_limits(
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> list[dict]:
+    """Окно контекста и потолок ответа всех моделей (14.10.2026)."""
+
+    return ai_provider_service.limits_overview(db)
+
+
+@router.put("/ai-limits/{provider}", response_model=list[AiModelLimitsOut])
+def update_ai_model_limits(
+    provider: AiProviderKey,
+    payload: AiModelLimitsUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> list[dict]:
+    """Задаёт окно контекста и потолок ответа модели; пустые поля — по умолчанию."""
+
+    try:
+        return ai_provider_service.update_model_limits(
+            db,
+            provider,
+            context_tokens=payload.context_tokens,
+            max_output_tokens=payload.max_output_tokens,
+            actor=admin,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.get("/routerai", response_model=RouterAiSettingsOut)

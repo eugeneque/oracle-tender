@@ -13,6 +13,7 @@ import {
   Database,
   Download,
   FilePlus2,
+  FileCheck2,
   Filter,
   Loader2,
   MoreHorizontal,
@@ -55,7 +56,8 @@ import { DropdownMenu } from "../components/DropdownMenu";
 import { NewRequestModal } from "../components/NewRequestModal";
 import { OkpdPickerModal } from "../components/OkpdTreePicker";
 import { ProfilePicker } from "../components/ProfilePicker";
-import { SelectionFunnelBar } from "../components/SelectionFunnelBar";
+import { SelectionCounter } from "../components/SelectionFunnelBar";
+import { PageHeaderPortal } from "../components/nav/PageHeaderSlot";
 import { SelectionGuideModal } from "../components/SelectionGuide";
 import { RelevanceProfilesModal } from "../components/RelevanceProfilesModal";
 import { TenderDetailModal } from "../components/TenderDetailModal";
@@ -73,7 +75,6 @@ import {
   daysLeft,
   formatPrice,
   percentValue,
-  plural,
   scoreBadgeClass,
 } from "../utils/format";
 
@@ -397,6 +398,9 @@ interface TendersFilters {
    * скрытия просроченных: иначе у каждого был бы свой список, а смысл раздела в том, что
    * коллеги видят одно и то же. */
   markedList: MarkedList | null;
+  /** Только разобранные закупки (14.10.2026): ИИ-разбор уже извлёк требования. Обычный
+   * фильтр поверх текущей выборки — профили, срок подачи и раздел продолжают действовать. */
+  analyzedOnly: boolean;
   /** Теги (замечание 17.09.2026): закупка проходит, если у неё есть хотя бы один из них. */
   tagIds: string[];
 }
@@ -443,6 +447,7 @@ const DEFAULT_FILTERS: TendersFilters = {
   favouritesOnly: false,
   minutesOnly: false,
   markedList: null,
+  analyzedOnly: false,
   tagIds: [],
   regionCodes: [],
   tenderTypes: [],
@@ -522,6 +527,7 @@ function buildFilterParams(filters: TendersFilters): URLSearchParams {
   if (filters.favouritesOnly) params.set("bookmarked", "true");
   if (filters.minutesOnly) params.set("same_day", "true");
   if (filters.markedList) params.set("marked", filters.markedList);
+  if (filters.analyzedOnly) params.set("analyzed", "true");
   // Разделы «Избранное», «Релевантные», «Неактуальные» — вне личных профилей, проверки
   // моделью и срока подачи: отмеченная закупка не должна пропадать из общего списка.
   const sharedSection = filters.favouritesOnly || filters.markedList !== null;
@@ -1170,6 +1176,7 @@ function countActiveFilters(filters: TendersFilters): number {
   if (filters.favouritesOnly) count += 1;
   if (filters.minutesOnly) count += 1;
   if (filters.markedList) count += 1;
+  if (filters.analyzedOnly) count += 1;
   if (filters.tagIds.length > 0) count += 1;
   if (filters.relevanceProfileIds !== null) count += 1;
   return count;
@@ -1276,6 +1283,9 @@ export function TendersPage() {
   // Сколько закупок собрано всего — знаменатель для строки «показано N из M»: список по
   // умолчанию отфильтрован (открытые, прошедшие профиль), и без знаменателя это не видно.
   const [total, setTotal] = useState(0);
+  // Сколько из `total` уже разобрано — отдельным числом рядом с общим (14.10.2026).
+  // `null` — не знаем (доска его не считает), тогда чип раздела показывается без числа.
+  const [analyzedTotal, setAnalyzedTotal] = useState<number | null>(null);
   const [board, setBoard] = useState<TenderBoard | null>(null);
   const [offset, setOffset] = useState(0);
   const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({
@@ -1298,6 +1308,7 @@ export function TendersPage() {
         const page = await api.get<TenderPage>(`/tenders?${query}`);
         setTenders(page.items);
         setTotal(page.total);
+        setAnalyzedTotal(page.analyzed_total);
         setError(null);
       } catch (err) {
         setError(
@@ -1666,15 +1677,12 @@ export function TendersPage() {
           закупки. `min-h-0` обязателен: без него flex-потомок не сжимается и внутренний
           скролл не включается. */}
       <div className="flex h-full flex-col px-6 pb-4 pt-4">
-        {/* Шапка страницы (переделана 28.09.2026): заголовок, поиск, виды, фильтры и
-            синхронизация — одной строкой. Раньше над списком стояли три яруса — хлебные
-            крошки с заголовком и четырьмя кнопками, строка поиска, строка состояния в рамке —
-            и забирали у карточки закупки почти двести пикселей. Редкие действия (ручная
-            заявка, выбор площадок, выгрузка) переехали в меню «⋯». */}
-        <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
-          <h1 className="mr-1 text-xl font-semibold tracking-tight text-white">Тендеры</h1>
-
-          <div className="relative min-w-[220px] flex-1">
+        {/* Шапка страницы (переделана 14.10.2026): заголовок, число закупок в списке и
+            действия. Поиск переехал в верхнюю полосу приложения (PageHeaderPortal), а
+            развёрнутая воронка отбора — в хинт у числа: тысячи «собрано/отсеяно» в работе не
+            нужны, нужен ответ «сколько передо мной и почему». */}
+        <PageHeaderPortal>
+          <div className="relative w-full">
             <Search
               size={14}
               className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600"
@@ -1682,7 +1690,7 @@ export function TendersPage() {
             <input
               value={filters.search}
               onChange={(e) => updateFilters({ search: e.target.value })}
-              placeholder="Поиск по названию или заказчику"
+              placeholder="Поиск закупок по названию или заказчику"
               className="h-9 w-full rounded-lg border border-white/[0.08] bg-white/[0.03] pl-9 pr-8 text-sm text-white placeholder-zinc-600 outline-none focus:border-indigo-500"
             />
             {filters.search && (
@@ -1695,7 +1703,38 @@ export function TendersPage() {
               </button>
             )}
           </div>
+        </PageHeaderPortal>
 
+        <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2">
+          <h1 className="text-xl font-semibold tracking-tight text-white">Тендеры</h1>
+
+          <SelectionCounter
+            funnel={funnel}
+            isLoading={isLoading}
+            feedLabel={feedLabel}
+            profilesLabel={profilesLabel}
+            favouritesOnly={filters.favouritesOnly}
+            favouritesTotal={shownTotal}
+            onExitFavourites={() => updateFilters({ favouritesOnly: false })}
+            onClearProfiles={() => updateFilters({ relevanceProfileIds: [] })}
+            onDisableAi={() => updateFilters({ hideAiRejected: false })}
+            onResetFilters={() =>
+              updateFilters({
+                ...DEFAULT_FILTERS,
+                feed,
+                hideExpired: false,
+                relevanceProfileIds: filters.relevanceProfileIds,
+                relevanceProfileMode: filters.relevanceProfileMode,
+                hideAiRejected: filters.hideAiRejected,
+                minutesOnly: filters.minutesOnly,
+                markedList: filters.markedList,
+              })
+            }
+            onOpenGuide={() => setIsGuideOpen(true)}
+            onEditProfiles={() => setIsProfilesOpen(true)}
+          />
+
+          <div className="ml-auto flex items-center gap-2">
           <DropdownMenu
             title="Ещё действия"
             trigger={<MoreHorizontal size={17} />}
@@ -1751,6 +1790,7 @@ export function TendersPage() {
             <RefreshCw size={14} className={isSyncing ? "animate-spin" : ""} />
             {isSyncing ? "Синхронизация…" : "Синхронизировать"}
           </button>
+          </div>
         </div>
 
         {/* Вторая строка — всё, что управляет ВЫДАЧЕЙ: откуда закупки, по какому профилю,
@@ -1812,6 +1852,86 @@ export function TendersPage() {
           </button>
 
           <SortMenu sort={sort} onChange={changeSort} />
+
+          {/* «Разобранные» — переключатель в одном ряду с остальным управлением выдачей
+              (14.10.2026): раньше маленьким чипом у правого края под строкой фильтров, где
+              его не находили. Число — сколько закупок выборки уже разобрано. */}
+          <button
+            onClick={() => updateFilters({ analyzedOnly: !filters.analyzedOnly })}
+            aria-pressed={filters.analyzedOnly}
+            title={
+              filters.analyzedOnly
+                ? "Показать все закупки выборки"
+                : "Показать только разобранные: документация прочитана, требования извлечены"
+            }
+            className={`flex h-9 items-center gap-1.5 rounded-lg border px-3 text-sm transition-colors ${
+              filters.analyzedOnly
+                ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-300"
+                : "border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:bg-white/5"
+            }`}
+          >
+            <FileCheck2 size={14} />
+            Только разобранные
+            {activeView !== "kanban" && analyzedTotal !== null && (
+              <span
+                className={`rounded-full px-1.5 text-[11px] leading-4 tabular-nums ${
+                  filters.analyzedOnly ? "bg-indigo-500/25 text-indigo-200" : "bg-white/[0.08] text-zinc-400"
+                }`}
+              >
+                {analyzedTotal.toLocaleString("ru-RU")}
+              </span>
+            )}
+          </button>
+
+          {/* Активные разделы и метки — снимаются крестиком. */}
+          {filters.markedList && (() => {
+            const Icon = MARKED_LIST_ICONS[filters.markedList];
+            return (
+              <button
+                onClick={() => updateFilters({ markedList: null })}
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] leading-none ${MARKED_LIST_ACTIVE_CLASSES[filters.markedList]}`}
+                title={`Выйти из раздела «${MARKED_LIST_LABELS[filters.markedList]}»`}
+              >
+                <Icon size={11} />
+                {MARKED_LIST_LABELS[filters.markedList]}
+                <X size={11} />
+              </button>
+            );
+          })()}
+          {filters.minutesOnly && (
+            <button
+              onClick={() => updateFilters({ minutesOnly: false })}
+              className="inline-flex items-center gap-1 rounded-full border border-rose-400/40 bg-rose-500/10 px-2 py-1 text-[11px] leading-none text-rose-300 hover:bg-rose-500/20"
+              title="Выйти из раздела «Минутки»: срок подачи в день размещения"
+            >
+              <Timer size={11} />
+              Минутки
+              <X size={11} />
+            </button>
+          )}
+          {filters.favouritesOnly && (
+            <button
+              onClick={() => updateFilters({ favouritesOnly: false })}
+              className="inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-500/10 px-2 py-1 text-[11px] leading-none text-amber-300 hover:bg-amber-500/20"
+              title="Выйти из раздела «Избранное»"
+            >
+              <Star size={11} fill="currentColor" />
+              Избранное
+              <X size={11} />
+            </button>
+          )}
+          {filters.tagIds.map((id) => {
+            const tag = tags.find((item) => item.id === id);
+            if (!tag) return null;
+            return (
+              <TagChip
+                key={id}
+                tag={tag}
+                onClick={() => updateFilters({ tagIds: filters.tagIds.filter((item) => item !== id) })}
+                title={`${tag.name} — снять фильтр`}
+              />
+            );
+          })}
         </div>
 
         {error && (
@@ -1830,117 +1950,6 @@ export function TendersPage() {
             </button>
           </div>
         )}
-
-        {/* Строка состояния: что показано и почему. С 05.10.2026 — воронка отбора «собрано →
-            профили → модель → фильтры → в списке»: прежняя строка «N из M собранных · по
-            профилю» говорила, сколько скрыто, но не чем, и было не понять, что снимать. */}
-        <div className="mb-2 flex min-h-[24px] shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 px-1">
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
-            {isLoading && filters.favouritesOnly ? (
-              <span className="flex items-center gap-1.5">
-                <Loader2 size={12} className="animate-spin text-zinc-600" />
-                Считаем…
-              </span>
-            ) : filters.favouritesOnly ? (
-              <>
-                <span className="flex items-center gap-1.5">
-                  <Star size={12} className="text-amber-400" fill="currentColor" />
-                  <span className="font-medium tabular-nums text-zinc-200">
-                    {shownTotal.toLocaleString("ru-RU")}
-                  </span>
-                  {plural(shownTotal, "закупка", "закупки", "закупок")} в избранном
-                </span>
-                <span className="text-zinc-700">·</span>
-                <span>срок подачи, профили и проверка моделью не учитываются</span>
-                <button
-                  onClick={() => updateFilters({ favouritesOnly: false })}
-                  className="text-indigo-400 hover:text-indigo-300"
-                >
-                  Ко всем закупкам
-                </button>
-              </>
-            ) : (
-              <SelectionFunnelBar
-                funnel={funnel}
-                isLoading={isLoading}
-                feedLabel={feedLabel}
-                profilesLabel={profilesLabel}
-                onClearProfiles={() => updateFilters({ relevanceProfileIds: [] })}
-                onDisableAi={() => updateFilters({ hideAiRejected: false })}
-                onResetFilters={() =>
-                  updateFilters({
-                    ...DEFAULT_FILTERS,
-                    feed,
-                    hideExpired: false,
-                    relevanceProfileIds: filters.relevanceProfileIds,
-                    relevanceProfileMode: filters.relevanceProfileMode,
-                    hideAiRejected: filters.hideAiRejected,
-                    minutesOnly: filters.minutesOnly,
-                    markedList: filters.markedList,
-                  })
-                }
-                onOpenGuide={() => setIsGuideOpen(true)}
-                onEditProfiles={() => setIsProfilesOpen(true)}
-              />
-            )}
-          </div>
-
-          {(filters.favouritesOnly ||
-            filters.minutesOnly ||
-            filters.markedList ||
-            filters.tagIds.length > 0) && (
-            <div className="flex flex-wrap items-center gap-1.5">
-              {filters.markedList && (() => {
-                const Icon = MARKED_LIST_ICONS[filters.markedList];
-                return (
-                  <button
-                    onClick={() => updateFilters({ markedList: null })}
-                    className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] leading-none ${MARKED_LIST_ACTIVE_CLASSES[filters.markedList]}`}
-                    title={`Выйти из раздела «${MARKED_LIST_LABELS[filters.markedList]}»`}
-                  >
-                    <Icon size={11} />
-                    {MARKED_LIST_LABELS[filters.markedList]}
-                    <X size={11} />
-                  </button>
-                );
-              })()}
-              {filters.minutesOnly && (
-                <button
-                  onClick={() => updateFilters({ minutesOnly: false })}
-                  className="inline-flex items-center gap-1 rounded-full border border-rose-400/40 bg-rose-500/10 px-2 py-1 text-[11px] leading-none text-rose-300 hover:bg-rose-500/20"
-                  title="Выйти из раздела «Минутки»: срок подачи в день размещения"
-                >
-                  <Timer size={11} />
-                  Минутки
-                  <X size={11} />
-                </button>
-              )}
-              {filters.favouritesOnly && (
-                <button
-                  onClick={() => updateFilters({ favouritesOnly: false })}
-                  className="inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-500/10 px-2 py-1 text-[11px] leading-none text-amber-300 hover:bg-amber-500/20"
-                  title="Выйти из раздела «Избранное»"
-                >
-                  <Star size={11} fill="currentColor" />
-                  Избранное
-                  <X size={11} />
-                </button>
-              )}
-              {filters.tagIds.map((id) => {
-                const tag = tags.find((item) => item.id === id);
-                if (!tag) return null;
-                return (
-                  <TagChip
-                    key={id}
-                    tag={tag}
-                    onClick={() => updateFilters({ tagIds: filters.tagIds.filter((item) => item !== id) })}
-                    title={`${tag.name} — снять фильтр`}
-                  />
-                );
-              })}
-            </div>
-          )}
-        </div>
 
         {isFiltersOpen && (
         <FiltersPanel

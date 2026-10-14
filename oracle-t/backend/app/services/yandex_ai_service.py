@@ -108,6 +108,13 @@ def test_connection(db: Session, *, actor: User) -> YandexConnectionTestResult:
         details=result.message,
         user_id=actor.id,
     )
+    if not result.success:
+        # Отказ проверки — тоже ошибка обращения к модели: в журнал ИИ (14.10.2026).
+        from app.services.ai_log_service import log_ai_event
+
+        log_ai_event(
+            db, action="Проверка подключения не прошла", error=result.message, provider="yandex"
+        )
     db.commit()
     return result
 

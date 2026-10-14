@@ -35,13 +35,20 @@ from loguru import logger
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.services.ai_provider_service import AiQuotaExceededError, get_gigachat_credentials
+from app.services.ai_provider_service import (
+    PROVIDER_GIGACHAT,
+    AiQuotaExceededError,
+    AiUnavailableError,
+    get_gigachat_credentials,
+    get_model_limits,
+)
+from app.services.ai_usage_service import record_call, usage_from_openai
 from app.services.routerai_client import _coerce_shape, _message_text, _strip_fences
 
 OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
 DEFAULT_TIMEOUT_SECONDS = 180.0
-# СВЕРИТЬ: потолок ответа у старших моделей GigaChat; 16 тыс. — как у RouterAI.
-MAX_OUTPUT_TOKENS = 16_000
+# Потолок ответа — из настроек модели (`get_model_limits`); СВЕРИТЬ у старших моделей
+# GigaChat, по умолчанию 16 тыс. — как у RouterAI.
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 3.0
 # Токен обновляется заранее: запрос, начатый за секунду до истечения, получил бы 401.
@@ -56,6 +63,10 @@ _token_cache: dict[tuple[str, str], tuple[str, float]] = {}
 
 class GigaChatError(RuntimeError):
     """API ответил ошибкой. Текст — из тела ответа: там причина (ключ, scope, модель)."""
+
+
+class GigaChatUnavailableError(GigaChatError, AiUnavailableError):
+    """Ключ авторизации отклонён — см. `AiUnavailableError`."""
 
 
 class GigaChatQuotaError(GigaChatError, AiQuotaExceededError):
@@ -86,6 +97,13 @@ def _raise_for_status(response: httpx.Response, stage: str) -> None:
         raise GigaChatQuotaError(
             f"GigaChat отказал: закончился пакет токенов или баланс (HTTP 402: {detail}). "
             "Повтор не поможет — пополните баланс в личном кабинете Сбера или выберите другую модель"
+        )
+    if response.status_code in (401, 403):
+        # До сюда 401 доходит уже после повторной попытки со свежим токеном — значит, отклонён
+        # сам ключ авторизации.
+        raise GigaChatUnavailableError(
+            f"{stage} отклонил ключ (HTTP {response.status_code}: {detail}). Повтор не поможет — "
+            "проверьте ключ авторизации на странице «Интеграции»"
         )
     raise GigaChatError(f"{stage}: HTTP {response.status_code}: {detail}")
 
@@ -213,13 +231,34 @@ def run_structured(
             }
         ],
         "function_call": {"name": function_name},
-        "max_tokens": MAX_OUTPUT_TOKENS,
+        "max_tokens": get_model_limits(db, PROVIDER_GIGACHAT).max_output_tokens,
         **_sampling(temperature),
     }
+    prompt_chars = len(system_prompt) + len(user_text)
 
     last_error: Exception | None = None
     raw_text = ""
     for attempt in range(1, RETRY_ATTEMPTS + 1):
+        started = time.monotonic()
+        payload: dict[str, Any] | None = None
+        raw_text = ""
+
+        def _record(status: str, error: Exception | None = None) -> None:
+            record_call(
+                db,
+                provider=PROVIDER_GIGACHAT,
+                model=model,
+                operation=function_name,
+                prompt_chars=prompt_chars,
+                completion_chars=len(raw_text),
+                usage=usage_from_openai(payload),
+                duration_s=time.monotonic() - started,
+                status=status,
+                attempt=attempt,
+                attempts=RETRY_ATTEMPTS,
+                error=str(error) if error else None,
+            )
+
         try:
             payload = _chat_completion(
                 auth_key=auth_key,
@@ -233,16 +272,21 @@ def run_structured(
             if choice.get("finish_reason") == "length":
                 raise GigaChatError("ответ оборван по лимиту токенов")
             raw_text = _arguments(choice.get("message") or {})
-            return response_model.model_validate(_coerce_shape(raw_text, response_model))
-        except AiQuotaExceededError:
+            result = response_model.model_validate(_coerce_shape(raw_text, response_model))
+            _record("success")
+            return result
+        except AiQuotaExceededError as exc:
+            _record("quota", exc)
             raise
         except (pydantic.ValidationError, ValueError) as exc:
+            _record("invalid", exc)
             last_error = exc
             logger.warning(
                 f"GigaChat вернул ответ, не соответствующий схеме {function_name} "
                 f"(попытка {attempt} из {RETRY_ATTEMPTS}): {exc}; начало ответа: {raw_text[:300]!r}"
             )
         except Exception as exc:  # noqa: BLE001 - сетевые сбои и лимиты частоты лечатся повтором
+            _record("invalid" if payload is not None else "error", exc)
             last_error = exc
             logger.warning(f"Обращение к GigaChat не удалось (попытка {attempt} из {RETRY_ATTEMPTS}): {exc}")
 

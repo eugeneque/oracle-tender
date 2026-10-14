@@ -3,7 +3,7 @@ import { AlertTriangle, ExternalLink, FileClock, Loader2 } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
 import type { CatalogDocument, CatalogDocumentsSummary, CatalogTask } from "../../api/types";
-import { formatDate, formatDateTime } from "../../utils/format";
+import { formatDate, formatDateTime, productDisplayName } from "../../utils/format";
 
 // Справочник документов по СИ и руководств по эксплуатации с датой актуальности (правка по
 // итогам показа 15.09.2026). Раз в неделю система сверяет каждый документ с источником —
@@ -174,7 +174,7 @@ export function CatalogDocumentsSection({
                         {d.version_label && <span className="ml-1.5 text-[11px] text-zinc-500">ред. {d.version_label}</span>}
                       </td>
                       <td className="whitespace-nowrap py-1.5 pr-4 text-zinc-300">
-                        {d.model_name ?? (d.si_code ? <span className="font-mono">{d.si_code}</span> : "—")}
+                        {(d.model_name && productDisplayName(d.model_name)) ?? (d.si_code ? <span className="font-mono">{d.si_code}</span> : "—")}
                         {d.execution && <span className="ml-1.5 text-[10px] text-zinc-500">{d.execution}</span>}
                       </td>
                       <td className="py-1.5 pr-4">

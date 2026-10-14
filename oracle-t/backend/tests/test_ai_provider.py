@@ -359,6 +359,39 @@ def test_plain_rate_limit_is_still_retried(monkeypatch):
     assert len(calls) == routerai_client.RETRY_ATTEMPTS
 
 
+def test_rejected_key_is_not_retried_and_stops_extraction(monkeypatch):
+    """401 — отклонённый ключ: без повторов, и разбор документа не перебирает остальные куски
+    (14.10.2026: 1 485 обращений с отклонённым ключом за один проход каталога)."""
+
+    import httpx
+
+    from app.services import characteristic_extraction, routerai_client
+
+    calls: list[int] = []
+
+    def fake_post(*args, **kwargs):
+        calls.append(1)
+        return httpx.Response(401, json={"message": "401 Unauthorized", "code": 401})
+
+    monkeypatch.setattr(routerai_client.httpx, "post", fake_post)
+    monkeypatch.setattr(routerai_client, "get_routerai_credentials", lambda db, provider="claude": ("k", "m", "https://x"))
+    monkeypatch.setattr(routerai_client.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        characteristic_extraction,
+        "run_structured",
+        lambda db, **kwargs: routerai_client.run_structured(db, **kwargs),
+    )
+    monkeypatch.setattr(characteristic_extraction, "fit_chars", lambda db, desired, reserved: 1_000)
+
+    try:
+        characteristic_extraction.read_characteristics(None, text="x" * 5_000, document_source="fgis")
+    except ai_client.AiUnavailableError as exc:
+        assert "отклонил ключ" in str(exc)
+    else:
+        raise AssertionError("ожидался AiUnavailableError")
+    assert calls == [1]
+
+
 def test_deepseek_shares_routerai_key_but_has_own_model(client, admin_token, db_session, monkeypatch):
     """DeepSeek (28.09.2026) ходит через тот же RouterAI: ключ общий с Claude, модель своя и
     настраивается отдельно; диспетчер отдаёт его тому же клиенту с другой моделью."""
@@ -394,3 +427,26 @@ def test_deepseek_shares_routerai_key_but_has_own_model(client, admin_token, db_
     ai_client.run_structured(db_session, system_prompt="s", user_text="u", response_model=_Answer)
     assert seen == [("deepseek", ai_provider_service.DEFAULT_DEEPSEEK_MODEL)]
     assert ai_client.active_model(db_session) == ("deepseek", ai_provider_service.DEFAULT_DEEPSEEK_MODEL)
+
+
+def test_description_boilerplate_is_cut_before_model():
+    """Служебные разделы «Описания типа» модели не отдаются, таблица характеристик — да."""
+
+    from app.services.fgis_description_ingest import strip_boilerplate
+
+    text = (
+        "Описание средства измерений\nСчетчик трехфазный.\n"
+        "Программное обеспечение\nКонтрольная сумма 0xABCD\n"
+        "Метрологические и технические характеристики\nНоминальная частота сети, Гц 50\n"
+        "Лист № 5\nВсего листов 7\n"
+        "Знак утверждения типа\nнаносится на корпус\n"
+        "Нормативные документы, устанавливающие требования к средству измерений\nГОСТ 31818.11-2012\n"
+        "Правообладатель\nООО «Ромашка»\nИзготовитель\nООО «Ромашка», г. Курган\n"
+        "Испытательный центр\nФБУ «ЦСМ»\n"
+    )
+    result = strip_boilerplate(text)
+
+    for kept in ("Счетчик трехфазный", "Гц 50", "ГОСТ 31818.11-2012", "г. Курган"):
+        assert kept in result
+    for dropped in ("0xABCD", "Лист № 5", "наносится на корпус", "ЦСМ", "Правообладатель"):
+        assert dropped not in result

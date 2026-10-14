@@ -273,6 +273,11 @@ class Product(Base):
     # позиции, пропавшие с сайта: они помечаются «требует проверки», а не удаляются
     # (п.2.4 задания — окончательное решение за пользователем).
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Что из документов уже прочитано моделью ИИ для этой модели (14.10.2026, миграция 0075):
+    # модель, из документа которой ничего не извлеклось, раньше отправлялась в ИИ при каждом
+    # опросе каталога. Повторно читается только новая редакция или новая ссылка.
+    fgis_description_read_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    manual_read_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

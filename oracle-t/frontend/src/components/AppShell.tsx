@@ -9,9 +9,9 @@ import { useNavLayout } from "../hooks/useNavLayout";
 import { SPRING_SNAPPY, SPRING_SOFT, navItemVariants, pageVariants, staggerContainer } from "../utils/motion";
 import { AccountMenu } from "./AccountMenu";
 import { Logo, LogoMark } from "./Logo";
-import { ThemeToggle } from "./ThemeToggle";
 import { HeaderNav } from "./nav/HeaderNav";
-import { MyJobsIndicator } from "./nav/MyJobsIndicator";
+import { NotificationCenter } from "./nav/NotificationCenter";
+import { PageHeaderSlotContext } from "./nav/pageHeaderSlotContext";
 import { WhatsNewCard, WhatsNewPill } from "./nav/WhatsNew";
 import { isNavItemActive, visibleNavItems } from "./nav/navConfig";
 import type { NavItem } from "./nav/navConfig";
@@ -52,6 +52,9 @@ export function AppLayout() {
   const { layout } = useNavLayout();
   const { pathname } = useLocation();
   const mainRef = useRef<HTMLElement>(null);
+  // Узел в шапке, куда страница ставит свой элемент (поиск на «Тендерах»). Через state, а
+  // не ref: страница должна перерисоваться, когда узел появится.
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
 
   // Контейнер прокрутки теперь переживает переходы — новая страница должна начинаться сверху.
   useEffect(() => {
@@ -60,9 +63,14 @@ export function AppLayout() {
 
   const main = (
     <main ref={mainRef} className="min-h-0 flex-1 overflow-y-auto">
-      <Outlet />
+      <PageHeaderSlotContext.Provider value={headerSlot}>
+        <Outlet />
+      </PageHeaderSlotContext.Provider>
     </main>
   );
+  // Тема переехала в меню аватара (14.10.2026): переключают её раз в жизни, а в шапке она
+  // занимала место, которое теперь отдано поиску.
+  const slot = <div ref={setHeaderSlot} className="flex min-w-0 max-w-[640px] flex-1 items-center" />;
 
   if (layout === "header") {
     return (
@@ -74,10 +82,10 @@ export function AppLayout() {
           <LayoutGroup id="header-nav">
             <HeaderNav />
           </LayoutGroup>
+          {slot}
           <div className="ml-auto flex items-center gap-4">
-            <MyJobsIndicator />
+            <NotificationCenter />
             <WhatsNewPill />
-            <ThemeToggle />
             <AccountMenu />
           </div>
         </header>
@@ -90,10 +98,12 @@ export function AppLayout() {
     <div className="flex h-screen bg-zinc-950">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="z-30 flex h-16 shrink-0 items-center justify-end gap-4 border-b border-white/[0.05] bg-zinc-950/80 px-8 backdrop-blur">
-          <MyJobsIndicator />
-          <ThemeToggle />
-          <AccountMenu />
+        <header className="z-30 flex h-16 shrink-0 items-center gap-4 border-b border-white/[0.05] bg-zinc-950/80 px-6 backdrop-blur">
+          {slot}
+          <div className="ml-auto flex items-center gap-4">
+            <NotificationCenter />
+            <AccountMenu />
+          </div>
         </header>
         {main}
       </div>

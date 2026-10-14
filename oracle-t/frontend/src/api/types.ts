@@ -512,7 +512,11 @@ export interface CatalogTask {
   status: string;
   model_name: string | null;
   message: string | null;
+  // У обхода сайта здесь ход: {progress: {done, total, current}} (14.10.2026).
+  details?: { progress?: { done: number; total: number; current: string | null } } & Record<string, unknown>;
   created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
 }
 
 // Последний сквозной опрос производителя (автозаполнение каталога, 28.09.2026).
@@ -573,6 +577,102 @@ export interface AiProviderStatus {
   /** Модели, отключённые администратором намертво (29.09.2026). */
   disabled_providers?: AiProviderKey[];
   disabled_info?: Partial<Record<AiProviderKey, { at: string | null; by: string | null }>>;
+}
+
+/** Окно контекста и потолок ответа модели (14.10.2026). `input_budget_chars` — сколько
+ * символов текста это даёт на один запрос. */
+export interface AiModelLimits {
+  provider: AiProviderKey;
+  label: string;
+  context_tokens: number;
+  max_output_tokens: number;
+  default_context_tokens: number;
+  default_max_output_tokens: number;
+  is_default: boolean;
+  input_budget_chars: number;
+}
+
+/** Итог расхода токенов по группе обращений («Детализация ИИ», 14.10.2026). */
+export interface AiUsageTotals {
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cached_tokens: number;
+  /** Стоимость — только если её вернул провайдер (RouterAI). */
+  cost: number | null;
+  failed: number;
+  duration_ms: number;
+}
+
+export interface AiUsageGroup extends AiUsageTotals {
+  key: string;
+  label: string;
+  max_prompt_tokens?: number;
+  avg_prompt_tokens?: number;
+  tenders?: number;
+  avg_tokens_per_tender?: number | null;
+}
+
+export interface AiUsageSummary {
+  date_from: string;
+  date_to: string;
+  provider: string | null;
+  chars_per_token_estimate: number;
+  totals: AiUsageTotals & { estimated_calls: number; tenders: number };
+  by_day: (AiUsageTotals & { day: string })[];
+  by_model: (AiUsageTotals & {
+    provider: string;
+    provider_label: string;
+    model: string | null;
+    chars_per_token: number | null;
+    max_prompt_tokens: number;
+  })[];
+  by_operation: AiUsageGroup[];
+  by_job_kind: AiUsageGroup[];
+  by_user: AiUsageGroup[];
+  top_tenders: (AiUsageTotals & { tender_id: string; external_id: string | null; title: string })[];
+}
+
+/** Расход одного пользователя: `GET /ai-usage/users/{key}` (14.10.2026). */
+export interface AiUserUsage {
+  key: string;
+  totals: AiUsageTotals;
+  by_operation: AiUsageGroup[];
+  by_job_kind: AiUsageGroup[];
+  tenders_total: number;
+  tenders: (AiUsageTotals & {
+    tender_id: string;
+    external_id: string | null;
+    title: string;
+    exists: boolean;
+    last_at: string;
+    operations: string[];
+  })[];
+}
+
+export interface AiUsageCall {
+  id: string;
+  created_at: string;
+  provider: string;
+  provider_label: string;
+  model: string | null;
+  operation: string;
+  operation_label: string;
+  job_kind_label: string | null;
+  tender_id: string | null;
+  tender_external_id: string | null;
+  user: string | null;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  tokens_estimated: boolean;
+  prompt_chars: number;
+  duration_ms: number;
+  status: string;
+  status_label: string;
+  error: string | null;
+  cost: number | null;
 }
 
 export interface RouterAiSettings {
@@ -876,6 +976,8 @@ export interface TenderPage {
    * подсчёт по `items` всегда давал в сумме ровно размер страницы. Ключ `unclassified` —
    * тендеры без статуса. */
   status_counts: Record<string, number>;
+  /** Сколько из `total` уже разобрано — с извлечёнными требованиями. */
+  analyzed_total: number;
 }
 
 /** Доска Kanban. Колонки набираются на сервере независимо друг от друга, поэтому у доски
@@ -1913,4 +2015,26 @@ export interface Bitrix24PushResult {
   created: boolean;
   url: string;
   message: string;
+}
+
+/** Строка центра уведомлений в шапке (14.10.2026): `mine` — запуск пользователя,
+ *  `system` — общий процесс (плановый опрос, обход сайтов, чужой опрос площадок). */
+export interface ActivityItem {
+  id: string;
+  scope: "mine" | "system";
+  kind: string;
+  title: string;
+  subtitle: string | null;
+  status: "queued" | "running" | "success" | "error" | "cancelled";
+  progress: number | null;
+  message: string | null;
+  started_at: string;
+  finished_at: string | null;
+  link: string | null;
+  job_id: string | null;
+  owner_name: string | null;
+}
+
+export interface ActivityFeed {
+  items: ActivityItem[];
 }

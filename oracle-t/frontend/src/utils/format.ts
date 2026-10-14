@@ -73,16 +73,6 @@ export function tenderTypeLabel(type: string | null): string | null {
   return TENDER_TYPE_LABELS[type] ?? type;
 }
 
-const CRITICALITY_LABELS: Record<string, string> = {
-  critical: "Критичное",
-  important: "Важное",
-  minor: "Второстепенное",
-};
-
-export function criticalityLabel(value: string): string {
-  return CRITICALITY_LABELS[value] ?? value;
-}
-
 const COMPLIANCE_LABELS: Record<string, string> = {
   meets: "Соответствует",
   partial: "Частично",
@@ -239,4 +229,30 @@ const REGISTRY_STATE_STYLES: Record<string, { label: string; className: string }
  * незаведённая запись — это отсутствие сведений, а не отсутствие допуска. */
 export function registryStateStyle(state: string): { label: string; className: string } {
   return REGISTRY_STATE_STYLES[state] ?? REGISTRY_STATE_STYLES.unknown;
+}
+
+// Описательная приписка перед обозначением прибора: «Счетчики электрической энергии
+// однофазные многофункциональные МИРТЕК-12-РУ-SP17» — так модели называет реестр ФГИС и часть
+// сайтов. В справочнике нужна только модель (замечание 14.10.2026): приписка съедала ширину
+// карточки, и в матрице вместо «МИРТЕК-12-РУ-SP17» читалось «Счетчики электрическ…».
+const DESCRIPTIVE_HEAD = /^(сч[её]тчик|прибор|устройств|измерител|преобразовател)/i;
+const LOWERCASE_WORD = /^(?:[а-яё][а-яё,\-–]*|[-–—])$/;
+
+/** Наименование прибора без описательной приписки: «Счетчик электроэнергии трехфазный
+ * МИР С-04 малогабаритный» → «МИР С-04». Полное название остаётся в подсказке и в базе —
+ * по нему ищут в реестре и сопоставляют с ТЗ. */
+export function productDisplayName(name: string): string {
+  const trimmed = name.trim();
+  if (!DESCRIPTIVE_HEAD.test(trimmed)) return trimmed;
+  const words = trimmed.split(/\s+/);
+  let start = 1;
+  while (start < words.length && LOWERCASE_WORD.test(words[start])) start += 1;
+  let end = words.length;
+  while (end > start + 1 && LOWERCASE_WORD.test(words[end - 1])) end -= 1;
+  const rest = words.slice(start, end);
+  // Описание с моделью в середине («… с функцией диагностирования … ОЗЗ в сетях …») — не
+  // приписка, а часть названия: обрезанный кусок читался бы бессмыслицей.
+  if (rest.filter((word) => LOWERCASE_WORD.test(word)).length >= 2) return trimmed;
+  const model = rest.join(" ").replace(/[,\s]+$/, "");
+  return model || trimmed;
 }

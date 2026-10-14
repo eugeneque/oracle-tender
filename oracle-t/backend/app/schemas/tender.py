@@ -202,6 +202,9 @@ class TenderPageOut(BaseModel):
     # получить её из `items`, там лежит только текущая страница (см.
     # `tender_service.count_tenders_by_status`). Ключ `unclassified` — тендеры без статуса.
     status_counts: dict[str, int] = Field(default_factory=dict)
+    # Сколько из `total` уже разобрано (есть извлечённые требования) — показывается рядом
+    # с общим числом и открывает раздел «Разобранные» (14.10.2026).
+    analyzed_total: int = 0
 
 
 class TenderBoardOut(BaseModel):

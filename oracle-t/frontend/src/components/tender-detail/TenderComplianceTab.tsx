@@ -2,7 +2,7 @@ import { Fragment, useMemo, useState } from "react";
 import { AlertTriangle, BookOpen, ChevronDown, ChevronRight } from "lucide-react";
 
 import type { ComplianceEntry, ComplianceMatrix } from "../../api/types";
-import { CriticalityBadge } from "./TenderRequirementsTab";
+import { ParameterChip } from "./TenderRequirementsTab";
 import {
   complianceLabel,
   complianceSourceLabel,
@@ -52,7 +52,6 @@ function WinPercentageCard({
       <div className="flex items-baseline justify-between gap-2">
         <span className="truncate text-sm text-zinc-200" title={row.manufacturer_name}>
           {row.manufacturer_name}
-          {row.is_mirtek && <span className="ml-1.5 text-[11px] text-indigo-400">наш</span>}
           {row.tz_reference && (
             <span
               className="ml-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[11px] text-emerald-300"
@@ -170,14 +169,14 @@ function MethodologyHint() {
             допуска и отсутствие в официальном списке ПО — это «не соответствует».
           </li>
           <li>
-            <span className="text-zinc-300">Вес:</span> критичное 3 (класс точности, номиналы,
-            фазы, тип прибора, Госреестр СИ, допуски), важное 2 (интерфейсы, протоколы, реле, МПИ,
-            интеграция), второстепенное 1.
+            <span className="text-zinc-300">Вес:</span> 3 — ключевые параметры (класс точности,
+            номиналы, фазы, тип прибора, Госреестр СИ, допуски), 2 — интерфейсы, протоколы, реле,
+            МПИ, интеграция, 1 — остальное.
           </li>
           <li>
             <span className="text-zinc-300">Процент</span> = Σ(вес × вклад) / Σ(вес оценённых) ×
-            100. Оценено меньше 30 % требований — процент ненадёжен; невыполненное критичное
-            требование названо в пояснении: заявку отклонят независимо от процента.
+            100. Оценено меньше 30 % требований — процент ненадёжен; невыполненный ключевой
+            параметр назван в пояснении: заявку отклонят независимо от процента.
           </li>
           <li>
             <span className="text-zinc-300">Уверенность</span> ниже 0,6 — вердикт помечен как
@@ -191,9 +190,9 @@ function MethodologyHint() {
             по каталогу «Ready for Astra».
           </li>
           <li>
-            <span className="text-zinc-300">Итог:</span> не проходит — невыполнено критичное
-            требование; с оговорками — критичные выполнены, но не всё; не хватает данных — без
-            ответа больше половины критичных.
+            <span className="text-zinc-300">Итог:</span> не проходит — не выполнен ключевой
+            параметр; с оговорками — ключевые выполнены, но не всё; не хватает данных — без
+            ответа больше половины ключевых.
           </li>
         </ul>
       )}
@@ -214,14 +213,26 @@ export function TenderComplianceTab({
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const manufacturers = useMemo(() => {
-    const seen = new Map<string, string>();
+    const seen = new Map<string, { id: string; name: string; isMirtek: boolean; percent: number | null }>();
     for (const row of matrix.win_percentages) {
-      seen.set(row.manufacturer_id, row.manufacturer_name);
+      seen.set(row.manufacturer_id, {
+        id: row.manufacturer_id,
+        name: row.manufacturer_name,
+        isMirtek: row.is_mirtek,
+        percent: percentValue(row.percentage),
+      });
     }
     for (const entry of matrix.entries) {
-      if (!seen.has(entry.manufacturer_id)) seen.set(entry.manufacturer_id, entry.manufacturer_name);
+      if (!seen.has(entry.manufacturer_id))
+        seen.set(entry.manufacturer_id, {
+          id: entry.manufacturer_id,
+          name: entry.manufacturer_name,
+          isMirtek: false,
+          percent: null,
+        });
     }
-    return [...seen.entries()].map(([id, name]) => ({ id, name }));
+    // МИРТЕК — первым столбцом, сразу после требования: с ним сравнивают всех остальных.
+    return [...seen.values()].sort((a, b) => Number(b.isMirtek) - Number(a.isMirtek));
   }, [matrix]);
 
   const byRequirement = useMemo(() => {
@@ -286,20 +297,38 @@ export function TenderComplianceTab({
         </div>
       )}
 
-      <div className="overflow-x-auto rounded-xl border border-white/[0.06]">
-        <table className="w-full min-w-[640px] border-collapse text-[13px]">
+      {/* Таблица не сжимается под ширину панели (14.10.2026): при десятке производителей
+          колонки по 72 px обрезали названия, а текст требования ломался в столбик. Теперь у
+          колонок есть минимальная ширина, таблица прокручивается вбок, а столбец требований
+          закреплён слева — при прокрутке видно, о каком требовании речь. */}
+      <div className="overflow-x-auto rounded-xl border border-white/[0.08]">
+        <table className="w-full min-w-max border-separate border-spacing-0 text-[13px]">
           <thead>
-            <tr className="border-b border-white/[0.08]">
-              <th className="px-2.5 py-2 text-left text-xs font-medium text-zinc-500">
+            <tr>
+              <th className="sticky left-0 z-10 min-w-[320px] max-w-[440px] border-b border-r border-white/[0.08] bg-zinc-900 px-4 py-3 text-left text-xs font-medium text-zinc-400">
                 Требование
+                <span className="ml-1.5 font-normal tabular-nums text-zinc-600">{matrix.requirements.length}</span>
               </th>
               {manufacturers.map((manufacturer) => (
                 <th
                   key={manufacturer.id}
-                  className="px-1.5 py-2 text-center text-[11px] font-medium text-zinc-500"
+                  className={`min-w-[104px] max-w-[132px] border-b border-white/[0.08] px-2 py-3 text-center align-bottom ${
+                    manufacturer.isMirtek ? "bg-indigo-500/[0.08]" : ""
+                  }`}
                   title={manufacturer.name}
                 >
-                  <span className="block max-w-[72px] truncate">{manufacturer.name}</span>
+                  <span
+                    className={`line-clamp-2 text-[11px] font-medium leading-tight ${
+                      manufacturer.isMirtek ? "text-indigo-300" : "text-zinc-300"
+                    }`}
+                  >
+                    {manufacturer.name}
+                  </span>
+                  {manufacturer.percent !== null && (
+                    <span className={`mt-1 block text-xs font-semibold tabular-nums ${percentTextClass(manufacturer.percent)}`}>
+                      {manufacturer.percent}%
+                    </span>
+                  )}
                 </th>
               ))}
             </tr>
@@ -312,72 +341,75 @@ export function TenderComplianceTab({
                 <Fragment key={requirement.id}>
                   <tr
                     onClick={() => setExpanded(isExpanded ? null : requirement.id)}
-                    className="cursor-pointer border-b border-white/[0.04] transition-colors hover:bg-white/[0.04]"
+                    className="group cursor-pointer"
                   >
-                    <td className="px-2.5 py-2">
-                      <div className="flex items-start gap-1.5">
+                    <td className="sticky left-0 z-10 min-w-[320px] max-w-[440px] border-b border-r border-white/[0.06] bg-zinc-900 px-4 py-3 align-top transition-colors group-hover:bg-zinc-800">
+                      <div className="flex items-start gap-2">
                         <ChevronRight
-                          size={13}
+                          size={14}
                           className={`mt-0.5 shrink-0 text-zinc-600 transition-transform ${
-                            isExpanded ? "rotate-90" : ""
+                            isExpanded ? "rotate-90 text-zinc-400" : ""
                           }`}
                         />
-                        <span className="text-zinc-300">{requirement.text}</span>
-                        {requirement.parameter_no && (
-                          <span
-                            className="shrink-0 rounded bg-indigo-500/10 px-1 text-[10px] text-indigo-300"
-                            title={`Параметр ${requirement.parameter_no} файла «Параметры для ПУ»: ${requirement.parameter_name ?? ""}`}
-                          >
-                            П{requirement.parameter_no}
-                          </span>
-                        )}
-                        <CriticalityBadge value={requirement.criticality} />
+                        <span className="flex-1 leading-snug text-zinc-200">{requirement.text}</span>
+                        <ParameterChip requirement={requirement} />
                       </div>
                     </td>
                     {manufacturers.map((manufacturer) => {
                       const entry = row?.get(manufacturer.id);
+                      const status = entry?.status ?? "no_data";
                       return (
-                        <td key={manufacturer.id} className="px-1.5 py-2 text-center">
+                        <td
+                          key={manufacturer.id}
+                          className={`border-b border-white/[0.06] px-2 py-3 text-center align-middle transition-colors group-hover:bg-white/[0.03] ${
+                            manufacturer.isMirtek ? "bg-indigo-500/[0.05]" : ""
+                          }`}
+                        >
                           <span
                             title={entry ? complianceLabel(entry.status) : "Нет данных"}
-                            className={`inline-flex h-6 w-6 items-center justify-center rounded-md text-xs ${
-                              STATUS_CLASSES[entry?.status ?? "no_data"]
-                            }`}
+                            className={`relative inline-flex h-7 w-7 items-center justify-center rounded-lg text-sm ${STATUS_CLASSES[status]}`}
                           >
-                            {STATUS_SHORT[entry?.status ?? "no_data"]}
+                            {STATUS_SHORT[status]}
+                            {entry?.needs_human_review && (
+                              <span
+                                className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-amber-400"
+                                title="Требует проверки человеком"
+                              />
+                            )}
                           </span>
-                          {entry?.needs_human_review && (
-                            <span className="ml-0.5 text-[10px] text-amber-400" title="Требует проверки человеком">
-                              !
-                            </span>
-                          )}
                         </td>
                       );
                     })}
                   </tr>
                   {isExpanded && (
-                    <tr className="border-b border-white/[0.04]">
-                      <td colSpan={manufacturers.length + 1} className="bg-white/[0.02] px-3 py-2.5">
-                        <div className="space-y-1.5">
+                    <tr>
+                      <td colSpan={manufacturers.length + 1} className="border-b border-white/[0.06] bg-white/[0.02] p-0">
+                        {/* Пояснения — карточками в сетке, а не строкой через запятую: у
+                            каждого производителя своё обоснование, и сравнивают их глазами. */}
+                        <div className="sticky left-0 grid w-full max-w-[40rem] grid-cols-1 gap-2 p-3 sm:grid-cols-2">
                           {manufacturers.map((manufacturer) => {
                             const entry = row?.get(manufacturer.id);
                             if (!entry) return null;
                             const source = complianceSourceLabel(entry.source);
                             return (
-                              <div key={manufacturer.id} className="text-[12px] leading-snug">
-                                <span className="text-zinc-400">{manufacturer.name}: </span>
-                                <span
-                                  className={
-                                    STATUS_CLASSES[entry.status]?.split(" ").pop() ?? "text-zinc-400"
-                                  }
-                                >
-                                  {complianceLabel(entry.status)}
-                                </span>
-                                {entry.explanation && (
-                                  <span className="text-zinc-500"> — {entry.explanation}</span>
-                                )}
-                                {source && (
-                                  <span className="text-zinc-600"> (источник: {source})</span>
+                              <div
+                                key={manufacturer.id}
+                                className={`rounded-lg border px-3 py-2 text-[12px] leading-snug ${
+                                  manufacturer.isMirtek
+                                    ? "border-indigo-500/25 bg-indigo-500/[0.05]"
+                                    : "border-white/[0.06] bg-zinc-900/60"
+                                }`}
+                              >
+                                <div className="mb-1 flex items-center justify-between gap-2">
+                                  <span className="truncate font-medium text-zinc-300">{manufacturer.name}</span>
+                                  <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] ${STATUS_CLASSES[entry.status]}`}>
+                                    {complianceLabel(entry.status)}
+                                  </span>
+                                </div>
+                                {entry.explanation && <p className="text-zinc-400">{entry.explanation}</p>}
+                                {source && <p className="mt-1 text-[11px] text-zinc-600">Источник: {source}</p>}
+                                {entry.needs_human_review && (
+                                  <p className="mt-1 text-[11px] text-amber-400">Низкая уверенность — проверьте вручную</p>
                                 )}
                               </div>
                             );
@@ -391,6 +423,21 @@ export function TenderComplianceTab({
             })}
           </tbody>
         </table>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 px-1 text-[11px] text-zinc-500">
+        {(["meets", "partial", "not_meets", "no_data"] as const).map((status) => (
+          <span key={status} className="flex items-center gap-1.5">
+            <span className={`inline-flex h-4 w-4 items-center justify-center rounded text-[10px] ${STATUS_CLASSES[status]}`}>
+              {STATUS_SHORT[status]}
+            </span>
+            {complianceLabel(status)}
+          </span>
+        ))}
+        <span className="flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full bg-amber-400" />
+          требует проверки
+        </span>
+        <span className="text-zinc-600">Нажмите на строку — пояснения по каждому производителю.</span>
       </div>
     </div>
   );

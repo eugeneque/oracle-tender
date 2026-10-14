@@ -106,6 +106,8 @@ def _run_evaluation(
         parts.append(f"требуют проверки: {outcome.needs_review}")
     if outcome.manual_fallback_used:
         parts.append(f"через руководство пользователя: {outcome.manual_fallback_used}")
+    if outcome.prejudged:
+        parts.append(f"решено кодом без модели: {outcome.prejudged}")
     parts.extend(outcome.messages)
 
     return "; ".join(parts)

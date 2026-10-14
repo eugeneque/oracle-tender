@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
-  Check,
   Boxes,
-  ChevronRight,
   ExternalLink,
+  Globe,
   Link2,
   Loader2,
+  MoreHorizontal,
   Pencil,
   Plus,
   RefreshCw,
   Search,
   Upload,
+  Wand2,
 } from "lucide-react";
 
 import { ApiError, api, uploadFile } from "../api/client";
@@ -27,15 +28,18 @@ import type {
 } from "../api/types";
 import { AppShell } from "../components/AppShell";
 import { CatalogDocumentsSection } from "../components/catalog/CatalogDocumentsSection";
-import { AiBadge } from "../components/catalog/AiBadge";
-import { CatalogRepairButton } from "../components/catalog/CatalogRepairButton";
+import { CatalogRepairDialog } from "../components/catalog/CatalogRepairDialog";
 import { ProductDrawer } from "../components/catalog/ProductDrawer";
 import { ProductMatrix } from "../components/catalog/ProductMatrix";
 import { RegistryLearningSection } from "../components/catalog/RegistryLearningSection";
+import { SiteSyncProgress } from "../components/catalog/SiteSyncProgress";
 import { SiTypeGroups } from "../components/catalog/SiTypeGroups";
 import { siTypeGroup } from "../components/catalog/siTypeGroup";
 import { UpperSoftwareSection } from "../components/catalog/UpperSoftwareSection";
+import { DropdownMenu } from "../components/DropdownMenu";
 import { PageHeader } from "../components/PageHeader";
+import { SegmentedControl } from "../components/ui/SegmentedControl";
+import { AI_COST_NOTE, Tooltip } from "../components/ui/Tooltip";
 import { useAuth } from "../context/useAuth";
 import { formatDate } from "../utils/format";
 
@@ -44,36 +48,33 @@ import { formatDate } from "../utils/format";
 // верхнего уровня и характеристики модели шли одной лентой. Теперь у производителя пять
 // шагов в порядке, в котором наполняется каталог, — у каждого подпись, что в нём и что
 // делать дальше, — а модель открывается отдельным окном.
+//
+// Редизайн 14.10.2026 (замечание: «слишком много всего, куча текста, куча кнопок»). Шаги
+// стали обычными вкладками без номеров и подписей, «Модели» — первой: за ними приходят на
+// страницу. Служебные действия (опрос, обход сайта, импорт, единый формат значений) ушли в
+// меню «⋯» у производителя и над списком. Значок-«звёздочка» у кнопок с моделью ИИ убран:
+// что действие тратит токены, сказано в подсказке. Зелёные галочки «опрошен» у каждого
+// производителя убраны — в списке отмечается только то, что требует внимания.
 
 type StepKey = "si" | "models" | "learning" | "documents" | "software";
 
-const STEPS: { key: StepKey; title: string; caption: string }[] = [
-  {
-    key: "si",
-    title: "Коды СИ",
-    caption: "Госреестр ФГИС",
-  },
-  {
-    key: "models",
-    title: "Модели",
-    caption: "Приборы и характеристики",
-  },
-  {
-    key: "learning",
-    title: "Обучение",
-    caption: "Аршин и руководства",
-  },
-  {
-    key: "documents",
-    title: "Документы",
-    caption: "Актуальность",
-  },
-  {
-    key: "software",
-    title: "ПО верхнего уровня",
-    caption: "Поддержка в АСКУЭ",
-  },
+const STEPS: { key: StepKey; title: string }[] = [
+  { key: "models", title: "Модели" },
+  { key: "si", title: "Коды СИ" },
+  { key: "documents", title: "Документы" },
+  { key: "software", title: "ПО верхнего уровня" },
+  { key: "learning", title: "Реестр и руководства" },
 ];
+
+// Что делает опрос производителя — в подсказке пункта меню. Модель ИИ вызывается только во
+// втором проходе («Описания типа», руководства), и только в ручном запуске и раз в неделю:
+// плановый опрос дважды в день идёт без неё (14.10.2026). Уже прочитанные документы
+// повторно в модель не отправляются.
+const AUTOFILL_HINT =
+  "Коды СИ в ФГИС, каталог сайта, модели из реестра — без ИИ.\n" +
+  "Затем характеристики из ещё не прочитанных «Описаний типа» и руководств — моделью ИИ.\n" +
+  "Плановый опрос (06:00 и 20:00) идёт без ИИ, документы дочитываются раз в неделю.\n" +
+  AI_COST_NOTE;
 
 function readStep(): StepKey {
   try {
@@ -127,6 +128,8 @@ function autofillTitle(s: CatalogAutofillStatus): string {
   return `Опрошен${when}: каталог заполнен`;
 }
 
+// В списке производителей отмечается только то, что требует внимания или идёт сейчас;
+// успешно опрошенный производитель — без значка.
 function AutofillMark({ status }: { status?: CatalogAutofillStatus }) {
   if (!status) return null;
   const title = autofillTitle(status);
@@ -148,11 +151,13 @@ function AutofillMark({ status }: { status?: CatalogAutofillStatus }) {
         <AlertTriangle size={12} />
       </span>
     );
-  return (
-    <span title={title} className={`inline-flex ${status.failed_steps.length ? "text-amber-400" : "text-emerald-400"}`}>
-      <Check size={13} strokeWidth={2.5} />
-    </span>
-  );
+  if (status.failed_steps.length)
+    return (
+      <Tooltip content={title}>
+        <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-label="опрошен не полностью" />
+      </Tooltip>
+    );
+  return null;
 }
 
 function ToolbarButton({
@@ -198,7 +203,12 @@ export function CatalogPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // Обход сайта: `siteSyncKick` будит опрос очереди после нажатия, `siteSyncActive` — идёт ли.
+  const [siteSyncKick, setSiteSyncKick] = useState(0);
+  const [siteSyncActive, setSiteSyncActive] = useState(false);
   const [newModelName, setNewModelName] = useState("");
+  const [addingModel, setAddingModel] = useState(false);
+  const [repairOpen, setRepairOpen] = useState(false);
   // Сайты, каталоги которых система умеет обходить. Кнопка обхода показывается только у тех
   // производителей, для чьего сайта есть разобранный профиль.
   const [catalogSites, setCatalogSites] = useState<CatalogSite[]>([]);
@@ -247,7 +257,6 @@ export function CatalogPage() {
   // «не электросчётчики» — факты реестра, подтверждение их не меняет.
   const siTypesNeedingReview = useMemo(() => siTypes.filter((s) => siTypeGroup(s) === "pending").length, [siTypes]);
   const activeProducts = useMemo(() => products.filter((p) => p.status !== "discontinued").length, [products]);
-  const discontinuedProducts = products.length - activeProducts;
   const visibleProducts = useMemo(
     () => (hideDiscontinued ? products.filter((p) => p.status !== "discontinued") : products),
     [products, hideDiscontinued],
@@ -326,10 +335,7 @@ export function CatalogPage() {
   const handleAutofillAll = () =>
     run("autofill-all", async () => {
       const { queued } = await api.post<{ queued: number }>("/catalog/autofill");
-      setNotice(
-        `Опрос каталога запущен: производителей в очереди — ${queued}. Они опрашиваются по одному; ` +
-          "лупа в списке — идёт опрос, галочка — готово. Раз в сутки это происходит само."
-      );
+      setNotice(`Обновление каталога запущено: в очереди производителей — ${queued}. Ход виден над списком.`);
       await loadAutofill();
     });
 
@@ -376,10 +382,7 @@ export function CatalogPage() {
   const handleSyncSite = (adapterKey: string) =>
     run("site-sync", async () => {
       await api.post<CatalogTask>(`/catalog/sites/${adapterKey}/sync`);
-      setNotice(
-        "Обход каталога запущен в фоне — полный каталог занимает минуты. Ход работы виден в разделе " +
-          "«Логирование» настроек; обновите страницу, когда обход закончится."
-      );
+      setSiteSyncKick((k) => k + 1);
     });
 
   // Привязка моделей к кодам СИ — для случая «модели уже есть, а автопоиск в ФГИС запустили
@@ -443,6 +446,7 @@ export function CatalogPage() {
       const created = await api.post<Product>(`/manufacturers/${selectedId}/products`, { model_name: newModelName.trim() });
       setProducts((prev) => [...prev, created]);
       setNewModelName("");
+      setAddingModel(false);
       setOpenProductId(created.id);
     });
 
@@ -455,20 +459,14 @@ export function CatalogPage() {
     });
 
   // Счётчики на вкладках — только там, где данные уже загружены страницей.
-  const stepCount = (key: StepKey): React.ReactNode => {
-    if (key === "si" && siTypes.length)
-      return (
-        <>
-          {siTypes.length}
-          {siTypesNeedingReview > 0 && <span className="ml-1 text-amber-400">⚠ {siTypesNeedingReview}</span>}
-        </>
-      );
+  const stepCount = (key: StepKey): number | null => {
+    if (key === "si" && siTypes.length) return siTypes.length;
     if (key === "models" && products.length) return products.length;
     return null;
   };
 
-  const currentStep = STEPS.find((s) => s.key === step) ?? STEPS[1];
-  const stepIndex = STEPS.indexOf(currentStep);
+  const selectedAutofill = selected ? autofill[selected.id] : undefined;
+  const selectedAutofillActive = isAutofillActive(selectedAutofill);
 
   return (
     <AppShell>
@@ -495,13 +493,13 @@ export function CatalogPage() {
           </div>
         )}
 
-        <div className="grid gap-5 lg:grid-cols-[240px_minmax(0,1fr)]">
+        <div className="grid gap-6 lg:grid-cols-[240px_minmax(0,1fr)]">
           {/* Производители */}
-          <aside className="self-start rounded-xl border border-white/[0.08] bg-white/[0.03] lg:sticky lg:top-6">
-            <div className="flex items-center justify-between border-b border-white/[0.08] px-4 py-3">
+          <aside className="self-start rounded-xl border border-white/[0.08] lg:sticky lg:top-6">
+            <div className="flex items-center justify-between px-4 py-3">
               <h2 className="text-sm font-semibold text-zinc-100">Производители</h2>
               {isAdmin && (
-                <div className="flex gap-1.5">
+                <>
                   <input
                     ref={fileInputRef}
                     type="file"
@@ -513,29 +511,43 @@ export function CatalogPage() {
                       e.target.value = "";
                     }}
                   />
-                  <button
-                    onClick={() => openManufacturerForm(null)}
-                    title="Добавить производителя"
-                    className="rounded-lg border border-white/10 px-2 py-1 text-[11px] text-zinc-300 hover:bg-white/5"
-                  >
-                    <Plus size={12} />
-                  </button>
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={busy === "import"}
-                    title="CSV-импорт: производитель, код СИ, модель"
-                    className="flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1 text-[11px] text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                  >
-                    {busy === "import" ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
-                    CSV
-                  </button>
-                </div>
+                  <DropdownMenu
+                    title="Действия с каталогом"
+                    buttonClassName="flex h-7 w-7 items-center justify-center rounded-lg text-zinc-400 hover:bg-white/5 hover:text-zinc-100"
+                    trigger={busy === "import" || busy === "autofill-all" ? <Loader2 size={15} className="animate-spin" /> : <MoreHorizontal size={16} />}
+                    items={[
+                      { key: "add", label: "Добавить производителя", icon: <Plus size={14} />, onSelect: () => openManufacturerForm(null) },
+                      {
+                        key: "import",
+                        label: "Импорт из CSV",
+                        icon: <Upload size={14} />,
+                        hint: "Столбцы: производитель, код СИ, модель",
+                        onSelect: () => fileInputRef.current?.click(),
+                      },
+                      {
+                        key: "autofill-all",
+                        label: "Обновить весь каталог",
+                        icon: <RefreshCw size={14} />,
+                        hint: `Все производители по очереди. Раз в сутки это происходит само.\n${AUTOFILL_HINT}`,
+                        disabled: autofillActive,
+                        onSelect: () => void handleAutofillAll(),
+                      },
+                      {
+                        key: "repair",
+                        label: "Привести значения к единому формату",
+                        icon: <Wand2 size={14} />,
+                        hint: "Класс точности, токи, фазы, обозначения — по правилам, без ИИ. Сначала покажет, что изменится.",
+                        onSelect: () => setRepairOpen(true),
+                      },
+                    ]}
+                  />
+                </>
               )}
             </div>
             {editingId && (
-              <div className="space-y-1.5 border-b border-white/[0.08] px-4 py-3">
-                <div className="text-[11px] font-medium text-zinc-300">
-                  {editingId === "new" ? "Новый производитель" : "Правка производителя"}
+              <div className="space-y-1.5 border-t border-white/[0.08] px-4 py-3">
+                <div className="text-xs font-medium text-zinc-300">
+                  {editingId === "new" ? "Новый производитель" : "Производитель"}
                 </div>
                 {(
                   [
@@ -549,7 +561,7 @@ export function CatalogPage() {
                     value={manufacturerDraft[field]}
                     onChange={(e) => setManufacturerDraft((d) => ({ ...d, [field]: e.target.value }))}
                     placeholder={label}
-                    title={label}
+                    aria-label={label}
                     className="w-full rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none"
                   />
                 ))}
@@ -557,81 +569,63 @@ export function CatalogPage() {
                   <button
                     onClick={handleSaveManufacturer}
                     disabled={!manufacturerDraft.legal_name.trim() || busy === "save-manufacturer"}
-                    className="rounded-lg bg-indigo-500/20 px-2.5 py-1.5 text-xs text-indigo-200 hover:bg-indigo-500/30 disabled:opacity-50"
+                    className="rounded-lg bg-indigo-500 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-indigo-400 disabled:opacity-50"
                   >
                     Сохранить
                   </button>
                   <button
                     onClick={() => setEditingId(null)}
-                    className="rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-400 hover:bg-white/5"
+                    className="rounded-lg px-2.5 py-1.5 text-xs text-zinc-400 hover:bg-white/5"
                   >
                     Отмена
                   </button>
                 </div>
               </div>
             )}
-            {(isAdmin || autofillActive || autofillProgress.enriching > 0) && (
-              <div className="space-y-1.5 border-b border-white/[0.08] px-3 py-2">
-                {autofillActive ? (
-                  <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-2.5 py-2" aria-live="polite">
-                    <div className="flex items-center gap-1.5 text-xs text-zinc-200">
-                      <Search size={12} className="catalog-searching shrink-0 text-indigo-400" />
-                      Опрошено {autofillProgress.done} из {autofillProgress.total}
-                    </div>
-                    <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/[0.06]">
-                      <div
-                        className="h-full rounded-full bg-indigo-400 transition-[width] duration-500"
-                        style={{ width: `${autofillProgress.total ? (autofillProgress.done / autofillProgress.total) * 100 : 0}%` }}
-                      />
-                    </div>
-                    {autofillProgress.current && (
-                      <div className="mt-1.5 truncate text-[11px] text-zinc-500">
-                        Сейчас: <span className="text-zinc-300">{autofillProgress.current}</span>
-                        {autofillProgress.step && <> — {autofillProgress.step}</>}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  isAdmin && (
-                    <button
-                      onClick={handleAutofillAll}
-                      disabled={busy === "autofill-all"}
-                      title="Опросить все источники по всем производителям по очереди: ФГИС, сайты, реестр, затем характеристики по Аршину и руководствам. Раз в сутки это происходит само."
-                      className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                    >
-                      {busy === "autofill-all" ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-                      Опросить весь каталог
-                      <AiBadge compact title="Второй проход читает «Описания типа» и руководства моделью ИИ" />
-                    </button>
-                  )
-                )}
-                {isAdmin && <CatalogRepairButton />}
-                {autofillProgress.enriching > 0 && (
+            {autofillActive && (
+              <div className="border-t border-white/[0.08] px-4 py-2.5" aria-live="polite">
+                <div className="flex items-center justify-between text-xs text-zinc-400">
+                  <span>Обновление каталога</span>
+                  <span className="tabular-nums">
+                    {autofillProgress.done} / {autofillProgress.total}
+                  </span>
+                </div>
+                <div className="mt-1.5 h-0.5 overflow-hidden rounded-full bg-white/[0.06]">
                   <div
-                    className="flex items-center gap-1.5 px-1 text-[11px] text-zinc-500"
-                    title="Приборы и коды СИ уже заведены; характеристики из «Описаний типа» и руководств дополняются вторым проходом — он дольше, потому что читает документы"
-                  >
-                    <Loader2 size={11} className="shrink-0 animate-spin" />
-                    Характеристики дополняются: {autofillProgress.enriching}
+                    className="h-full rounded-full bg-indigo-400 transition-[width] duration-500"
+                    style={{ width: `${autofillProgress.total ? (autofillProgress.done / autofillProgress.total) * 100 : 0}%` }}
+                  />
+                </div>
+                {autofillProgress.current && (
+                  <div className="mt-1.5 truncate text-[11px] text-zinc-500">
+                    {autofillProgress.current}
+                    {autofillProgress.step && <> · {autofillProgress.step}</>}
                   </div>
                 )}
               </div>
             )}
-            <div className="max-h-[70vh] overflow-y-auto py-1">
+            {!autofillActive && autofillProgress.enriching > 0 && (
+              <div className="flex items-center gap-1.5 border-t border-white/[0.08] px-4 py-2 text-[11px] text-zinc-500">
+                <Loader2 size={11} className="shrink-0 animate-spin" />
+                <Tooltip content={`Приборы и коды СИ уже заведены; характеристики дочитываются из «Описаний типа» и руководств.\n${AI_COST_NOTE}`}>
+                  <span>Характеристики дочитываются: {autofillProgress.enriching}</span>
+                </Tooltip>
+              </div>
+            )}
+            <div className="max-h-[70vh] overflow-y-auto border-t border-white/[0.08] py-1">
               {/* По алфавиту — порядок сервера. */}
               {manufacturers.map((m) => (
                 <button
                   key={m.id}
                   onClick={() => setSelectedId(m.id)}
-                  className={`flex w-full items-center justify-between py-2 pl-4 pr-3 text-left text-sm ${
-                    m.id === selectedId ? "bg-indigo-500/10 text-indigo-300" : "text-zinc-300 hover:bg-white/5"
+                  className={`flex w-full items-center justify-between py-2 pl-4 pr-3 text-left text-sm transition-colors ${
+                    m.id === selectedId ? "bg-white/[0.06] text-zinc-50" : "text-zinc-400 hover:bg-white/[0.03] hover:text-zinc-200"
                   }`}
                 >
                   <span className="truncate">
                     {manufacturerTitle(m)}
-                    {m.is_mirtek && <span className="ml-1.5 text-[10px] text-emerald-400">мы</span>}
                   </span>
-                  <span className="ml-2 flex shrink-0 items-center gap-1.5">
+                  <span className="ml-2 flex shrink-0 items-center">
                     <AutofillMark status={autofill[m.id]} />
                   </span>
                 </button>
@@ -639,226 +633,225 @@ export function CatalogPage() {
             </div>
           </aside>
 
-          <div className="min-w-0 space-y-4">
+          <div className="min-w-0 space-y-5">
             {selected && (
               <>
                 {/* Производитель: кто это и главные цифры */}
-                <div className="flex flex-wrap items-end justify-between gap-6 rounded-xl border border-white/[0.08] bg-white/[0.03] px-6 py-5">
+                <div className="flex flex-wrap items-start justify-between gap-6">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <h2 className="truncate text-2xl font-semibold tracking-tight text-zinc-50">
+                      <h2 className="truncate text-3xl font-semibold tracking-tight text-zinc-50">
                         {selected.brand_name ?? selected.legal_name}
                       </h2>
-                      {isAdmin && (
-                        <button
-                          onClick={() => openManufacturerForm(selected)}
-                          title="Изменить производителя: названия, сайт"
-                          className="rounded p-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
-                        >
-                          <Pencil size={14} />
-                        </button>
-                      )}
-                      {isAdmin && (
-                        <button
-                          onClick={handleAutofillOne}
-                          disabled={busy === "autofill-one" || isAutofillActive(autofill[selected.id])}
-                          title={
-                            autofill[selected.id]
-                              ? autofillTitle(autofill[selected.id])
-                              : "Опросить все источники по этому производителю: ФГИС, сайт, Аршин, руководства"
-                          }
-                          className="flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1 text-[11px] text-zinc-400 hover:bg-white/5 hover:text-zinc-200 disabled:opacity-60"
-                        >
-                          {isAutofillActive(autofill[selected.id]) ? (
-                            <Search size={12} className={autofill[selected.id]?.status === "running" ? "catalog-searching" : ""} />
-                          ) : busy === "autofill-one" ? (
-                            <Loader2 size={12} className="animate-spin" />
-                          ) : (
-                            <RefreshCw size={12} />
-                          )}
-                          {autofill[selected.id]?.status === "running"
-                            ? "Идёт опрос"
-                            : autofill[selected.id]?.status === "queued"
-                              ? "В очереди"
-                              : "Опросить"}
-                          <AiBadge compact title="Второй проход читает «Описания типа» и руководства моделью ИИ" />
-                        </button>
-                      )}
                     </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
+                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-zinc-500">
                       {selected.brand_name && <span>{selected.legal_name}</span>}
                       {selected.website && (
                         <a
                           href={selected.website}
                           target="_blank"
                           rel="noreferrer"
-                          className="inline-flex items-center gap-1 text-indigo-400 hover:text-indigo-300"
+                          className="inline-flex items-center gap-1 hover:text-zinc-200"
                         >
-                          {selected.website.replace(/^https?:\/\//, "").replace(/\/$/, "")} <ExternalLink size={11} />
+                          {selected.website.replace(/^https?:\/\//, "").replace(/\/$/, "")} <ExternalLink size={12} />
                         </a>
                       )}
+                      {selectedAutofillActive && (
+                        <span className="inline-flex items-center gap-1.5 text-zinc-400">
+                          <Loader2 size={12} className="animate-spin" />
+                          {selectedAutofill?.status === "running" ? "обновляется" : "в очереди на обновление"}
+                        </span>
+                      )}
                     </div>
+                    {/* Действия с производителем — кнопками на виду, а не в «…» (14.10.2026): в меню
+                        их не находили, а «Обновить данные» / «Обойти только сайт» не объясняли разницу. */}
+                    {isAdmin && (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Tooltip
+                          content={selectedAutofill ? `${autofillTitle(selectedAutofill)}\n\n${AUTOFILL_HINT}` : AUTOFILL_HINT}
+                        >
+                          <button
+                            onClick={() => void handleAutofillOne()}
+                            disabled={busy === "autofill-one" || selectedAutofillActive}
+                            className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+                          >
+                            {selectedAutofillActive ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                            Полное обновление
+                            <span className="text-zinc-500">ФГИС, сайт, документы</span>
+                          </button>
+                        </Tooltip>
+                        {selectedSite && (
+                          <Tooltip
+                            content={`Только список моделей с ${selectedSite.base_url} — без ФГИС и без ИИ. Быстрее и бесплатно, несколько минут.`}
+                          >
+                            <button
+                              onClick={() => void handleSyncSite(selectedSite.adapter_key)}
+                              disabled={busy === "site-sync" || siteSyncActive}
+                              className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+                            >
+                              {busy === "site-sync" || siteSyncActive ? <Loader2 size={13} className="animate-spin" /> : <Globe size={13} />}
+                              Модели с сайта
+                            </button>
+                          </Tooltip>
+                        )}
+                        <button
+                          onClick={() => openManufacturerForm(selected)}
+                          className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
+                        >
+                          <Pencil size={13} />
+                          Название и сайт
+                        </button>
+                      </div>
+                    )}
+                    {selectedSite && (
+                      <SiteSyncProgress
+                        adapterKey={selectedSite.adapter_key}
+                        kick={siteSyncKick}
+                        onActiveChange={setSiteSyncActive}
+                        onFinished={(task) => {
+                          setNotice(
+                            task.status === "error"
+                              ? `Обход сайта завершился ошибкой: ${task.message ?? "без подробностей"}`
+                              : `Обход сайта завершён. ${task.message ?? ""}`.trim(),
+                          );
+                          if (selectedId) void loadManufacturerData(selectedId);
+                        }}
+                      />
+                    )}
                   </div>
-                  <div className="flex gap-8">
+                  <div className="flex gap-10">
                     {(
                       [
-                        [activeProducts, "моделей в выпуске"],
+                        [activeProducts, "в выпуске"],
                         [siTypes.length, "кодов СИ"],
                         [siTypesNeedingReview + productsNeedingReview, "ждут проверки"],
                       ] as const
                     ).map(([value, label]) => (
-                      <div key={label}>
+                      <div key={label} className="text-right">
                         <div className="text-3xl font-semibold tabular-nums tracking-tight text-zinc-50">
                           {busy === "manufacturer" ? "…" : value}
                         </div>
-                        <div className="text-[11px] text-zinc-500">{label}</div>
+                        <div className="text-xs text-zinc-500">{label}</div>
                       </div>
                     ))}
                   </div>
                 </div>
 
-                {/* Шаги: как наполняется каталог */}
-                <nav className="grid grid-cols-2 gap-1 rounded-xl border border-white/[0.08] bg-white/[0.02] p-1 sm:grid-cols-5" aria-label="Шаги каталога">
-                  {STEPS.map((s, index) => {
+                {/* Разделы производителя */}
+                <nav className="flex gap-6 overflow-x-auto border-b border-white/[0.08]" aria-label="Разделы каталога">
+                  {STEPS.map((s) => {
                     const active = s.key === step;
                     const count = stepCount(s.key);
                     return (
                       <button
                         key={s.key}
                         onClick={() => switchStep(s.key)}
-                        aria-current={active ? "step" : undefined}
-                        className={`flex items-start gap-2.5 rounded-lg px-3 py-2.5 text-left transition-colors ${
-                          active ? "bg-indigo-500/15" : "hover:bg-white/[0.04]"
+                        aria-current={active ? "page" : undefined}
+                        className={`-mb-px flex shrink-0 items-center gap-1.5 border-b-2 pb-2.5 text-sm transition-colors ${
+                          active ? "border-indigo-400 text-zinc-50" : "border-transparent text-zinc-500 hover:text-zinc-200"
                         }`}
                       >
-                        <span
-                          className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold ${
-                            active ? "bg-indigo-500 text-snow" : "border border-white/15 text-zinc-500"
-                          }`}
-                        >
-                          {index + 1}
-                        </span>
-                        <span className="min-w-0">
-                          <span className={`block text-sm font-medium leading-snug ${active ? "text-zinc-50" : "text-zinc-300"}`}>
-                            {s.title}
-                            {count !== null && <span className="ml-1.5 whitespace-nowrap font-normal tabular-nums text-zinc-500">{count}</span>}
-                          </span>
-                          <span className="hidden text-[11px] text-zinc-500 xl:block">{s.caption}</span>
-                        </span>
+                        {s.title}
+                        {count !== null && <span className="tabular-nums text-zinc-500">{count}</span>}
+                        {s.key === "si" && siTypesNeedingReview > 0 && (
+                          <Tooltip content={`Ждут проверки: ${siTypesNeedingReview}`}>
+                            <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-label="есть коды на проверку" />
+                          </Tooltip>
+                        )}
                       </button>
                     );
                   })}
                 </nav>
 
-                <div className="flex items-start gap-2 px-1 text-xs leading-relaxed text-zinc-400">
-                  <span className="whitespace-nowrap text-zinc-600">Шаг {stepIndex + 1} из {STEPS.length}.</span>
-                  {stepIndex < STEPS.length - 1 && (
-                    <button
-                      onClick={() => switchStep(STEPS[stepIndex + 1].key)}
-                      className="ml-auto flex shrink-0 items-center gap-0.5 whitespace-nowrap text-indigo-400 hover:text-indigo-300"
-                    >
-                      {STEPS[stepIndex + 1].title} <ChevronRight size={13} />
-                    </button>
-                  )}
-                </div>
-
-                {/* 1. Коды СИ */}
+                {/* Коды СИ */}
                 {step === "si" && (
-                  <div className="rounded-xl border border-white/[0.08] bg-white/[0.03]">
+                  <div className="space-y-3">
                     {isAdmin && (
-                      <div className="flex flex-wrap gap-2 border-b border-white/[0.08] px-5 py-3">
+                      <div className="flex flex-wrap gap-2">
                         <ToolbarButton onClick={handleSearchSiTypes} disabled={busy === "si-search"} busy={busy === "si-search"} icon={<Search size={13} />}>
-                          Автопоиск в ФГИС
+                          Найти в ФГИС
                         </ToolbarButton>
-                        <ToolbarButton
-                          onClick={handleLinkSiTypes}
-                          disabled={busy === "link-si"}
-                          busy={busy === "link-si"}
-                          icon={<Link2 size={13} />}
-                          title="Сопоставить модели каталога с кодами СИ по обозначению типа (по артикулу — он различает заводские исполнения)"
-                        >
-                          Привязать к моделям
-                        </ToolbarButton>
+                        <Tooltip content="Сопоставить модели с кодами СИ по обозначению типа и артикулу">
+                          <ToolbarButton onClick={handleLinkSiTypes} disabled={busy === "link-si"} busy={busy === "link-si"} icon={<Link2 size={13} />}>
+                            Привязать к моделям
+                          </ToolbarButton>
+                        </Tooltip>
                       </div>
                     )}
-                    <div className="px-5 py-3">
-                      {siTypes.length === 0 ? (
-                        <p className="text-xs text-zinc-500">Кодов СИ пока нет — запустите автопоиск или загрузите CSV.</p>
-                      ) : (
-                        <SiTypeGroups
-                          siTypes={siTypes}
-                          isAdmin={isAdmin}
-                          busy={busy}
-                          onVerify={handleVerifySiType}
-                          onFetchDescriptionType={handleFetchDescriptionType}
-                        />
-                      )}
-                    </div>
+                    {siTypes.length === 0 ? (
+                      <p className="py-6 text-sm text-zinc-500">Кодов СИ пока нет.</p>
+                    ) : (
+                      <SiTypeGroups
+                        siTypes={siTypes}
+                        isAdmin={isAdmin}
+                        busy={busy}
+                        onVerify={handleVerifySiType}
+                        onFetchDescriptionType={handleFetchDescriptionType}
+                      />
+                    )}
                   </div>
                 )}
 
-                {/* 2. Модели */}
+                {/* Модели */}
                 {step === "models" && (
-                  <div className="rounded-xl border border-white/[0.08] bg-white/[0.03]">
-                    {isAdmin && (
-                      <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.08] px-5 py-3">
-                        {selectedSite && (
-                          <ToolbarButton
-                            onClick={() => handleSyncSite(selectedSite.adapter_key)}
-                            disabled={busy === "site-sync"}
-                            busy={busy === "site-sync"}
-                            icon={<RefreshCw size={13} />}
-                            title={`Обойти каталог на ${selectedSite.base_url} и заполнить справочник (занимает несколько минут)`}
-                          >
-                            Обойти сайт производителя
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      {products.length > 0 ? (
+                        <SegmentedControl
+                          size="sm"
+                          ariaLabel="Какие модели показать"
+                          value={hideDiscontinued ? "active" : "all"}
+                          onChange={(v) => toggleHideDiscontinued(v === "active")}
+                          segments={[
+                            { value: "active", label: `В выпуске ${activeProducts}` },
+                            { value: "all", label: `Все ${products.length}` },
+                          ]}
+                        />
+                      ) : (
+                        <span />
+                      )}
+                      {isAdmin &&
+                        (addingModel ? (
+                          <div className="flex gap-2">
+                            <input
+                              autoFocus
+                              value={newModelName}
+                              onChange={(e) => setNewModelName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && newModelName.trim()) void handleCreateProduct();
+                                if (e.key === "Escape") setAddingModel(false);
+                              }}
+                              placeholder="Название модели"
+                              className="w-56 rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none"
+                            />
+                            <ToolbarButton
+                              onClick={() => void handleCreateProduct()}
+                              disabled={!newModelName.trim() || busy === "create-product"}
+                              busy={busy === "create-product"}
+                              icon={<Plus size={13} />}
+                            >
+                              Добавить
+                            </ToolbarButton>
+                          </div>
+                        ) : (
+                          <ToolbarButton onClick={() => setAddingModel(true)} icon={<Plus size={13} />}>
+                            Модель
                           </ToolbarButton>
-                        )}
-                        <div className="ml-auto flex gap-2">
-                          <input
-                            value={newModelName}
-                            onChange={(e) => setNewModelName(e.target.value)}
-                            onKeyDown={(e) => e.key === "Enter" && newModelName.trim() && void handleCreateProduct()}
-                            placeholder="Новая модель"
-                            className="rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none"
-                          />
-                          <ToolbarButton
-                            onClick={() => void handleCreateProduct()}
-                            disabled={!newModelName.trim() || busy === "create-product"}
-                            icon={<Plus size={13} />}
-                          >
-                            Добавить
-                          </ToolbarButton>
-                        </div>
+                        ))}
+                    </div>
+                    {products.length === 0 ? (
+                      <p className="py-6 text-sm text-zinc-500">Моделей пока нет.</p>
+                    ) : visibleProducts.length === 0 ? (
+                      <p className="py-6 text-sm text-zinc-500">Все модели производителя сняты с производства.</p>
+                    ) : (
+                      <div className="rounded-xl border border-white/[0.08]">
+                        <ProductMatrix products={visibleProducts} siTypes={siTypes} selectedProductId={openProductId} onSelect={setOpenProductId} />
                       </div>
                     )}
-                    <div className="px-5 py-3">
-                      {products.length > 0 && (
-                        <label className="mb-3 flex w-fit cursor-pointer items-center gap-2 text-xs text-zinc-400 hover:text-zinc-200">
-                          <input
-                            type="checkbox"
-                            checked={hideDiscontinued}
-                            onChange={(e) => toggleHideDiscontinued(e.target.checked)}
-                          />
-                          Скрыть снятые с производства
-                          <span className="tabular-nums text-zinc-600">{discontinuedProducts}</span>
-                        </label>
-                      )}
-                      {products.length === 0 ? (
-                        <p className="text-xs text-zinc-500">
-                          Моделей пока нет — обойдите сайт производителя или заведите исполнения из реестра на шаге «Обучение».
-                        </p>
-                      ) : visibleProducts.length === 0 ? (
-                        <p className="text-xs text-zinc-500">
-                          Все модели производителя сняты с производства — снимите галочку, чтобы их увидеть.
-                        </p>
-                      ) : (
-                        <ProductMatrix products={visibleProducts} siTypes={siTypes} selectedProductId={openProductId} onSelect={setOpenProductId} />
-                      )}
-                    </div>
                   </div>
                 )}
 
-                {/* 3. Обучение */}
+                {/* Реестр и руководства */}
                 {step === "learning" && (
                   <RegistryLearningSection
                     manufacturerId={selectedId}
@@ -867,16 +860,18 @@ export function CatalogPage() {
                   />
                 )}
 
-                {/* 4. Документы */}
+                {/* Документы */}
                 {step === "documents" && <CatalogDocumentsSection manufacturerId={selectedId} isAdmin={isAdmin} />}
 
-                {/* 5. ПО верхнего уровня */}
+                {/* ПО верхнего уровня */}
                 {step === "software" && <UpperSoftwareSection manufacturerId={selectedId} isAdmin={isAdmin} />}
               </>
             )}
           </div>
         </div>
       </div>
+
+      {repairOpen && <CatalogRepairDialog onClose={() => setRepairOpen(false)} />}
 
       {openProduct && (
         <ProductDrawer product={openProduct} siTypes={siTypes} isAdmin={isAdmin} onClose={closeProduct} />

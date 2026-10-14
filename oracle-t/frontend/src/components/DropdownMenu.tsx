@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
+import { Tooltip } from "./ui/Tooltip";
+
 export interface DropdownItem {
   key: string;
   label: ReactNode;
@@ -80,7 +82,6 @@ export function DropdownMenu({
               role="menuitem"
               type="button"
               disabled={item.disabled}
-              title={item.hint}
               onClick={() => {
                 setIsOpen(false);
                 item.onSelect();
@@ -90,7 +91,10 @@ export function DropdownMenu({
               }`}
             >
               {item.icon && <span className="flex w-4 shrink-0 justify-center text-zinc-500">{item.icon}</span>}
-              <span className="min-w-0 flex-1">{item.label}</span>
+              {/* Подсказка пункта — своя, а не `title`: многострочная и без секундной задержки. */}
+              <Tooltip content={item.hint} className="min-w-0 flex-1">
+                <span>{item.label}</span>
+              </Tooltip>
             </button>
           ))}
         </div>
