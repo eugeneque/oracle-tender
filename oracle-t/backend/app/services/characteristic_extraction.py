@@ -30,10 +30,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.log import LogLevel
-from app.models.manufacturer import CharacteristicSource, Product, ProductCharacteristic
+from app.models.manufacturer import (
+    CharacteristicSource,
+    Product,
+    ProductCharacteristic,
+    source_may_replace,
+)
 from app.models.user import User
 from app.seed.characteristics_data import fields_for_source, resolve_field
 from app.services.audit import log_action
+from app.services import characteristic_values
 from app.services.ai_client import chunk_text, run_structured
 
 # Кусок текста на один запрос к модели. Контекст YandexGPT Pro — 32k токенов (раздел 5.4 ТЗ
@@ -80,6 +86,11 @@ class _SaveVerdict(enum.Enum):
     SAVED = "saved"
     SKIPPED_UNKNOWN_FIELD = "skipped_unknown_field"
     SKIPPED_PROTECTED = "skipped_protected"
+    # Значение негодное: код из обозначения, подпись вместо числа, перечень вариантов всего
+    # семейства без выбора своего (`characteristic_values`).
+    SKIPPED_INVALID = "skipped_invalid"
+    # Поле уже заполнено источником выше по рангу.
+    SKIPPED_LOWER_SOURCE = "skipped_lower_source"
 
 
 @dataclass
@@ -176,16 +187,20 @@ def apply_characteristics(
     *,
     characteristic_source: CharacteristicSource,
     outcome: ExtractionOutcome,
+    ai_extracted: bool = True,
 ) -> None:
-    """Записывает вычитанное конкретной модели, считая исходы в `outcome`."""
+    """Записывает вычитанное конкретной модели, считая исходы в `outcome`.
+
+    `ai_extracted=False` — значения взяты не моделью, а напрямую из карточки реестра
+    (номер в Госреестре, МПИ): «требует проверки» им не нужно."""
 
     for item in characteristics:
         verdict = _save_characteristic(
-            db, product, item, characteristic_source=characteristic_source
+            db, product, item, characteristic_source=characteristic_source, ai_extracted=ai_extracted
         )
         if verdict is _SaveVerdict.SAVED:
             outcome.saved += 1
-        elif verdict is _SaveVerdict.SKIPPED_UNKNOWN_FIELD:
+        elif verdict in (_SaveVerdict.SKIPPED_UNKNOWN_FIELD, _SaveVerdict.SKIPPED_INVALID):
             outcome.skipped_unknown_field += 1
         else:
             outcome.skipped_protected += 1
@@ -256,6 +271,7 @@ def _save_characteristic(
     item: ExtractedCharacteristic,
     *,
     characteristic_source: CharacteristicSource,
+    ai_extracted: bool = True,
 ) -> _SaveVerdict:
     # Модель, несмотря на явный список, называет поля своими словами: «Протокол DLMS/COSEM»
     # вместо «DLMS/COSEM», «Вид монтажа» вместо «Тип монтажа», кладёт «Максимальный ток» в
@@ -282,6 +298,10 @@ def _save_characteristic(
         return _SaveVerdict.SKIPPED_UNKNOWN_FIELD
     group_name, field_name = resolved
 
+    value = _product_value(product, field_name, item.value, characteristic_source)
+    if value is None:
+        return _SaveVerdict.SKIPPED_INVALID
+
     existing = db.scalar(
         select(ProductCharacteristic).where(
             ProductCharacteristic.product_id == product.id,
@@ -295,9 +315,14 @@ def _save_characteristic(
         # не должен перетирать повторный автоматический прогон.
         if existing.verified_by_user or existing.source == CharacteristicSource.MANUAL_ENTRY.value:
             return _SaveVerdict.SKIPPED_PROTECTED
-        existing.value = item.value.strip()
+        # Источник ниже по рангу не заменяет значение источника выше: «Описание типа» не
+        # затирает таблицу сайта и руководство (замечание 13.10.2026, см. `SOURCE_RANK`).
+        if existing.value and not source_may_replace(characteristic_source.value, existing.source):
+            return _SaveVerdict.SKIPPED_LOWER_SOURCE
+        existing.value = value
         existing.source = characteristic_source.value
         existing.confidence = _clamp_confidence(item.confidence)
+        existing.ai_extracted = ai_extracted
         return _SaveVerdict.SAVED
 
     db.add(
@@ -305,10 +330,11 @@ def _save_characteristic(
             product_id=product.id,
             group_name=group_name,
             field_name=field_name,
-            value=item.value.strip(),
+            value=value,
             source=characteristic_source.value,
             confidence=_clamp_confidence(item.confidence),
             verified_by_user=False,  # раздел 5.3 ТЗ — обязательная проверка человеком
+            ai_extracted=ai_extracted,
         )
     )
     # Flush обязателен: куски текста режутся с перекрытием (см. `chunk_text`), поэтому одна и
@@ -318,6 +344,31 @@ def _save_characteristic(
     # то есть потерялись бы и все остальные характеристики документа.
     db.flush()
     return _SaveVerdict.SAVED
+
+
+def _product_value(
+    product: Product, field_name: str, raw: str, source: CharacteristicSource
+) -> str | None:
+    """Значение для этой модели, а не для семейства. `None` — записывать нечего.
+
+    «Описание типа» и руководство описывают тип целиком, и модель переносила в поле одной
+    модели перечень всех вариантов («в зависимости от корпуса: S10, C10 — 120×180×74 мм;
+    S30 — …»). Вариант модели выбирается по её обозначению; если выбрать нельзя, перечень
+    из «Описания типа» не записывается — в карточке он читался как ошибка (замечание
+    13.10.2026, п.2–3), — а из руководства остаётся: там это часто единственный ответ."""
+
+    value = characteristic_values.normalise_value(field_name, raw)
+    if value is None or not characteristic_values.is_family_level(value):
+        return value
+    tokens = characteristic_values.designation_tokens(
+        product.model_code, product.model_name, product.execution
+    )
+    picked = characteristic_values.resolve_family_value(value, tokens)
+    if picked is not None:
+        return characteristic_values.normalise_value(field_name, picked)
+    if source is CharacteristicSource.FGIS_DESCRIPTION_TYPE:
+        return None
+    return value
 
 
 # Предел числа отложенных полей у одной модели: модель иногда возвращает документ целиком

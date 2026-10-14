@@ -61,15 +61,16 @@ def si_type_to_out(si_type: SiType) -> SiTypeOut:
 
 
 def list_manufacturers(db: Session) -> list[Manufacturer]:
-    """По убыванию доли рынка (замечание тестировщика 18.09.2026); у кого доля не
-    опубликована — в конце по алфавиту. МИРТЕК не закрепляется первым: заказчик просил
-    видеть себя среди конкурентов на своём месте, а не над ними."""
-    return list(
-        db.scalars(
-            select(Manufacturer).order_by(
-                Manufacturer.market_share_pct.desc().nulls_last(), Manufacturer.legal_name
-            )
-        )
+    """По алфавиту бренда. До 13.10.2026 список шёл по доле рынка, но доля была известна
+    только у пяти производителей и тендерному отделу не нужна (замечание 13.10.2026, п.11).
+    МИРТЕК не закрепляется первым: заказчик просил видеть себя среди конкурентов на своём
+    месте, а не над ними."""
+    # Сортировка в Python, а не ORDER BY: порядок кириллицы зависит от правила сортировки
+    # базы (en_US.UTF-8 на macOS сравнивает иначе, чем на сервере), а производителей —
+    # пара десятков.
+    return sorted(
+        db.scalars(select(Manufacturer)),
+        key=lambda m: (m.brand_name or m.legal_name or "").casefold().replace("ё", "е"),
     )
 
 
@@ -79,16 +80,12 @@ def create_manufacturer(
     legal_name: str,
     brand_name: str | None,
     website: str | None,
-    market_share_pct: float | None,
-    market_share_source: str | None,
     actor: User,
 ) -> Manufacturer:
     manufacturer = Manufacturer(
         legal_name=legal_name.strip(),
         brand_name=(brand_name or "").strip() or None,
         website=(website or "").strip() or None,
-        market_share_pct=market_share_pct,
-        market_share_source=(market_share_source or "").strip() or None,
         is_mirtek=False,
     )
     db.add(manufacturer)
@@ -113,11 +110,9 @@ def update_manufacturer(
     """`fields` — только присланные в PATCH поля (`model_dump(exclude_unset=True)`)."""
     if "legal_name" in fields:
         manufacturer.legal_name = fields["legal_name"].strip()
-    for name in ("brand_name", "website", "market_share_source"):
+    for name in ("brand_name", "website"):
         if name in fields:
             setattr(manufacturer, name, (fields[name] or "").strip() or None)
-    if "market_share_pct" in fields:
-        manufacturer.market_share_pct = fields["market_share_pct"]
     log_action(
         db,
         component="product_catalog",
@@ -472,6 +467,7 @@ def upsert_characteristic_manually(
     existing.source = CharacteristicSource.MANUAL_ENTRY.value
     existing.confidence = None  # ручной ввод — не вероятностная оценка
     existing.verified_by_user = True
+    existing.ai_extracted = False
 
     log_action(
         db,

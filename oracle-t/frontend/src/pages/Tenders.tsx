@@ -79,6 +79,27 @@ import {
 
 const SELECTED_SOURCES_STORAGE_KEY = "oraclet_selected_source_keys";
 const FEED_STORAGE_KEY = "oraclet_tender_feed";
+// Закупка, открытая справа в двухпанельном режиме. sessionStorage, а не адрес: параметры
+// адреса здесь снимаются эффектами разделов («Избранное», канал), и выбор слетал бы вместе
+// с ними. Нужна только для F5 в той же вкладке браузера (замечание 13.10.2026).
+const SELECTED_TENDER_STORAGE_KEY = "oraclet_selected_tender_id";
+
+function loadSelectedTenderId(): string | null {
+  try {
+    return sessionStorage.getItem(SELECTED_TENDER_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveSelectedTenderId(id: string | null): void {
+  try {
+    if (id) sessionStorage.setItem(SELECTED_TENDER_STORAGE_KEY, id);
+    else sessionStorage.removeItem(SELECTED_TENDER_STORAGE_KEY);
+  } catch {
+    // не запомнили — после F5 откроется первая закупка выдачи
+  }
+}
 
 /** Канал сбора (28.09.2026): «Стандартные ресурсы» — площадки из «Настройки → Источники
  * тендеров», остальные — закупки, собранные через API внешнего сервиса (Госплан, с 30.09 —
@@ -1482,10 +1503,17 @@ export function TendersPage() {
       setSelectedTender(null);
       return;
     }
-    setSelectedTender((current) =>
-      current && tenders.some((item) => item.id === current.id) ? current : tenders[0],
-    );
+    setSelectedTender((current) => {
+      if (current && tenders.some((item) => item.id === current.id)) return current;
+      // После F5 — та же закупка, что была открыта, если она есть в выдаче.
+      const remembered = current === null ? loadSelectedTenderId() : null;
+      return tenders.find((item) => item.id === remembered) ?? tenders[0];
+    });
   }, [activeView, tenders]);
+
+  useEffect(() => {
+    if (activeView === "split" && selectedTender) saveSelectedTenderId(selectedTender.id);
+  }, [activeView, selectedTender]);
 
   useEffect(() => {
     if (sources.length === 0) return;

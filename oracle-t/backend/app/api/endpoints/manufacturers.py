@@ -10,6 +10,8 @@ from app.models.user import User
 from app.schemas.manufacturer import (
     CatalogAutofillStatusOut,
     CatalogDocumentOut,
+    CatalogRepairOut,
+    DataSourceOut,
     CatalogDocumentsSummaryOut,
     CatalogLookupRequest,
     CatalogTaskOut,
@@ -38,8 +40,10 @@ from app.schemas.manufacturer import (
     SiTypeOut,
     SiTypeUpdate,
 )
+from app.adapters.fgis import FgisAdapter
 from app.services import (
     catalog_autofill,
+    catalog_repair,
     catalog_import,
     catalog_learning,
     catalog_queue_service,
@@ -50,6 +54,7 @@ from app.services import (
     fgis_description_ingest,
     meter_parameter_card,
     product_manual_ingest,
+    product_sources,
     catalog_site_sync,
     product_catalog_service,
     registry_modifications,
@@ -92,8 +97,6 @@ def post_manufacturer(
         legal_name=payload.legal_name,
         brand_name=payload.brand_name,
         website=payload.website,
-        market_share_pct=payload.market_share_pct,
-        market_share_source=payload.market_share_source,
         actor=admin,
     )
 
@@ -298,13 +301,23 @@ def post_extract_from_si_type(
         )
     si_type = _get_si_type_or_404(db, product.si_type_id)
     if not si_type.description_type_text:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                "Текст «Описание типа» ещё не загружен — сначала выполните "
-                "POST /si-types/{id}/fetch-description-type"
-            ),
+        # Кнопка в карточке модели — одно действие «прочитать «Описание типа»»: загрузить
+        # текст, если его ещё нет, и сразу прочитать (замечание 13.10.2026).
+        if not si_type.description_type_url and not si_type.description_type_mirror_url:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="У типа в реестре нет ссылки на «Описание типа» — читать нечего",
+            )
+        text = FgisAdapter().fetch_description_type_text(
+            si_type.description_type_url or "", mirror_url=si_type.description_type_mirror_url
         )
+        if not text:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="«Описание типа» не загрузилось ни из ФГИС, ни с зеркала — попробуйте позже",
+            )
+        si_type.description_type_text = text
+        db.commit()
 
     try:
         outcome = characteristic_extraction.extract_characteristics_for_product(
@@ -840,3 +853,106 @@ def get_unknown_fields(
 
     _get_manufacturer_or_404(db, manufacturer_id)
     return characteristic_extraction.unknown_fields_summary(db, manufacturer_id, limit=min(limit, 200))
+
+
+# --- Источники данных модели и наведение порядка (замечания тендерного отдела 13.10.2026) ---
+
+MAX_MANUAL_UPLOAD_BYTES = 40 * 1024 * 1024
+
+
+@router.get("/products/{product_id}/data-sources", response_model=list[DataSourceOut])
+def get_product_data_sources(
+    product_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Что опрошено по модели, что нет и почему; какие действия доступны и какие из них
+    выполняет модель ИИ."""
+
+    product = _get_product_or_404(db, product_id)
+    return product_sources.product_sources(db, product)
+
+
+@router.post("/products/{product_id}/read-manual", response_model=ManualIngestOutcomeOut)
+def post_read_manual(
+    product_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Прочитать руководство модели по уже известной ссылке — сейчас, не дожидаясь
+    еженедельного обучения каталога. Выполняет модель ИИ."""
+
+    product = _get_product_or_404(db, product_id)
+    manufacturer = _get_manufacturer_or_404(db, product.manufacturer_id)
+    try:
+        outcome = product_manual_ingest.ingest_manuals(
+            db, manufacturer, actor=admin, limit=1, refresh=True, products=[product]
+        )
+    except AiNotConfiguredError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    if outcome.skipped_by_robots:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Сайт производителя запрещает роботам скачивать этот документ (robots.txt). "
+                "Скачайте руководство в браузере и загрузите PDF в карточке модели."
+            ),
+        )
+    if outcome.skipped_no_link:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="У модели нет ссылки на руководство — найдите его поиском или загрузите PDF",
+        )
+    if outcome.failed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Руководство не скачалось или не читается — загрузите PDF вручную",
+        )
+    if outcome.ai_failed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=product_manual_ingest.AI_DID_NOT_ANSWER
+        )
+    return ManualIngestOutcomeOut(**vars(outcome))
+
+
+@router.post("/products/{product_id}/manual-upload", response_model=ManualIngestOutcomeOut)
+def post_manual_upload(
+    product_id: uuid.UUID,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Руководство, скачанное человеком: когда сайт производителя закрыт для роботов.
+    Читает модель ИИ; прочитанное получают и модели семейства с той же ссылкой."""
+
+    product = _get_product_or_404(db, product_id)
+    content = file.file.read(MAX_MANUAL_UPLOAD_BYTES + 1)
+    if len(content) > MAX_MANUAL_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Файл больше {MAX_MANUAL_UPLOAD_BYTES // (1024 * 1024)} МБ",
+        )
+    try:
+        outcome = product_manual_ingest.ingest_uploaded_manual(
+            db, product, content=content, file_name=file.filename or "руководство.pdf", actor=admin
+        )
+    except AiNotConfiguredError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    return ManualIngestOutcomeOut(**vars(outcome))
+
+
+@router.get("/catalog/repair-characteristics", response_model=CatalogRepairOut)
+def get_repair_preview(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    """Предпросмотр наведения порядка: что изменится, база не трогается. Без ИИ."""
+
+    return CatalogRepairOut(**vars(catalog_repair.repair(db, apply=False, actor=admin)))
+
+
+@router.post("/catalog/repair-characteristics", response_model=CatalogRepairOut)
+def post_repair(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    """Применить наведение порядка; сайты затронутых производителей обходятся заново в фоне.
+    Без ИИ."""
+
+    return CatalogRepairOut(**vars(catalog_repair.repair(db, apply=True, actor=admin)))

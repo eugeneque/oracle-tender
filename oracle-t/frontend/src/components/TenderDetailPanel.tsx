@@ -269,10 +269,20 @@ export function TenderDetailPanel({
     [onChanged],
   );
 
-  // Смена тендера в двухпанельном режиме — это тот же компонент с другими данными:
-  // без сброса состояния правая панель показывала бы документы и оценку предыдущей закупки.
+  // Свежая версия той же закупки (родитель перечитал её после правки или разбора) — только
+  // подменяет шапку. Сбрасывать ради неё документы и оценку нельзя: см. эффект ниже.
   useEffect(() => {
     setTender(initialTender);
+  }, [initialTender]);
+
+  // Смена тендера в двухпанельном режиме — это тот же компонент с другими данными:
+  // без сброса состояния правая панель показывала бы документы и оценку предыдущей закупки.
+  // Сброс — по смене id, а не объекта (баг 13.10.2026: «после обновления страницы слетают
+  // документы и разбор ИИ»). `loadCard` перечитывает закупку и через `onChanged` отдаёт её
+  // списку, список возвращает сюда новый объект с тем же id — и прежний эффект обнулял
+  // документы, оценку и карточку, а их загрузчики, завязанные на `tender.id`, повторно не
+  // срабатывали. При F5 карточка из базы приходит быстро и стирала уже загруженное.
+  useEffect(() => {
     setActiveTab("overview");
     setDocuments(null);
     setRequirements(null);
@@ -287,7 +297,7 @@ export function TenderDetailPanel({
     setNiche(null);
     setError(null);
     setActionMessage(null);
-  }, [initialTender]);
+  }, [initialTender.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -783,9 +793,14 @@ export function TenderDetailPanel({
   // представительному корпусу, до тех пор честно показывала «недостаточно данных» и только
   // занимала место в ряду. Похожие закупки при этом никуда не делись — они по-прежнему
   // перечислены в блоке «AI-оценка по профилю» как обоснование измерения History.
+  //
+  // «Дополнительно» и «Заявка» поменялись местами (замечание 13.10.2026): условия закупки
+  // (обеспечение, сроки поставки, оплата) смотрят при каждом решении об участии, а заявку
+  // готовят по малой доле закупок — ей хватает места в меню «Ещё».
   const primaryTabs: { key: TabKey; label: string; badge?: number }[] = [
     { key: "overview", label: "Основное" },
     { key: "documents", label: "Документы", badge: documents?.length },
+    { key: "extra", label: "Дополнительно" },
     {
       key: "requirements",
       label: "Требования",
@@ -793,7 +808,6 @@ export function TenderDetailPanel({
     },
     { key: "compliance", label: "Конкуренция" },
     { key: "calculation", label: "Расчёт" },
-    { key: "application", label: "Заявка" },
   ];
   const tableTabs: { key: TabKey; label: string }[] = [
     { key: "lots", label: "Лоты" },
@@ -803,7 +817,7 @@ export function TenderDetailPanel({
     { key: "events", label: "Журнал событий" },
   ];
   const moreTabs: { key: TabKey; label: string; badge?: number }[] = [
-    { key: "extra", label: "Дополнительно" },
+    { key: "application", label: "Заявка" },
     { key: "card", label: "Карточка закупки" },
     ...tableTabs
       .filter((tab) => cardTable(tab.key))

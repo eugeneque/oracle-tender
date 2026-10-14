@@ -44,9 +44,10 @@ from app.models.manufacturer import (
     Manufacturer,
     Product,
     ProductCharacteristic,
+    ProductDataSource,
     SiType,
 )
-from app.services import characteristic_extraction, si_type_linking
+from app.services import characteristic_extraction, characteristic_values, si_type_linking
 from app.services.audit import log_action
 
 COMPONENT = "product_catalog"
@@ -219,12 +220,13 @@ def _fill_registry_facts(
         for group, name, value in facts
     ]
     # В счётчик характеристик не входят: факты проставляются каждым проходом заново, и
-    # отчёт «сохранено N» иначе врал бы о работе модели.
+    # отчёт «сохранено N» иначе врал бы о работе модели. Модель их не читает — пометка
+    # «требует проверки» им не нужна.
     for product in products:
-        _apply(db, product, items)
+        _apply(db, product, items, ai_extracted=False)
 
 
-def _apply(db: Session, product: Product, characteristics: list) -> int:
+def _apply(db: Session, product: Product, characteristics: list, *, ai_extracted: bool = True) -> int:
     result = characteristic_extraction.ExtractionOutcome()
     characteristic_extraction.apply_characteristics(
         db,
@@ -232,6 +234,7 @@ def _apply(db: Session, product: Product, characteristics: list) -> int:
         characteristics,
         characteristic_source=CharacteristicSource.FGIS_DESCRIPTION_TYPE,
         outcome=result,
+        ai_extracted=ai_extracted,
     )
     return result.saved
 
@@ -249,12 +252,21 @@ def _decode_modification(
 
     if not product.registry_modification or not si_type.allowed_modifications:
         return 0
+    # Только исполнения, заведённые из реестра: у них полное обозначение и есть сама модель.
+    # У модели с сайта обозначение из списка «представлены на испытания» — один из образцов
+    # семейства, а не она: «CE210 C10.746.B SPDS» получала расшифровку образца «…L1F»
+    # (замечание 13.10.2026), МИРТЕК-12-РУ-SP17 — «80 А» вместо своих 100 А.
+    if product.data_source != ProductDataSource.FGIS.value:
+        return 0
     text = (
         "Структура условного обозначения типа (легенда из реестра средств измерений):\n"
         f"{si_type.allowed_modifications}\n\n"
         "Условное обозначение конкретного исполнения прибора, которое нужно расшифровать по "
         f"легенде выше: {product.registry_modification}\n"
-        "Расшифруй каждый сегмент обозначения в характеристики прибора."
+        "Расшифруй сегменты обозначения в характеристики прибора. Записывай значение, а не код: "
+        "если легенда называет только смысл позиции («код класса точности», «количество "
+        "фаз»), но не говорит, что означает стоящий в ней код, — эту позицию пропусти. "
+        "Нельзя записывать буквы и цифры обозначения как значение поля."
     )
     try:
         reading = characteristic_extraction.read_characteristics(
@@ -264,7 +276,16 @@ def _decode_modification(
         logger.warning(f"Аршин: расшифровка обозначения «{product.registry_modification}» не удалась: {exc}")
         return 0
     outcome.modifications_decoded += 1
-    return _apply(db, product, reading.characteristics)
+    # Страховка на случай, если модель всё же переписала код: «F», «L1», «2» — это куски
+    # обозначения, а не характеристики.
+    decoded = [
+        item
+        for item in reading.characteristics
+        if not characteristic_values.looks_like_designation_code(
+            item.value, product.registry_modification, item.field_name
+        )
+    ]
+    return _apply(db, product, decoded)
 
 
 def mark_description_changed(si_type: SiType, *, new_version: str | None) -> None:

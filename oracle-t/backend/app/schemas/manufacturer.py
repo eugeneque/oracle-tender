@@ -12,10 +12,6 @@ class ManufacturerOut(BaseModel):
     brand_name: str | None
     website: str | None
     is_mirtek: bool
-    # Доля рынка, % и источник оценки — по доле сортируется список (замечание тестировщика
-    # 18.09.2026). `None` — доля не опубликована, не ноль.
-    market_share_pct: float | None = None
-    market_share_source: str | None = None
     created_at: datetime
 
 
@@ -23,19 +19,14 @@ class ManufacturerCreate(BaseModel):
     legal_name: str = Field(min_length=1, max_length=500)
     brand_name: str | None = Field(default=None, max_length=255)
     website: str | None = Field(default=None, max_length=500)
-    market_share_pct: float | None = Field(default=None, ge=0, le=100)
-    market_share_source: str | None = None
 
 
 class ManufacturerUpdate(BaseModel):
-    """Поле, не присланное в запросе, не меняется; `market_share_pct: null` явно снимает
-    долю (та же семантика, что и у `SiTypeUpdate`)."""
+    """Поле, не присланное в запросе, не меняется (та же семантика, что и у `SiTypeUpdate`)."""
 
     legal_name: str | None = Field(default=None, min_length=1, max_length=500)
     brand_name: str | None = Field(default=None, max_length=255)
     website: str | None = Field(default=None, max_length=500)
-    market_share_pct: float | None = Field(default=None, ge=0, le=100)
-    market_share_source: str | None = None
 
 
 class SiTypeOut(BaseModel):
@@ -158,6 +149,8 @@ class CharacteristicOut(BaseModel):
     source: str
     confidence: float | None
     verified_by_user: bool
+    # Значение вычитано моделью ИИ — «требует проверки» показывается только у таких.
+    ai_extracted: bool = False
     updated_at: datetime
 
 
@@ -169,6 +162,8 @@ class MeterParameterFieldOut(BaseModel):
 
     group_name: str
     field_name: str
+    # Подпись в карточке, если имя поля справочника читается странно (П32).
+    label: str = ""
     characteristic: CharacteristicOut | None
 
 
@@ -192,6 +187,8 @@ class MeterParameterOut(BaseModel):
     filled: bool
     fields: list[MeterParameterFieldOut]
     facts: list[MeterParameterFactOut]
+    # Где обычно есть ответ: site / fgis / manual / gisp / zak / upper_software / astra.
+    sources: list[str] = []
 
 
 class CharacteristicUpsert(BaseModel):
@@ -438,3 +435,38 @@ class UnknownFieldOut(BaseModel):
     field_name: str
     products: int
     sample: str
+
+
+class DataSourceActionOut(BaseModel):
+    key: str
+    label: str
+    # Действие выполняется моделью ИИ — интерфейс помечает кнопку (замечание 13.10.2026).
+    ai: bool
+
+
+class DataSourceOut(BaseModel):
+    """Источник данных модели и его состояние: ok / pending / blocked / missing / error /
+    running (`app/services/product_sources.py`)."""
+
+    key: str
+    label: str
+    state: str
+    detail: str
+    url: str | None
+    actions: list[DataSourceActionOut]
+    registry: str | None = None
+
+
+class CatalogRepairOut(BaseModel):
+    """Итог (или предпросмотр) наведения порядка в характеристиках (`catalog_repair`)."""
+
+    applied: bool
+    values_normalised: int
+    values_removed: int
+    family_values_resolved: int
+    modifications_cleared: int
+    extra_fields_spread: int
+    extra_entries_removed: int
+    products_affected: int
+    manufacturers_to_refresh: list[str]
+    examples: list[str]

@@ -229,6 +229,19 @@ def _run_upper_software_job() -> None:
         db.close()
 
 
+def _run_registry_poll_job() -> None:
+    """Еженедельная сверка каталога с реестрами допуска (замечание 13.10.2026): выгрузки
+    ГИСП и перечня Россетей раскладываются по моделям. Сбой одного реестра — в журнал
+    опросов, второй всё равно опрашивается."""
+
+    from app.services import registry_polling
+
+    try:
+        registry_polling.poll_all_scheduled()
+    except Exception as exc:  # noqa: BLE001 - сбой сверки не должен ронять планировщик
+        logger.warning(f"Сверка с реестрами допуска завершилась ошибкой: {exc}")
+
+
 def _run_catalog_queue_job() -> None:
     """Подбирает задачи очереди справочника, оставшиеся невыполненными.
 
@@ -272,6 +285,12 @@ def _run_gap_repair_job() -> None:
         db.close()
 
 
+def _parse_times(value: str) -> list[str]:
+    """«06:00,20:00» → ["06:00", "20:00"]: у задачи может быть несколько запусков в сутки."""
+
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 def _parse_hh_mm(value: str) -> tuple[int, int]:
     hour_str, _, minute_str = value.partition(":")
     return int(hour_str), int(minute_str or "0")
@@ -283,6 +302,17 @@ def start_scheduler() -> BackgroundScheduler | None:
     if not settings.scheduler_enabled:
         logger.info("Планировщик опроса источников отключён (SCHEDULER_ENABLED=false)")
         return None
+
+    # Опрос реестра, оборванный перезапуском, иначе вечно висел бы в карточке «идёт опрос».
+    db = SessionLocal()
+    try:
+        from app.services import registry_polling
+
+        registry_polling.mark_interrupted(db)
+    except Exception as exc:  # noqa: BLE001 - уборка не должна мешать запуску
+        logger.warning(f"Не удалось закрыть оборванные опросы реестров: {exc}")
+    finally:
+        db.close()
 
     scheduler = BackgroundScheduler(timezone="Europe/Moscow")
     for label, time_str in (
@@ -327,13 +357,14 @@ def start_scheduler() -> BackgroundScheduler | None:
     # еженедельные запуски тех же шагов не ставятся.
     autofill = settings.catalog_autofill_enabled
     if autofill:
-        hour, minute = _parse_hh_mm(settings.catalog_autofill_time)
-        scheduler.add_job(
-            _run_catalog_autofill_job,
-            CronTrigger(hour=hour, minute=minute),
-            id="catalog_autofill",
-            replace_existing=True,
-        )
+        for number, time_str in enumerate(_parse_times(settings.catalog_autofill_time)):
+            hour, minute = _parse_hh_mm(time_str)
+            scheduler.add_job(
+                _run_catalog_autofill_job,
+                CronTrigger(hour=hour, minute=minute),
+                id="catalog_autofill" if number == 0 else f"catalog_autofill_{number}",
+                replace_existing=True,
+            )
     if settings.catalog_sites_sync_enabled and not autofill:
         hour, minute = _parse_hh_mm(settings.catalog_sites_sync_time)
         scheduler.add_job(
@@ -368,7 +399,15 @@ def start_scheduler() -> BackgroundScheduler | None:
             id="upper_software_sync",
             replace_existing=True,
         )
-    # После ночного автозаполнения каталога (01:00) и до утреннего опроса.
+    if settings.registry_poll_enabled:
+        hour, minute = _parse_hh_mm(settings.registry_poll_time)
+        scheduler.add_job(
+            _run_registry_poll_job,
+            CronTrigger(day_of_week=settings.registry_poll_weekday, hour=hour, minute=minute),
+            id="registry_poll",
+            replace_existing=True,
+        )
+    # Ночью, до утреннего опроса: к нему матрицы оборванных разборов уже достроены.
     scheduler.add_job(
         _run_gap_repair_job,
         CronTrigger(hour=5, minute=0),
@@ -398,13 +437,20 @@ def start_scheduler() -> BackgroundScheduler | None:
     scheduler.start()
     logger.info(
         "Планировщик опроса источников запущен: "
-        f"утро {settings.scheduler_morning_time}, обед {settings.scheduler_afternoon_time}, "
-        "пинг доступности — раз в минуту; справочник продукции: ревалидация ФГИС "
+        f"площадки в {settings.scheduler_morning_time} и {settings.scheduler_afternoon_time} МСК, "
+        "пинг доступности — площадки раз в 15 мин; справочник продукции: ревалидация ФГИС "
         f"{settings.fgis_revalidation_time if settings.fgis_revalidation_enabled else 'отключена'}, "
-        f"каталоги сайтов производителей {settings.catalog_sites_sync_time if settings.catalog_sites_sync_enabled else 'отключены'}, "
         f"сверка документов {settings.document_registry_check_time if settings.document_registry_check_enabled else 'отключена'}, "
-        f"списки ПО верхнего уровня {settings.upper_software_sync_time if settings.upper_software_sync_enabled else 'отключены'}, "
-        f"автозаполнение каталога {settings.catalog_autofill_time + ' ежедневно' if autofill else 'отключено'}"
+        + (
+            # Еженедельные обход сайтов и списки ПО при автозаполнении не ставятся (см. выше).
+            f"автозаполнение каталога (сайты производителей, ФГИС, Аршин) "
+            f"{settings.catalog_autofill_time} ежедневно"
+            if autofill
+            else "каталоги сайтов производителей "
+            f"{settings.catalog_sites_sync_time if settings.catalog_sites_sync_enabled else 'отключены'}, "
+            "списки ПО верхнего уровня "
+            f"{settings.upper_software_sync_time if settings.upper_software_sync_enabled else 'отключены'}"
+        )
     )
     _scheduler = scheduler
     return scheduler

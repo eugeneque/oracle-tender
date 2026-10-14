@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import io
+import time
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
@@ -69,6 +70,10 @@ class IngestOutcome:
     skipped_no_link: int = 0
     skipped_by_robots: int = 0
     failed: int = 0
+    # Документ скачан, но модель ИИ не ответила ни на один кусок текста (ключ, лимит, сеть).
+    # Отдельно от `failed`: иначе человек видит «сохранено 0» и решает, что в руководстве
+    # ничего нет (найдено тестом 14.10.2026).
+    ai_failed: int = 0
     characteristics_saved: int = 0
     messages: list[str] = field(default_factory=list)
 
@@ -206,6 +211,10 @@ def ingest_manuals(
             if not use_ai:
                 continue
             characteristics, saved = _extract(db, product, text, actor=actor)
+            if characteristics is None:
+                outcome.ai_failed += 1
+                outcome.messages.append(f"{product.model_name}: модель ИИ не ответила, руководство не прочитано")
+                continue
             parsed[url] = characteristics
             outcome.characteristics_saved += saved
 
@@ -222,6 +231,85 @@ def ingest_manuals(
             f"{outcome.skipped_have_data}, без ссылки {outcome.skipped_no_link}, "
             f"запрещено robots.txt {outcome.skipped_by_robots}; не загрузилось "
             f"{outcome.failed}"
+        ),
+        user_id=actor.id,
+    )
+    db.commit()
+    return outcome
+
+
+# Ответы robots.txt для карточки модели: она открывается часто, а правила сайта меняются
+# редко — спрашивать сайт при каждом открытии незачем.
+_ROBOTS_TTL_SECONDS = 6 * 3600
+_robots_cache: dict[str, tuple[float, bool]] = {}
+
+
+def robots_allows(url: str) -> bool:
+    """Разрешает ли сайт роботу скачать документ. Для карточки модели: «руководство не
+    прочитано, потому что сайт запрещает» — причина, которую человек должен видеть."""
+
+    now = time.monotonic()
+    cached = _robots_cache.get(url)
+    if cached and now - cached[0] < _ROBOTS_TTL_SECONDS:
+        return cached[1]
+    allowed = RobotsGate().allows(url)
+    _robots_cache[url] = (now, allowed)
+    return allowed
+
+
+def ingest_uploaded_manual(
+    db: Session, product: Product, *, content: bytes, file_name: str, actor: User
+) -> IngestOutcome:
+    """Руководство, загруженное человеком (замечание 13.10.2026): когда сайт производителя
+    запрещает роботам раздел документации — как Энергомера `/documentations/` — обход его не
+    скачивает, и единственный честный путь — скачать PDF в браузере и отдать сюда.
+
+    Документ описывает семейство, поэтому прочитанное раздаётся и остальным моделям
+    производителя с той же ссылкой на руководство — как при обычном разборе."""
+
+    outcome = IngestOutcome()
+    extension = _extension_of(file_name) or sniff_extension(content)
+    try:
+        text = extract_text(extension, content)
+    except Exception as exc:  # noqa: BLE001 - битый файл → понятная ошибка
+        raise ValueError(f"Файл не удалось прочитать: {exc}") from exc
+    text = (text or "")[:MAX_MANUAL_CHARS]
+    if not text.strip():
+        raise ValueError("В файле нет текста (скан без текстового слоя?) — характеристики не извлечь")
+
+    characteristics, saved = _extract(db, product, text, actor=actor)
+    if characteristics is None:
+        raise ValueError(AI_DID_NOT_ANSWER)
+    outcome.processed = 1
+    outcome.characteristics_saved += saved
+
+    url = _manual_url(db, product)
+    if url:
+        siblings = db.scalars(
+            select(Product)
+            .join(ProductCharacteristic, ProductCharacteristic.product_id == Product.id)
+            .where(
+                Product.manufacturer_id == product.manufacturer_id,
+                Product.id != product.id,
+                ProductCharacteristic.group_name == MANUAL_FIELD[0],
+                ProductCharacteristic.field_name == MANUAL_FIELD[1],
+                ProductCharacteristic.value == url,
+            )
+        )
+        for sibling in siblings:
+            outcome.reused_documents += 1
+            outcome.characteristics_saved += _apply(db, sibling, characteristics, actor=actor)
+
+    log_action(
+        db,
+        component=COMPONENT,
+        action=f"upload_manual:{product.id}",
+        result="success" if outcome.characteristics_saved else "empty",
+        level=LogLevel.INFO,
+        details=(
+            f"Руководство «{file_name}» загружено вручную для {product.model_name}: характеристик "
+            f"сохранено {outcome.characteristics_saved}, моделей семейства с той же ссылкой "
+            f"{outcome.reused_documents}"
         ),
         user_id=actor.id,
     )
@@ -287,11 +375,17 @@ def _extension_of(url: str) -> str | None:
     return f".{tail.lower()}" if tail and tail != path else None
 
 
-def _extract(db: Session, product: Product, text: str, *, actor: User) -> tuple[list, int]:
+AI_DID_NOT_ANSWER = (
+    "Модель ИИ не ответила — руководство не прочитано. Проверьте подключение ИИ в разделе "
+    "«Интеграции» и повторите."
+)
+
+
+def _extract(db: Session, product: Product, text: str, *, actor: User) -> tuple[list | None, int]:
     """Читает руководство моделью и записывает результат первой модели семейства.
 
     Возвращает вычитанное — чтобы остальные модели с тем же документом получили его без
-    повторного обращения к YandexGPT."""
+    повторного обращения к YandexGPT. `None` — модель не ответила ни на один кусок."""
 
     from app.services import characteristic_extraction
 
@@ -301,7 +395,9 @@ def _extract(db: Session, product: Product, text: str, *, actor: User) -> tuple[
         )
     except Exception as exc:  # noqa: BLE001 - недоступность модели не должна ронять прогон
         logger.warning(f"Разбор руководства модели {product.model_name} не удался: {exc}")
-        return [], 0
+        return None, 0
+    if reading.chunks_failed and not reading.chunks_processed:
+        return None, 0
 
     return reading.characteristics, _apply(db, product, reading.characteristics, actor=actor)
 

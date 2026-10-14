@@ -30,6 +30,8 @@ class RegistryRecordOut(BaseModel):
     note: str | None
     verified_by_user: bool
     verified_at: datetime | None
+    # Запись заведена автоматическим опросом реестра (13.10.2026); `None` — человеком.
+    auto_found_at: datetime | None = None
     # Состояние, посчитанное по датам на сегодня: active / expiring / expired / absent.
     state: str
     summary: str
@@ -46,6 +48,25 @@ class RegistryRecordUpsert(BaseModel):
     verified: bool = False
 
 
+class RegistryPollOut(BaseModel):
+    """Опрос реестра допуска (13.10.2026). `status`: running / ok / error."""
+
+    id: uuid.UUID
+    registry: str
+    method: str
+    status: str
+    message: str | None
+    source_url: str | None
+    file_name: str | None
+    rows_total: int
+    rows_relevant: int
+    products_checked: int
+    products_found: int
+    records_saved: int
+    started_at: datetime
+    finished_at: datetime | None
+
+
 class ProductRegistryRowOut(BaseModel):
     """Строка карточки модели: реестр и запись по нему, если заведена."""
 
@@ -55,6 +76,19 @@ class ProductRegistryRowOut(BaseModel):
     url: str | None
     state: str
     record: RegistryRecordOut | None
+    pollable: bool = False
+    last_poll: RegistryPollOut | None = None
+    last_successful_poll: RegistryPollOut | None = None
+
+
+class RegistryPollStatusOut(BaseModel):
+    """Состояние автоматической сверки по реестру — для панели администратора."""
+
+    registry: str
+    label: str
+    url: str | None
+    last_poll: RegistryPollOut | None
+    last_successful_poll: RegistryPollOut | None
 
 
 class RegistryProductStateOut(BaseModel):

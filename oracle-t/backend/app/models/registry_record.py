@@ -27,7 +27,7 @@ import enum
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -78,6 +78,9 @@ class ProductRegistryRecord(Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     verified_by_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Запись заведена автоматическим опросом реестра (`registry_polling`, 13.10.2026), а не
+    # человеком. Ручная правка сбрасывает отметку — и опрос такую запись больше не трогает.
+    auto_found_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_by_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -89,3 +92,48 @@ class ProductRegistryRecord(Base):
     )
 
     product = relationship("Product")
+
+
+class PollMethod(str, enum.Enum):
+    """Как получена выгрузка реестра: скачана сервером или загружена человеком файлом
+    (если реестр не отдал её роботу)."""
+
+    DOWNLOAD = "download"
+    UPLOAD = "upload"
+
+
+class PollStatus(str, enum.Enum):
+    OK = "ok"
+    ERROR = "error"
+
+
+class AdmissionRegistryPoll(Base):
+    """Опрос реестра допуска (миграция 0073, 13.10.2026): когда смотрели, откуда взяли
+    выгрузку, сколько моделей в ней нашлось. Нужен карточке модели, чтобы «не проверялось»
+    отличалось от «реестр опрошен вчера, модели в нём не нашлось», и администратору — чтобы
+    видеть, что автоматическая сверка не сломалась молча."""
+
+    __tablename__ = "admission_registry_polls"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    registry: Mapped[str] = mapped_column(String(40), nullable=False)
+    method: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    rows_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Строки, относящиеся к счётчикам электроэнергии наших производителей.
+    rows_relevant: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    products_checked: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    products_found: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    records_saved: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

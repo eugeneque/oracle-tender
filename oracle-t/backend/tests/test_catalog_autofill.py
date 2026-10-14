@@ -211,7 +211,7 @@ def test_empty_manufacturers_go_first_and_enrichment_after_all(db_session, manuf
     from app.models.catalog_queue import CatalogLookupTask
     from sqlalchemy import select
 
-    empty = Manufacturer(legal_name=f'ООО «Пустой {uuid.uuid4().hex[:8]}»', is_mirtek=False, market_share_pct=0.01)
+    empty = Manufacturer(legal_name=f'ООО «Пустой {uuid.uuid4().hex[:8]}»', is_mirtek=False)
     db_session.add(empty)
     db_session.commit()
 

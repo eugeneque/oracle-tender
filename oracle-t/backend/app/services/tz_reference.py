@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from sqlalchemy.orm import Session
 
 from app.models.analysis import Requirement
-from app.models.manufacturer import Manufacturer, Product
+from app.models.manufacturer import Manufacturer, Product, ProductCharacteristic
 from app.services.product_relevance import named_products
 
 # Фраза о закупке товара определённого знака или о запрете эквивалента.
@@ -55,6 +55,11 @@ class TzReference:
     # None — документация молчит.
     equivalent_allowed: bool | None = None
     clause: str | None = None
+    # Группы типов (фазность × включение) названных моделей — по характеристикам каталога.
+    # По ним «Тип прибора» у эталона сверяется кодом: модель сравнения то и дело брала из
+    # карточки не то исполнение и ставила производителю «не соответствует» по типу его же
+    # прибора, названного в ТЗ (32616394121, МИР С-04 сплит, проверка 13.10.2026).
+    kind_groups: set[str] = field(default_factory=set)
 
     @property
     def label(self) -> str:
@@ -65,6 +70,50 @@ class TzReference:
 
 def is_model_requirement(requirement: Requirement) -> bool:
     return (requirement.normalized_text or "").strip().lower().startswith(MODEL_REQUIREMENT_PREFIX)
+
+
+def names_reference_model(requirement: Requirement, reference: TzReference | None) -> bool:
+    """Требование прямо называет модель эталона, хоть и не в форме «Модель прибора: …».
+
+    До 06.10.2026 извлечение записывало обозначение как «Наименование: Прибор учета МИР
+    С-05.10-230-5(80)-…» (32616408289, эквивалент запрещён), и запрет эквивалента на такие
+    строки не действовал: конкуренты получали «не хватает данных» вместо «не проходит».
+    Сравниваются обозначения из букв и цифр не короче пяти знаков — «МИР» есть в «Энергомир»."""
+
+    if reference is None:
+        return False
+    text = _fold(f"{requirement.normalized_text or ''} {requirement.text or ''}")
+    for designation in reference.designations:
+        code = _fold(designation.split("(")[0])
+        if (
+            len(code) >= 5
+            and any(ch.isdigit() for ch in code)
+            and any(ch.isalpha() for ch in code)
+            and code in text
+        ):
+            return True
+    return False
+
+
+def _fold(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").casefold().replace("ё", "е").translate(_LOOKALIKES)).strip()
+
+
+def _kind_groups(db: Session, products: list[Product]) -> set[str]:
+    from sqlalchemy import select
+
+    from app.services.meter_kind import kind_group, product_kinds
+
+    groups: set[str] = set()
+    for product in products:
+        # Только имя и значение поля — больше `product_kinds` не нужно.
+        characteristics = db.execute(
+            select(ProductCharacteristic.field_name, ProductCharacteristic.value).where(
+                ProductCharacteristic.product_id == product.id
+            )
+        ).all()
+        groups |= {kind_group(code) for code in product_kinds(product, characteristics)}
+    return groups
 
 
 def _name_key(value: str) -> str:
@@ -103,33 +152,55 @@ def find_reference(
     Побеждает наибольший счёт; смешанное ТЗ («МИР С-05 или CE208») даёт эталон по тому,
     кого назвали больше."""
 
-    best: TzReference | None = None
-    best_score = 0
+    candidates: list[tuple[int, int, TzReference]] = []
     for manufacturer in manufacturers:
         products = named_products(db, manufacturer, named_text) if named_text else []
         score = 3 * len(products)
+        from_requirements = 0
         designations: list[str] = []
         for requirement in requirements:
             if match_manufacturer(requirement.vendor, [manufacturer]) is None:
                 continue
             if is_model_requirement(requirement):
-                score += 3
+                from_requirements += 3
                 designation = (requirement.normalized_text or "").split(":", 1)[-1].strip()
                 if designation and designation not in designations:
                     designations.append(designation)
             else:
-                score += 1
-        if score <= best_score:
+                from_requirements += 1
+        score += from_requirements
+        if score == 0:
             continue
         for product in products:
             code = product.model_code or product.model_name
             if not any(code.casefold() in item.casefold() for item in designations):
                 designations.append(code)
-        best = TzReference(manufacturer=manufacturer, products=products, designations=designations)
-        best_score = score
-    if best is None:
+        candidates.append(
+            (
+                score,
+                from_requirements,
+                TzReference(manufacturer=manufacturer, products=products, designations=designations),
+            )
+        )
+    if not candidates:
         return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_from_requirements, best = candidates[0]
+    # Упоминание модели в тексте — ещё не эталон (проверка 13.10.2026 по 75 закупкам с
+    # документацией: 7 из 18 срабатываний ложные). Перечень типов в АИИС КУЭ («Меркурий 230
+    # (рег. № …), НАРТИС-И500 (рег. № …), МИРТЕК-135-РУ …» — 32616392406), таблица точек
+    # учёта в договоре на метрологию (3201993) или многопозиционная спецификация с моделями
+    # разных марок (32616298746) делали «эталоном» того, чьих моделей названо больше, а при
+    # равенстве — того, кто раньше в списке. Без подтверждения извлечением («Модель прибора:
+    # …», фирменное ПО) эталон есть, только если марка в тексте одна-две и первая
+    # опережает остальные.
+    if best_from_requirements == 0:
+        named_brands = sum(1 for _, _, candidate in candidates if candidate.products)
+        runner_up = candidates[1][0] if len(candidates) > 1 else 0
+        if named_brands >= 3 or best_score <= runner_up:
+            return None
 
+    best.kind_groups = _kind_groups(db, best.products)
     model_texts = " ".join(
         f"{item.text or ''} {item.normalized_text or ''}"
         for item in requirements

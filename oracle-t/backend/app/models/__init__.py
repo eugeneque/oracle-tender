@@ -65,7 +65,12 @@ from app.models.notification import (
 )
 from app.models.relevance_profile import CollectionTerm, RelevanceProfile, RelevanceProfileMatch
 from app.models.region import FederalDistrict, Region, RegionResponsible
-from app.models.registry_record import AdmissionRegistry, ProductRegistryRecord, RegistryPresence
+from app.models.registry_record import (
+    AdmissionRegistry,
+    AdmissionRegistryPoll,
+    ProductRegistryRecord,
+    RegistryPresence,
+)
 from app.models.search_profile import (
     KeywordMatchMode,
     SearchKeywordGroup,
@@ -92,6 +97,7 @@ __all__ = [
     "Region",
     "AdmissionRegistry",
     "ProductRegistryRecord",
+    "AdmissionRegistryPoll",
     "RegistryPresence",
     "FederalDistrict",
     "RegionResponsible",

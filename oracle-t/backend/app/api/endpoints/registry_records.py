@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_admin
@@ -18,11 +18,13 @@ from app.models.user import User
 from app.schemas.registry_record import (
     ProductRegistryRowOut,
     RegistryInfoOut,
+    RegistryPollOut,
+    RegistryPollStatusOut,
     RegistryRecordOut,
     RegistryRecordUpsert,
     TenderRegistryCheckOut,
 )
-from app.services import registry_records_service
+from app.services import registry_polling, registry_records_service
 from app.services.tender_service import get_tender_by_id
 
 router = APIRouter(tags=["registry-records"])
@@ -47,6 +49,77 @@ def get_registries(db: Session = Depends(get_db), _user: User = Depends(get_curr
     """Реестры допуска, которые система умеет проверять, с официальными ссылками."""
 
     return registry_records_service.list_registries(db)
+
+
+# Выгрузка ГИСП целиком — десятки мегабайт.
+MAX_REGISTRY_UPLOAD_BYTES = 300 * 1024 * 1024
+
+
+def _check_pollable(registry: str) -> None:
+    _check_registry(registry)
+    if registry not in registry_polling.POLLABLE:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Этот реестр автоматически не сверяется — записи заводятся в карточке модели",
+        )
+
+
+@router.get("/catalog/registries/polls", response_model=list[RegistryPollStatusOut])
+def get_registry_polls(db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
+    """Когда и чем закончилась автоматическая сверка по каждому реестру (13.10.2026)."""
+
+    polls = registry_polling.latest_polls(db)
+    infos = {item["key"]: item for item in registry_records_service.list_registries(db)}
+    return [
+        {
+            "registry": registry,
+            "label": infos[registry]["label"],
+            "url": infos[registry]["url"],
+            "last_poll": registry_records_service.poll_out(polls[registry]["last"]),
+            "last_successful_poll": registry_records_service.poll_out(polls[registry]["last_ok"]),
+        }
+        for registry in registry_polling.POLLABLE
+    ]
+
+
+@router.post(
+    "/catalog/registries/{registry}/poll",
+    response_model=RegistryPollOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def post_registry_poll(registry: str, admin: User = Depends(require_admin)):
+    """Скачать выгрузку реестра и разложить по моделям. Идёт в фоне; ход — в
+    `GET /catalog/registries/polls`."""
+
+    _check_pollable(registry)
+    return registry_records_service.poll_out(
+        registry_polling.poll_in_background(registry, actor_id=admin.id)
+    )
+
+
+@router.post("/catalog/registries/{registry}/upload", response_model=RegistryPollOut)
+def post_registry_upload(
+    registry: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Выгрузка, скачанная из браузера (XLSX ГИСП или PDF перечня Россетей), — когда реестр
+    не отдал её серверу."""
+
+    _check_pollable(registry)
+    content = file.file.read(MAX_REGISTRY_UPLOAD_BYTES + 1)
+    if len(content) > MAX_REGISTRY_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Файл больше {MAX_REGISTRY_UPLOAD_BYTES // (1024 * 1024)} МБ",
+        )
+    poll = registry_polling.poll_uploaded_file(
+        db, registry, content=content, file_name=file.filename or "", actor=admin
+    )
+    if poll.status != "ok":
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=poll.message)
+    return registry_records_service.poll_out(poll)
 
 
 @router.get("/products/{product_id}/registry-records", response_model=list[ProductRegistryRowOut])

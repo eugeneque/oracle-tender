@@ -10,6 +10,7 @@ import type {
   ModificationsOutcome,
   UnknownField,
 } from "../../api/types";
+import { AI_HINT, AiBadge } from "./AiBadge";
 
 // Обучение справочника по Аршину и документации (замечание заказчика 15.09.2026).
 //
@@ -139,16 +140,19 @@ export function RegistryLearningSection({
     label: string,
     title: string,
     icon: React.ReactNode,
-    onClick: () => void
+    onClick: () => void,
+    // Шаг вызывает модель ИИ — кнопка помечена (замечание 13.10.2026).
+    ai = false
   ) => (
     <button
       onClick={onClick}
       disabled={busy !== null}
-      title={title}
+      title={ai ? `${title}. ${AI_HINT}` : title}
       className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
     >
       {busy === key ? <Loader2 size={13} className="animate-spin" /> : icon}
       {label}
+      {ai && <AiBadge compact />}
     </button>
   );
 
@@ -173,7 +177,8 @@ export function RegistryLearningSection({
               "Обучить (в фоне)",
               "Полный проход: карточки Аршина → исполнения → «Описание типа» → поиск документации → руководства",
               <GraduationCap size={13} />,
-              handleLearn
+              handleLearn,
+              true
             )}
             {button(
               "modifications",
@@ -187,7 +192,8 @@ export function RegistryLearningSection({
               "Разобрать «Описания типа»",
               "Загрузить «Описание типа» и разнести характеристики по моделям (до 10 документов за запуск)",
               <BookOpen size={13} />,
-              handleDescriptions
+              handleDescriptions,
+              true
             )}
             {button(
               "documents",
@@ -201,7 +207,8 @@ export function RegistryLearningSection({
               "Разобрать руководства",
               "Скачать руководства по эксплуатации моделей и извлечь из них характеристики. За один запуск — до 20 документов; уже разобранные пропускаются",
               <FileText size={13} />,
-              handleManuals
+              handleManuals,
+              true
             )}
           </div>
         )}

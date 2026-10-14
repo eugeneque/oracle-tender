@@ -85,7 +85,7 @@ def enqueue(
 
 def queue_order(db: Session) -> list[Manufacturer]:
     """Порядок опроса: сначала производители без единой модели — им опрос нужнее всего,
-    затем свой, затем остальные в порядке списка каталога (по доле рынка)."""
+    затем свой, затем остальные в порядке списка каталога (по алфавиту)."""
 
     from app.services.product_catalog_service import list_manufacturers
 

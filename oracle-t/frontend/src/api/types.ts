@@ -149,10 +149,6 @@ export interface Manufacturer {
   brand_name: string | null;
   website: string | null;
   is_mirtek: boolean;
-  // Доля рынка, % и источник оценки — по доле отсортирован список (замечание
-  // тестировщика 18.09.2026). null — доля не опубликована, не ноль.
-  market_share_pct: number | null;
-  market_share_source: string | null;
   created_at: string;
 }
 
@@ -247,6 +243,8 @@ export interface Characteristic {
   source: CharacteristicSource;
   confidence: number | null;
   verified_by_user: boolean;
+  // Значение вычитано моделью ИИ — только у таких «требует проверки» (замечание 13.10.2026).
+  ai_extracted: boolean;
   updated_at: string;
 }
 
@@ -254,6 +252,8 @@ export interface Characteristic {
 export interface MeterParameterField {
   group_name: string;
   field_name: string;
+  // Подпись в карточке, если имя поля справочника читается странно (П32); пусто — имя поля.
+  label: string;
   characteristic: Characteristic | null;
 }
 
@@ -271,6 +271,53 @@ export interface MeterParameter {
   filled: boolean;
   fields: MeterParameterField[];
   facts: MeterParameterFact[];
+  // Где обычно есть ответ — подсказка у пустого параметра.
+  sources: MeterParameterSourceKey[];
+}
+
+export type MeterParameterSourceKey = "site" | "fgis" | "manual" | "gisp" | "zak" | "upper_software" | "astra";
+
+// Источник данных модели и что с ним (13.10.2026, `product_sources.py`).
+export type DataSourceState = "ok" | "pending" | "blocked" | "missing" | "error" | "running";
+
+export type DataSourceActionKey =
+  | "autofill"
+  | "extract_fgis"
+  | "read_manual"
+  | "find_docs"
+  | "upload_manual"
+  | "poll_registry"
+  | "upload_registry";
+
+export interface DataSourceAction {
+  key: DataSourceActionKey;
+  label: string;
+  // Выполняет модель ИИ — кнопка помечается.
+  ai: boolean;
+}
+
+export interface DataSource {
+  key: string;
+  label: string;
+  state: DataSourceState;
+  detail: string;
+  url: string | null;
+  actions: DataSourceAction[];
+  registry: AdmissionRegistryKey | null;
+}
+
+// Наведение порядка в характеристиках (админ, без ИИ): предпросмотр и итог.
+export interface CatalogRepair {
+  applied: boolean;
+  values_normalised: number;
+  values_removed: number;
+  family_values_resolved: number;
+  modifications_cleared: number;
+  extra_fields_spread: number;
+  extra_entries_removed: number;
+  products_affected: number;
+  manufacturers_to_refresh: string[];
+  examples: string[];
 }
 
 export interface ExtractionOutcome {
@@ -1752,9 +1799,37 @@ export interface RegistryRecord {
   note: string | null;
   verified_by_user: boolean;
   verified_at: string | null;
+  // Запись заведена автоматическим опросом реестра; null — человеком.
+  auto_found_at: string | null;
   state: RegistryRecordState;
   summary: string;
   updated_at: string;
+}
+
+// Опрос реестра допуска (13.10.2026): скачивание выгрузки сервером или файл от человека.
+export interface RegistryPoll {
+  id: string;
+  registry: AdmissionRegistryKey;
+  method: "download" | "upload";
+  status: "running" | "ok" | "error";
+  message: string | null;
+  source_url: string | null;
+  file_name: string | null;
+  rows_total: number;
+  rows_relevant: number;
+  products_checked: number;
+  products_found: number;
+  records_saved: number;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface RegistryPollStatus {
+  registry: AdmissionRegistryKey;
+  label: string;
+  url: string | null;
+  last_poll: RegistryPoll | null;
+  last_successful_poll: RegistryPoll | null;
 }
 
 export interface RegistryRecordUpsert {
@@ -1771,6 +1846,10 @@ export interface ProductRegistryRow extends RegistryInfo {
   registry: AdmissionRegistryKey;
   state: RegistryRecordState;
   record: RegistryRecord | null;
+  // Реестр сверяется автоматически (ГИСП, перечень Россетей).
+  pollable: boolean;
+  last_poll: RegistryPoll | null;
+  last_successful_poll: RegistryPoll | null;
 }
 
 export interface TenderRegistryCheck {
