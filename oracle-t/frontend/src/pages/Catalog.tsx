@@ -27,6 +27,8 @@ import type {
 } from "../api/types";
 import { AppShell } from "../components/AppShell";
 import { CatalogDocumentsSection } from "../components/catalog/CatalogDocumentsSection";
+import { AiBadge } from "../components/catalog/AiBadge";
+import { CatalogRepairButton } from "../components/catalog/CatalogRepairButton";
 import { ProductDrawer } from "../components/catalog/ProductDrawer";
 import { ProductMatrix } from "../components/catalog/ProductMatrix";
 import { RegistryLearningSection } from "../components/catalog/RegistryLearningSection";
@@ -79,18 +81,6 @@ function readStep(): StepKey {
     return STEPS.some((s) => s.key === stored) ? (stored as StepKey) : "models";
   } catch {
     return "models";
-  }
-}
-
-// Порядок списка производителей: по доле рынка (как отдаёт сервер, без доли — в конце) или по
-// алфавиту. Выбор запоминается в браузере.
-type ManufacturerSort = "share" | "alpha";
-
-function readManufacturerSort(): ManufacturerSort {
-  try {
-    return localStorage.getItem("catalog.manufacturerSort") === "alpha" ? "alpha" : "share";
-  } catch {
-    return "share";
   }
 }
 
@@ -203,7 +193,6 @@ export function CatalogPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [openProductId, setOpenProductId] = useState<string | null>(null);
   const [step, setStep] = useState<StepKey>(readStep);
-  const [manufacturerSort, setManufacturerSort] = useState<ManufacturerSort>(readManufacturerSort);
   const [hideDiscontinued, setHideDiscontinued] = useState(readHideDiscontinued);
 
   const [error, setError] = useState<string | null>(null);
@@ -239,24 +228,15 @@ export function CatalogPage() {
       enriching,
     };
   }, [autofill, manufacturers]);
-  // Форма производителя (администратор): добавить нового или поправить долю рынка и сайт.
-  // `editingId === "new"` — создание. Доля рынка вводится вместе с источником оценки.
+  // Форма производителя (администратор): добавить нового или поправить названия и сайт.
+  // `editingId === "new"` — создание. Доля рынка убрана 13.10.2026 (замечание тендерного
+  // отдела, п.11): была известна у пятерых и неточна; список — по алфавиту, как отдаёт сервер.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [manufacturerDraft, setManufacturerDraft] = useState({
     legal_name: "",
     brand_name: "",
     website: "",
-    market_share_pct: "",
-    market_share_source: "",
   });
-
-  const sortedManufacturers = useMemo(
-    () =>
-      manufacturerSort === "alpha"
-        ? [...manufacturers].sort((a, b) => manufacturerTitle(a).localeCompare(manufacturerTitle(b), "ru"))
-        : manufacturers,
-    [manufacturers, manufacturerSort]
-  );
   const selected = useMemo(() => manufacturers.find((m) => m.id === selectedId) ?? null, [manufacturers, selectedId]);
   const openProduct = useMemo(() => products.find((p) => p.id === openProductId) ?? null, [products, openProductId]);
   const selectedSite = useMemo(
@@ -370,15 +350,6 @@ export function CatalogPage() {
     }
   };
 
-  const switchManufacturerSort = (next: ManufacturerSort) => {
-    setManufacturerSort(next);
-    try {
-      localStorage.setItem("catalog.manufacturerSort", next);
-    } catch {
-      // без сохранения — порядок просто не запомнится
-    }
-  };
-
   const toggleHideDiscontinued = (next: boolean) => {
     setHideDiscontinued(next);
     try {
@@ -447,29 +418,21 @@ export function CatalogPage() {
       legal_name: m?.legal_name ?? "",
       brand_name: m?.brand_name ?? "",
       website: m?.website ?? "",
-      market_share_pct: m?.market_share_pct != null ? String(m.market_share_pct) : "",
-      market_share_source: m?.market_share_source ?? "",
     });
   };
 
   const handleSaveManufacturer = () =>
     run("save-manufacturer", async () => {
-      const pct = manufacturerDraft.market_share_pct.trim().replace(",", ".");
       const payload = {
         legal_name: manufacturerDraft.legal_name.trim(),
         brand_name: manufacturerDraft.brand_name.trim() || null,
         website: manufacturerDraft.website.trim() || null,
-        market_share_pct: pct === "" ? null : Number(pct),
-        market_share_source: manufacturerDraft.market_share_source.trim() || null,
       };
-      if (payload.market_share_pct !== null && Number.isNaN(payload.market_share_pct)) {
-        throw new ApiError(400, "Доля рынка — число в процентах, например 7 или 12.5");
-      }
       const saved =
         editingId === "new"
           ? await api.post<Manufacturer>("/manufacturers", payload)
           : await api.patch<Manufacturer>(`/manufacturers/${editingId}`, payload);
-      // Порядок списка зависит от доли — перечитываем целиком, а не подменяем строку.
+      // Порядок списка зависит от названия — перечитываем целиком, а не подменяем строку.
       setManufacturers(await api.get<Manufacturer[]>("/manufacturers"));
       setEditingId(null);
       if (editingId === "new") setSelectedId(saved.id);
@@ -579,8 +542,6 @@ export function CatalogPage() {
                     ["legal_name", "Юридическое название"],
                     ["brand_name", "Бренд"],
                     ["website", "Сайт (каталог)"],
-                    ["market_share_pct", "Доля рынка, %"],
-                    ["market_share_source", "Источник оценки доли"],
                   ] as const
                 ).map(([field, label]) => (
                   <input
@@ -640,9 +601,11 @@ export function CatalogPage() {
                     >
                       {busy === "autofill-all" ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
                       Опросить весь каталог
+                      <AiBadge compact title="Второй проход читает «Описания типа» и руководства моделью ИИ" />
                     </button>
                   )
                 )}
+                {isAdmin && <CatalogRepairButton />}
                 {autofillProgress.enriching > 0 && (
                   <div
                     className="flex items-center gap-1.5 px-1 text-[11px] text-zinc-500"
@@ -654,30 +617,9 @@ export function CatalogPage() {
                 )}
               </div>
             )}
-            <div className="flex items-center gap-1 border-b border-white/[0.08] px-3 py-2" role="radiogroup" aria-label="Порядок производителей">
-              <span className="mr-auto pl-1 text-[11px] text-zinc-500">Порядок</span>
-              {(
-                [
-                  ["share", "По доле рынка"],
-                  ["alpha", "А–Я"],
-                ] as const
-              ).map(([key, label]) => (
-                <button
-                  key={key}
-                  role="radio"
-                  aria-checked={manufacturerSort === key}
-                  onClick={() => switchManufacturerSort(key)}
-                  className={`rounded-md px-2 py-1 text-[11px] transition-colors ${
-                    manufacturerSort === key ? "bg-white/[0.08] text-zinc-100" : "text-zinc-500 hover:text-zinc-300"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
             <div className="max-h-[70vh] overflow-y-auto py-1">
-              {/* По доле рынка — порядок сервера, без опубликованной доли — в конце. */}
-              {sortedManufacturers.map((m) => (
+              {/* По алфавиту — порядок сервера. */}
+              {manufacturers.map((m) => (
                 <button
                   key={m.id}
                   onClick={() => setSelectedId(m.id)}
@@ -690,17 +632,7 @@ export function CatalogPage() {
                     {m.is_mirtek && <span className="ml-1.5 text-[10px] text-emerald-400">мы</span>}
                   </span>
                   <span className="ml-2 flex shrink-0 items-center gap-1.5">
-                  <AutofillMark status={autofill[m.id]} />
-                  <span
-                    className="font-mono text-[11px] tabular-nums text-zinc-500"
-                    title={
-                      m.market_share_pct != null
-                        ? `Доля рынка ${m.market_share_pct} % — ${m.market_share_source ?? "источник не указан"}`
-                        : "Доля рынка не опубликована"
-                    }
-                  >
-                    {m.market_share_pct != null ? `${m.market_share_pct} %` : "—"}
-                  </span>
+                    <AutofillMark status={autofill[m.id]} />
                   </span>
                 </button>
               ))}
@@ -720,7 +652,7 @@ export function CatalogPage() {
                       {isAdmin && (
                         <button
                           onClick={() => openManufacturerForm(selected)}
-                          title="Изменить производителя: сайт, доля рынка"
+                          title="Изменить производителя: названия, сайт"
                           className="rounded p-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
                         >
                           <Pencil size={14} />
@@ -749,6 +681,7 @@ export function CatalogPage() {
                             : autofill[selected.id]?.status === "queued"
                               ? "В очереди"
                               : "Опросить"}
+                          <AiBadge compact title="Второй проход читает «Описания типа» и руководства моделью ИИ" />
                         </button>
                       )}
                     </div>
@@ -763,9 +696,6 @@ export function CatalogPage() {
                         >
                           {selected.website.replace(/^https?:\/\//, "").replace(/\/$/, "")} <ExternalLink size={11} />
                         </a>
-                      )}
-                      {selected.market_share_pct != null && (
-                        <span title={selected.market_share_source ?? undefined}>доля рынка {selected.market_share_pct} %</span>
                       )}
                     </div>
                   </div>

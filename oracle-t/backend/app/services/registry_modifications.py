@@ -97,7 +97,7 @@ def discover_modifications(
             existing = _find_product(products, short)
             if existing is not None:
                 outcome.already_known += 1
-                if existing.registry_modification is None:
+                if existing.registry_modification is None and modification_belongs_to(existing, full):
                     existing.registry_modification = full
                 if existing.si_type_id is None:
                     existing.si_type_id = si_type.id
@@ -175,6 +175,25 @@ def _expired(si_type: SiType) -> bool:
     if si_type.is_actual is False:
         return True
     return si_type.valid_to is not None and si_type.valid_to < date.today()
+
+
+def modification_belongs_to(product: Product, full: str) -> bool:
+    """Относится ли полное обозначение образца к самой модели, а не к соседнему исполнению.
+
+    Модель находится по короткому обозначению («CE210 C10»), и под ним у Энергомеры
+    десяток позиций сайта. До 13.10.2026 полное обозначение первого образца из карточки типа
+    («CE210 C10.746.L1F») доставалось любой из них, в том числе «CE210 C10.746.B SPDS», и
+    в шапке карточки стояло чужое исполнение. Теперь обозначение берётся, только если код
+    модели целиком — его начало («МИРТЕК-12-РУ-SP17» → «МИРТЕК-12-РУ-SP17-A1R1-…»)."""
+
+    if product.data_source == ProductDataSource.FGIS.value:
+        return True
+    full_keys = si_type_linking.designation_keys(full)
+    for source in (product.model_code, product.article, product.model_name):
+        for key in si_type_linking.designation_keys(source):
+            if any(full_key.startswith(key) for full_key in full_keys):
+                return True
+    return False
 
 
 def _find_product(products: list[Product], short: str) -> Product | None:

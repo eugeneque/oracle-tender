@@ -27,7 +27,7 @@ REPO_URL="${UPDATE_REPO_URL:-https://github.com/eugeneque/oracle-tender.git}"
 BRANCH="${UPDATE_BRANCH:-main}"
 SERVICE_NAME="oracle-t-backend"
 TIMER_NAME="oracle-t-update"
-AUTO_TIME="02:30"          # ночью: опрос площадок в 09:00 и 14:00, служебные задачи в 03:15 и 04:00
+AUTO_TIME="02:30"          # ночью: опрос площадок в 06:00 и 20:00, служебные задачи в 03:15 и 04:00
 KEEP_BACKUPS=10
 
 ACTION="update"

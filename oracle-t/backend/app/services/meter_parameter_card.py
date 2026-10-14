@@ -58,6 +58,40 @@ for _group, _field in ALL_FIELDS:
     _GROUP_OF_FIELD.setdefault(_field, _group)
 
 
+# Подписи полей справочника в карточке параметров. Названия Приложения C точны для
+# справочника, но в строке параметра читаются странно: «Тип отсчётного устройства» под П32
+# (ЖКИ) тендерный отдел принял за опечатку (замечание 13.10.2026, п.6).
+FIELD_LABELS: dict[str, str] = {
+    "Тип отсчётного устройства": "Тип индикатора (ЖКИ / электромеханический)",
+    "Индикация": "Индикатор",
+    "Автономное питание часов": "Батарейка часов",
+    "Контроль вскрытия": "Электронные пломбы",
+}
+
+# Откуда обычно берётся ответ на параметр — для подсказки у пустой строки «нет данных —
+# опросите источник» (замечание 13.10.2026: пользователь должен понимать, что сведений не
+# хватает потому, что источник не опрошен, а не потому, что у прибора этого нет).
+SOURCE_SITE = "site"
+SOURCE_FGIS = "fgis"
+SOURCE_MANUAL = "manual"
+SOURCE_GISP = "gisp"
+SOURCE_ZAK = "zak"
+SOURCE_UPPER = "upper_software"
+SOURCE_ASTRA = "astra"
+
+_SOURCES_BY_PARAMETER: dict[int, tuple[str, ...]] = {
+    **{no: (SOURCE_SITE, SOURCE_FGIS) for no in (1, 2, 4, 5, 6, 7, 8, 9, 12)},
+    **{no: (SOURCE_SITE, SOURCE_MANUAL, SOURCE_FGIS) for no in (3, 10, 11)},
+    **{no: (SOURCE_SITE, SOURCE_MANUAL) for no in (14, 15, 16, 37)},
+    **{no: (SOURCE_MANUAL, SOURCE_FGIS) for no in (18, 32)},
+    **{no: (SOURCE_MANUAL,) for no in (13, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 33, 34)},
+    35: (SOURCE_GISP,),
+    36: (SOURCE_UPPER, SOURCE_MANUAL),
+    38: (SOURCE_ZAK,),
+    39: (SOURCE_ASTRA,),
+}
+
+
 @dataclass
 class ParameterFact:
     """Сведение не из характеристик: реестр, списки ПО, каталог Astra, правило файла.
@@ -73,6 +107,7 @@ class ParameterField:
     group_name: str
     field_name: str
     characteristic: ProductCharacteristic | None = None
+    label: str = ""
 
 
 @dataclass
@@ -83,6 +118,7 @@ class ParameterRow:
     rule: str
     fields: list[ParameterField] = field(default_factory=list)
     facts: list[ParameterFact] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
 
     @property
     def filled(self) -> bool:
@@ -163,12 +199,21 @@ def product_parameters(db: Session, product: Product) -> list[ParameterRow]:
         if parameter.rule == RULE_ONLY_MANUFACTURERS and not relay_applies:
             continue
         row = ParameterRow(
-            no=parameter.no, name=parameter.name, note=parameter.note, rule=parameter.rule
+            no=parameter.no,
+            name=parameter.name,
+            note=parameter.note,
+            rule=parameter.rule,
+            sources=list(_SOURCES_BY_PARAMETER.get(parameter.no, ())),
         )
         for field_name in parameter.fields:
             group_name = _GROUP_OF_FIELD[field_name]
             row.fields.append(
-                ParameterField(group_name, field_name, characteristics.get((group_name, field_name)))
+                ParameterField(
+                    group_name,
+                    field_name,
+                    characteristics.get((group_name, field_name)),
+                    label=FIELD_LABELS.get(field_name, field_name),
+                )
             )
 
         registry = _REGISTRY_BY_PARAMETER.get(parameter.no)

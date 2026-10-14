@@ -57,6 +57,28 @@ class CharacteristicSource(str, enum.Enum):
     WEB_SEARCH = "web_search"
 
 
+# Приоритет источников при записи (раздел 5.3 ТЗ). До 13.10.2026 он был только описан в
+# докстринге выше, а в коде значение перезаписывалось любым следующим проходом: обучение по
+# Аршину заменяло «5 (100) А» с сайта Энергомеры на текст «Описания типа» обо всём семействе
+# («для счётчиков трансформаторного включения 5 (10) А; …»), и что видел тендерный отдел,
+# зависело от того, какой проход был последним. Теперь значение заменяется только источником
+# не ниже по рангу; равный ранг — свежие данные того же уровня (новая редакция документа).
+# Поиск в интернете кладёт только ссылки на документы — по рангу он наравне с сайтом.
+SOURCE_RANK: dict[str, int] = {
+    CharacteristicSource.FGIS_DESCRIPTION_TYPE.value: 1,
+    CharacteristicSource.MANUFACTURER_SITE.value: 2,
+    CharacteristicSource.WEB_SEARCH.value: 2,
+    CharacteristicSource.USER_MANUAL.value: 3,
+    CharacteristicSource.MANUAL_ENTRY.value: 4,
+}
+
+
+def source_may_replace(new_source: str, existing_source: str) -> bool:
+    """Может ли значение из `new_source` заменить уже сохранённое из `existing_source`."""
+
+    return SOURCE_RANK.get(new_source, 0) >= SOURCE_RANK.get(existing_source, 0)
+
+
 class ProductDataSource(str, enum.Enum):
     """Откуда пришли данные записи каталога в целом — отдельная ось от
     `CharacteristicSource`, который описывает происхождение ОДНОГО значения.
@@ -102,12 +124,7 @@ class Manufacturer(Base):
     brand_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     website: Mapped[str | None] = mapped_column(String(500), nullable=True)
     is_mirtek: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # Доля рынка интеллектуальных приборов учёта, % — по ней сортируется список
-    # производителей (замечание тестировщика 18.09.2026). Рядом обязательно источник оценки:
-    # цифра из внешней аналитики без подписи «чья и за какой год» через год неотличима от
-    # выдумки. `NULL` — доля не опубликована (не ноль); такие идут в конце списка.
-    market_share_pct: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
-    market_share_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Доля рынка (18.09.2026) убрана 13.10.2026 — миграция 0073.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -289,6 +306,9 @@ class ProductCharacteristic(Base):
     source: Mapped[str] = mapped_column(String(30), nullable=False)
     confidence: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
     verified_by_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Значение вычитано моделью ИИ, а не взято дословно из таблицы сайта или карточки
+    # реестра (миграция 0073). «Требует проверки» в карточке — только у таких.
+    ai_extracted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

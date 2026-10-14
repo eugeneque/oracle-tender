@@ -251,6 +251,8 @@ def upsert_record(
     record.verified_by_user = verified
     record.verified_at = datetime.now(timezone.utc) if verified else None
     record.updated_by_id = actor.id if actor else None
+    # Запись человека — автоматический опрос реестра её больше не перезаписывает.
+    record.auto_found_at = None
     db.flush()
 
     log_action(
@@ -313,6 +315,7 @@ def record_out(record: ProductRegistryRecord, today: date | None = None) -> dict
         "note": record.note,
         "verified_by_user": record.verified_by_user,
         "verified_at": record.verified_at,
+        "auto_found_at": record.auto_found_at,
         "state": record_state(record, today),
         "summary": describe_record(record, today),
         "updated_at": record.updated_at,
@@ -322,8 +325,11 @@ def record_out(record: ProductRegistryRecord, today: date | None = None) -> dict
 def product_overview(db: Session, product: Product) -> list[dict]:
     """Для карточки модели: по каждому реестру — запись или её отсутствие."""
 
+    from app.services import registry_polling
+
     records = {record.registry: record for record in list_records(db, product.id)}
     urls = _source_urls(db)
+    polls = registry_polling.latest_polls(db)
     rows = []
     for info in REGISTRIES.values():
         record = records.get(info.key)
@@ -335,9 +341,36 @@ def product_overview(db: Session, product: Product) -> list[dict]:
                 "url": urls.get(info.source_key),
                 "state": record_state(record),
                 "record": record_out(record) if record else None,
+                # Опрашивается ли реестр автоматически и чем кончился последний опрос: без
+                # этого «не проверялось» не отличить от «опросили, модели не нашли»
+                # (замечание 13.10.2026, п.7).
+                "pollable": info.key in registry_polling.POLLABLE,
+                "last_poll": poll_out(polls.get(info.key, {}).get("last")),
+                "last_successful_poll": poll_out(polls.get(info.key, {}).get("last_ok")),
             }
         )
     return rows
+
+
+def poll_out(poll) -> dict | None:
+    if poll is None:
+        return None
+    return {
+        "id": poll.id,
+        "registry": poll.registry,
+        "method": poll.method,
+        "status": poll.status,
+        "message": poll.message,
+        "source_url": poll.source_url,
+        "file_name": poll.file_name,
+        "rows_total": poll.rows_total,
+        "rows_relevant": poll.rows_relevant,
+        "products_checked": poll.products_checked,
+        "products_found": poll.products_found,
+        "records_saved": poll.records_saved,
+        "started_at": poll.started_at,
+        "finished_at": poll.finished_at,
+    }
 
 
 def manufacturer_records(

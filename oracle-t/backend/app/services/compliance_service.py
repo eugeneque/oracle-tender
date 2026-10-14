@@ -84,6 +84,7 @@ from app.services.tz_reference import (
     find_reference,
     is_model_requirement,
     match_manufacturer,
+    names_reference_model,
 )
 from app.services.ai_client import run_structured
 from app.services.ai_provider_service import AiNotConfiguredError, AiQuotaExceededError
@@ -850,6 +851,8 @@ def _evaluate_manufacturer(
         and verdicts[index].status == ComplianceStatus.NOT_MEETS.value
         for index, requirement in enumerate(requirements, start=1)
     )
+    apply_duration_check(requirements, verdicts)
+    apply_evidence_check(requirements, verdicts)
     apply_expert_rules(
         manufacturer,
         requirements,
@@ -948,9 +951,9 @@ def apply_reference_rules(
 ) -> None:
     """Вердикты, которые следуют из эталона ТЗ и фирменного ПО, — кодом, поверх модели.
 
-    * «Модель прибора: X» — производителю X «соответствует»; остальным — «соответствует»
-      как эквивалент, если он допущен (решают остальные требования), и «не соответствует»,
-      если эквивалент запрещён.
+    * «Модель прибора: X» — производителю X «соответствует»; остальным — «частично» как
+      эквивалент, если он допущен или документация молчит (итог не выше «с оговорками»,
+      см. `decide_verdict`), и «не соответствует», если эквивалент запрещён.
     * Фирменное ПО или сервис производителя (`vendor_exclusive`: «AdminTools», «CE
       Net-Connection» у Энергомеры) — другим производителям «не соответствует», что бы ни
       ответила модель: заявку с чужим прибором по этому пункту отклонят. Такие требования
@@ -969,7 +972,7 @@ def apply_reference_rules(
         current = verdicts.get(index)
         status = current.status if current else ComplianceStatus.NO_DATA.value
 
-        if is_model_requirement(requirement):
+        if is_model_requirement(requirement) or names_reference_model(requirement, reference):
             owner = match_manufacturer(requirement.vendor, manufacturers) or (
                 reference.manufacturer if reference is not None else None
             )
@@ -997,16 +1000,21 @@ def apply_reference_rules(
                     confidence=0.95,
                 )
             else:
+                # Чужой прибор — только эквивалент, и это «частично», а не «соответствует»
+                # (замечание 13.10.2026, закупка 32616451908: ПКУ-10 кВ под МИРТЕК-135-РУ,
+                # в матрице два требования — и все восемнадцать производителей «проходят» со
+                # 100%). Эквивалентность доказывают по паспорту, и равняться с эталоном, под
+                # который переписано ТЗ, по одному этому пункту конкурент не может.
                 allowed = reference is None or reference.equivalent_allowed is True
                 verdicts[index] = RequirementVerdict(
                     number=index,
-                    status=ComplianceStatus.MEETS.value,
+                    status=ComplianceStatus.PARTIAL.value,
                     source="rule",
                     explanation=(
-                        f"Эталон ТЗ — {owner_name}; "
+                        f"Эталон ТЗ — {owner_name} «{designation}»; "
                         + (
-                            "эквивалент допускается, соответствие оценивается по остальным "
-                            "требованиям"
+                            "эквивалент допускается — соответствие эталону доказать по "
+                            "паспорту прибора"
                             if allowed
                             else "допустим ли эквивалент, документация не говорит — проверить"
                         )
@@ -1043,6 +1051,38 @@ def apply_reference_rules(
 
         if (
             is_reference
+            and _parameter_of(requirement) in TYPE_PARAMETERS
+            and status != ComplianceStatus.MEETS.value
+            and reference.products
+        ):
+            wanted = {
+                kind_group(code)
+                for code in kinds_from_text(f"{requirement.text or ''} {requirement.normalized_text or ''}")
+            }
+            confirmed = bool(wanted) and wanted <= reference.kind_groups
+            # Тип требования — тип прибора, который ТЗ называет; «не соответствует» тут —
+            # сравнение с другим исполнением из карточки (см. `TzReference.kind_groups`). Если
+            # каталог тип не подтверждает (32616394121: сплит-исполнения МИР С-05 в каталоге
+            # нет, а ТЗ его называет) — «соответствует» на проверку человеком, а не «не
+            # проходит» по собственному прибору.
+            verdicts[index] = RequirementVerdict(
+                number=index,
+                status=ComplianceStatus.MEETS.value,
+                source="tz",
+                explanation=(
+                    f"ТЗ называет модель {who_reference} {reference.label}"
+                    + (
+                        f" этого типа ({'; '.join(kind_labels(sorted(wanted)))})"
+                        if confirmed
+                        else "; в каталоге это исполнение не подтверждено — проверить по паспорту"
+                    )
+                )[:300],
+                confidence=0.8 if confirmed else 0.55,
+            )
+            continue
+
+        if (
+            is_reference
             and status == ComplianceStatus.NO_DATA.value
             # Модель не ответила — сбой, а не пустота каталога: «соответствует по эталону»
             # спрятало бы его (06.10.2026: при нулевом балансе RouterAI Энергомера получила
@@ -1060,6 +1100,133 @@ def apply_reference_rules(
                 )[:300],
                 confidence=REFERENCE_FILL_CONFIDENCE,
             )
+
+
+# Сроки, где больше — всегда лучше: межповерочный интервал, гарантия, срок службы. Счётчики
+# трансформаторов (ТТ/ТН) — не свойство прибора учёта, их не трогаем.
+_DURATION_PARAMETERS = (
+    ("межповер", re.compile(r"межповерочн", re.IGNORECASE)),
+    ("гарант", re.compile(r"гаранти", re.IGNORECASE)),
+    ("служб", re.compile(r"срок\w*\s+службы", re.IGNORECASE)),
+)
+_TRANSFORMER_RE = re.compile(r"\bт[тн]\b|трансформатор", re.IGNORECASE)
+_DURATION_VALUE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(лет|года|год|мес)", re.IGNORECASE)
+# Пояснение про часть моделей производителя — выбор между ними за моделью, не за кодом.
+_PARTIAL_COVERAGE_RE = re.compile(r"не\s+(?:для|у)\s+всех|у\s+других|у\s+остальных|но\s+не\b", re.IGNORECASE)
+
+
+def _durations(text: str) -> list[tuple[float, str]]:
+    """Сроки в тексте: (месяцы, запись как в тексте) — «192 месяца» и «16 лет» равны по
+    месяцам, но записаны по-разному, и это различие нужно ниже."""
+
+    values = []
+    for number, unit in _DURATION_VALUE_RE.findall(text or ""):
+        in_months = unit.lower().startswith("мес")
+        months = float(number.replace(",", ".")) * (1 if in_months else 12)
+        # «2026 года» — дата, а не срок.
+        if 0 < months <= 1200:
+            values.append((months, f"{number.replace(',', '.')} {'мес' if in_months else 'лет'}"))
+    return values
+
+
+def apply_duration_check(
+    requirements: list[Requirement], verdicts: dict[int, RequirementVerdict]
+) -> None:
+    """Арифметика сроков — кодом, по значению, которое модель сама процитировала в пояснении.
+
+    Проверка 13.10.2026 по 8,8 тыс. ячеек матрицы: «Межповерочный интервал: 16 лет» при
+    «192 месяца» в карточке модель оценивала то «соответствует», то «частично», то «не
+    соответствует — 192 месяца меньше требуемых 16 лет». Переводить месяцы в годы модель
+    ошибается, а на «не проходит» по критичному требованию это влияет напрямую.
+
+    Вердикт меняется, только когда он противоречит арифметике и значение однозначно:
+    пояснение говорит о том же сроке, называет значение прибора иначе, чем записано
+    требование (повтор «16 лет» из требования — не значение прибора), и все такие значения —
+    по одну сторону от требуемого. «У одних моделей 192 мес., но не у всех» не трогаем."""
+
+    for index, requirement in enumerate(requirements, start=1):
+        verdict = verdicts.get(index)
+        if verdict is None or verdict.status == ComplianceStatus.NO_DATA.value:
+            continue
+        text = requirement.normalized_text or requirement.text or ""
+        explanation = verdict.explanation or ""
+        parameter = next((stem for stem, pattern in _DURATION_PARAMETERS if pattern.search(text)), None)
+        if parameter is None or _TRANSFORMER_RE.search(text):
+            continue
+        if parameter not in explanation.lower() or _PARTIAL_COVERAGE_RE.search(explanation):
+            continue
+        required = _durations(text.split(":", 1)[-1])
+        if len(required) != 1:
+            continue
+        wanted, wanted_written = required[0]
+        at_most = bool(re.search(r"не\s+более|не\s+выше", text, re.IGNORECASE))
+        stated = [months for months, written in _durations(explanation) if written != wanted_written]
+        if not stated:
+            continue
+        fits = [months <= wanted if at_most else months >= wanted for months in stated]
+        if all(fits):
+            status = ComplianceStatus.MEETS.value
+        elif not any(fits) and not re.search(r"некоторых|части\s+моделей", explanation, re.IGNORECASE):
+            # «У некоторых моделей 96 мес.» — про остальные модель молчит; одной подходящей
+            # модели производителю достаточно, поэтому «не соответствует» тут не выводим.
+            status = ComplianceStatus.NOT_MEETS.value
+        else:
+            continue
+        if status == verdict.status:
+            continue
+        if status == ComplianceStatus.MEETS.value:
+            sign = "≤" if at_most else "≥"
+        else:
+            sign = ">" if at_most else "<"
+        verdicts[index] = RequirementVerdict(
+            number=index,
+            status=status,
+            source=verdict.source,
+            explanation=(
+                f"{explanation} [проверено расчётом: {stated[0]:g} мес. {sign} {wanted:g} мес.]"
+            )[:300],
+            confidence=max(verdict.confidence, 0.85),
+        )
+
+
+# Параметры, которые сравниваются числом: «не соответствует» по ним без названного значения
+# из карточки — не вывод, а догадка модели.
+_NUMERIC_PARAMETER_RE = re.compile(
+    r"класс\w*\s+точност|габарит|масс[аы]|\bвес\b|межповерочн|гаранти|срок\w*\s+службы|"
+    r"температур|\bток\b|напряжени|наработк",
+    re.IGNORECASE,
+)
+UNEVIDENCED_EXPLANATION = "значение из карточки не названо — проверить по паспорту"
+
+
+def apply_evidence_check(
+    requirements: list[Requirement], verdicts: dict[int, RequirementVerdict]
+) -> None:
+    """«Не соответствует» по числовому параметру без единой цифры в пояснении — «нет данных».
+
+    Проверка 13.10.2026: 96 из 246 таких вердиктов модели не называли значения вовсе —
+    «Класс точности ТН в карточке не соответствует требуемому», «Габариты больше требуемых».
+    У Энергомеры на закупке под её же ПКУ СЕ401 (32616399389) так набралось четыре «не
+    соответствует» по ТТ и ТН, и эталон «не проходил». Вердикт, решающий «не проходит», без
+    факта ставить нельзя: человек его не проверит, а оспорить нечем. Вызывается только для
+    ответов модели — до правил кода."""
+
+    for index, requirement in enumerate(requirements, start=1):
+        verdict = verdicts.get(index)
+        if verdict is None or verdict.status != ComplianceStatus.NOT_MEETS.value:
+            continue
+        text = requirement.normalized_text or requirement.text or ""
+        if not _NUMERIC_PARAMETER_RE.search(text) or not re.search(r"\d", text.split(":", 1)[-1]):
+            continue
+        if re.search(r"\d", verdict.explanation or ""):
+            continue
+        verdicts[index] = RequirementVerdict(
+            number=index,
+            status=ComplianceStatus.NO_DATA.value,
+            source=verdict.source,
+            explanation=f"{verdict.explanation} [{UNEVIDENCED_EXPLANATION}]".strip()[:300],
+            confidence=0.4,
+        )
 
 
 def apply_expert_rules(
@@ -1404,6 +1571,11 @@ def decide_verdict(
         if status == ComplianceStatus.NOT_MEETS.value:
             (failed_critical if critical else failed_other).append(text_of(requirement))
         elif critical and status in (ComplianceStatus.NO_DATA.value, ComplianceStatus.PARTIAL.value):
+            unclear_critical.append(text_of(requirement))
+        elif status == ComplianceStatus.PARTIAL.value and is_model_requirement(requirement):
+            # Эквивалент эталонной модели ТЗ — оговорка при любой критичности: модель
+            # извлечения ставит «Модель прибора» и «важным», а «проходит» наравне с эталоном
+            # по нему нельзя (`apply_reference_rules`, замечание 13.10.2026).
             unclear_critical.append(text_of(requirement))
 
     if failed_critical:

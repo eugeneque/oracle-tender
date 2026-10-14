@@ -48,7 +48,7 @@ oracle-tender-main/            ← не git-репозиторий (git status/d
   реестр — `adapters/registry.py`.
 - `core/scheduler.py` (APScheduler: опрос площадок, сроки, уборка), `core/jobs.py` (фоновые задачи).
 - `models/` — одна сущность на файл; `alembic/versions/NNNN_name.py` — миграции с нумерацией
-  (последняя на 08.10.2026 — `0071_gigachat_provider`), докстринг миграции объясняет «зачем».
+  (последняя на 14.10.2026 — `0073_catalog_data_quality`), докстринг миграции объясняет «зачем».
 - `seed/snapshot.py` — наполнение базы «из коробки» (`python -m app.seed.snapshot prepare`).
 - `tests/` — pytest, ~77 файлов, против реальной БД `oraclet_test`.
 

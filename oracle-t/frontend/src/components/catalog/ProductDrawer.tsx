@@ -1,19 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
-import { BadgeCheck, BookOpen, ExternalLink, Globe, Loader2, Search, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ExternalLink, X } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
-import type {
-  Characteristic,
-  ExtractionOutcome,
-  ManualExtractionOutcome,
-  MeterParameter,
-  Product,
-  ProductDocumentation,
-  ProductSupport,
-  SiType,
-} from "../../api/types";
+import type { Characteristic, DataSource, MeterParameter, Product, ProductSupport, SiType } from "../../api/types";
 import { meterKindLabel } from "../../utils/meterKinds";
-import { MeterParametersTable } from "./MeterParametersTable";
+import { DataSourcesPanel } from "./DataSourcesPanel";
+import { CharacteristicOrigin, MeterParametersTable } from "./MeterParametersTable";
 import { ProductRegistrySection } from "./ProductRegistrySection";
 
 // Карточка модели прибора — отдельным окном поверх каталога (замечание 28.09.2026): раньше
@@ -21,6 +13,9 @@ import { ProductRegistrySection } from "./ProductRegistrySection";
 // обучением, документами и ПО верхнего уровня, и до них приходилось докручивать. Здесь всё
 // о модели в одном месте: паспорт, где она поддержана, параметры для ПУ или полное
 // Приложение C, реестры допуска и то, что не легло в справочник.
+//
+// 13.10.2026 (замечания тендерного отдела): кнопки извлечения переехали в панель «Источники
+// данных» — рядом с объяснением, почему источник не прочитан; кнопки с моделью ИИ помечены.
 
 export const SOURCE_LABELS: Record<string, string> = {
   fgis_description_type: "ФГИС «Описание типа»",
@@ -37,13 +32,8 @@ const STATUS_LABELS: Record<string, string> = {
 
 type View = "parameters" | "appendix";
 
-function summariseExtraction(outcome: ExtractionOutcome): string {
-  const parts = [`сохранено ${outcome.saved}`];
-  if (outcome.skipped_protected) parts.push(`не тронуто ручных ${outcome.skipped_protected}`);
-  if (outcome.skipped_unknown_field) parts.push(`отброшено ${outcome.skipped_unknown_field}`);
-  if (outcome.chunks_failed) parts.push(`ошибок разбора ${outcome.chunks_failed}`);
-  return parts.join(", ");
-}
+// Пока идёт опрос реестра, источники перечитываются: опрос фоновый и длится минуты.
+const RUNNING_REFRESH_MS = 5000;
 
 function readView(): View {
   try {
@@ -67,6 +57,9 @@ export function ProductDrawer({
   const [characteristics, setCharacteristics] = useState<Characteristic[]>([]);
   const [support, setSupport] = useState<ProductSupport[]>([]);
   const [parameters, setParameters] = useState<MeterParameter[]>([]);
+  const [sources, setSources] = useState<DataSource[] | null>(null);
+  // Меняется после действий с источниками — раздел реестров перечитывает свои записи.
+  const [registryVersion, setRegistryVersion] = useState(0);
   const [view, setView] = useState<View>(readView);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +83,7 @@ export function ProductDrawer({
   useEffect(() => {
     setCharacteristics([]);
     setSupport([]);
+    setSources(null);
     setNotice(null);
     setError(null);
     void run("load", async () => {
@@ -101,6 +95,28 @@ export function ProductDrawer({
       setSupport(platforms);
     });
   }, [productId]);
+
+  const loadSources = useCallback(async () => {
+    try {
+      setSources(await api.get<DataSource[]>(`/products/${productId}/data-sources`));
+    } catch {
+      setSources([]);
+    }
+  }, [productId]);
+
+  useEffect(() => {
+    void loadSources();
+  }, [loadSources]);
+
+  const sourcesRunning = sources?.some((s) => s.state === "running") ?? false;
+  useEffect(() => {
+    if (!sourcesRunning) return;
+    const timer = window.setTimeout(() => {
+      void loadSources();
+      setRegistryVersion((v) => v + 1);
+    }, RUNNING_REFRESH_MS);
+    return () => window.clearTimeout(timer);
+  }, [sourcesRunning, sources, loadSources]);
 
   // Параметры собираются из характеристик — перечитываются после каждой их правки.
   useEffect(() => {
@@ -149,8 +165,21 @@ export function ProductDrawer({
   }, [characteristics]);
 
   const filled = parameters.filter((p) => p.filled).length;
-  const reloadCharacteristics = async () =>
+  const reloadAfterSourceAction = async () => {
     setCharacteristics(await api.get<Characteristic[]>(`/products/${productId}/characteristics`));
+    setRegistryVersion((v) => v + 1);
+    await loadSources();
+  };
+
+  // Источник значения — ссылкой на сам документ: сайт, «Описание типа», руководство.
+  const sourceUrls = useMemo(() => {
+    const byKey = new Map((sources ?? []).map((s) => [s.key, s.url]));
+    return {
+      manufacturer_site: product.source_url ?? byKey.get("site") ?? null,
+      fgis_description_type: byKey.get("fgis") ?? null,
+      user_manual: byKey.get("manual") ?? null,
+    } as Record<string, string | null>;
+  }, [sources, product.source_url]);
 
   const upsert = (updated: Characteristic) =>
     setCharacteristics((prev) =>
@@ -180,45 +209,6 @@ export function ProductDrawer({
       );
     });
 
-  const handleExtractFromSiType = () =>
-    run("extract-fgis", async () => {
-      const outcome = await api.post<ExtractionOutcome>(`/products/${productId}/extract-characteristics/from-si-type`);
-      await reloadCharacteristics();
-      setNotice(`Из «Описание типа»: ${summariseExtraction(outcome)}.`);
-    });
-
-  const handleExtractFromSite = () =>
-    run("extract-site", async () => {
-      const outcome = await api.post<ManualExtractionOutcome>(
-        `/products/${productId}/extract-characteristics/from-manufacturer-site`
-      );
-      await reloadCharacteristics();
-      setNotice(
-        outcome.message ?? `Из «${outcome.manual_title ?? "руководства"}»: ${summariseExtraction(outcome.extraction)}.`
-      );
-    });
-
-  // Для исполнения, которого нет в каталоге на сайте производителя, это единственный
-  // автоматический путь к руководству — обход каталога на него не выйдет.
-  const handleFindDocumentation = () =>
-    run("find-docs", async () => {
-      const outcome = await api.post<ProductDocumentation>(`/products/${productId}/find-documentation`);
-      await reloadCharacteristics();
-      setNotice(outcome.message);
-    });
-
-  const actionButton = (key: string, label: string, title: string, icon: React.ReactNode, onClick: () => void) => (
-    <button
-      onClick={onClick}
-      disabled={busy !== null}
-      title={title}
-      className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-    >
-      {busy === key ? <Loader2 size={13} className="animate-spin" /> : icon}
-      {label}
-    </button>
-  );
-
   const passport: [string, React.ReactNode][] = [
     ["Код СИ (ГРСИ)", siType ? <span className="font-mono">{siType.si_code}</span> : <span className="text-zinc-500">не привязан</span>],
     ["Артикул", product.article ?? "—"],
@@ -241,8 +231,10 @@ export function ProductDrawer({
               <div className="text-[11px] uppercase tracking-wide text-zinc-500">Модель прибора</div>
               <h2 className="truncate text-xl font-semibold tracking-tight text-zinc-50">{product.model_name}</h2>
               {product.registry_modification && (
-                <p className="mt-0.5 font-mono text-[11px] text-sky-400/80" title="Полное условное обозначение исполнения из реестра ФГИС">
-                  {product.registry_modification}
+                // Полное обозначение — образец из карточки типа, на котором держатся
+                // характеристики исполнения; подпись нужна, иначе его читают как имя модели.
+                <p className="mt-0.5 text-[11px] text-zinc-500" title="Полное условное обозначение исполнения из реестра ФГИС">
+                  исполнение по реестру ФГИС: <span className="font-mono text-sky-400/80">{product.registry_modification}</span>
                 </p>
               )}
             </div>
@@ -312,6 +304,19 @@ export function ProductDrawer({
             </div>
           </section>
 
+          <DataSourcesPanel
+            productId={product.id}
+            manufacturerId={product.manufacturer_id}
+            sources={sources}
+            isAdmin={isAdmin}
+            onChanged={reloadAfterSourceAction}
+            onNotice={(text) => {
+              setError(null);
+              setNotice(text);
+            }}
+            onError={setError}
+          />
+
           {/* Характеристики */}
           <section className="rounded-xl border border-white/[0.08]">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.08] px-4 py-3">
@@ -331,13 +336,6 @@ export function ProductDrawer({
                   </button>
                 ))}
               </div>
-              {isAdmin && (
-                <div className="flex flex-wrap gap-2">
-                  {actionButton("extract-fgis", "Из «Описание типа»", "Извлечь из текста «Описание типа» привязанного кода СИ", <BookOpen size={13} />, handleExtractFromSiType)}
-                  {actionButton("extract-site", "С сайта производителя", "Найти руководство пользователя на сайте производителя (до минуты)", <Globe size={13} />, handleExtractFromSite)}
-                  {actionButton("find-docs", "Найти документацию", "Найти руководство на официальном сайте через поиск в интернете и разобрать его (до минуты)", <Search size={13} />, handleFindDocumentation)}
-                </div>
-              )}
             </div>
             <div className="px-4 py-3">
               {busy === "load" ? (
@@ -346,13 +344,15 @@ export function ProductDrawer({
                 <MeterParametersTable
                   parameters={parameters}
                   sourceLabels={SOURCE_LABELS}
+                  sourceUrls={sourceUrls}
+                  dataSources={sources}
                   isAdmin={isAdmin}
                   busyKey={busy}
                   onEdit={handleSetField}
                   onVerify={handleVerify}
                 />
               ) : characteristics.length === 0 ? (
-                <p className="text-xs text-zinc-500">Характеристик пока нет — запустите извлечение или заполните параметры вручную.</p>
+                <p className="text-xs text-zinc-500">Характеристик пока нет — опросите источники выше или заполните параметры вручную.</p>
               ) : (
                 <div className="space-y-4">
                   {grouped.map(([group, items]) => (
@@ -364,18 +364,8 @@ export function ProductDrawer({
                             <tr key={c.id} className="border-t border-white/[0.06]">
                               <td className="w-1/3 py-1.5 pr-4 text-zinc-400">{c.field_name}</td>
                               <td className="py-1.5 pr-4 text-zinc-100">{c.value}</td>
-                              <td className="whitespace-nowrap py-1.5 pr-4 text-[11px]">
-                                <span className="text-zinc-500">
-                                  {SOURCE_LABELS[c.source] ?? c.source}
-                                  {c.confidence !== null && ` · ${Math.round(c.confidence * 100)}%`}
-                                </span>{" "}
-                                {c.verified_by_user ? (
-                                  <span className="inline-flex items-center gap-0.5 text-emerald-400">
-                                    <BadgeCheck size={11} /> проверено
-                                  </span>
-                                ) : (
-                                  <span className="text-amber-400">требует проверки</span>
-                                )}
+                              <td className="py-1.5 pr-4">
+                                <CharacteristicOrigin characteristic={c} sourceLabels={SOURCE_LABELS} sourceUrls={sourceUrls} />
                               </td>
                               {isAdmin && (
                                 <td className="whitespace-nowrap py-1.5 text-right text-[11px]">
@@ -400,16 +390,18 @@ export function ProductDrawer({
 
           {/* Реестры допуска — не свойство прибора, а допуск с датами */}
           <section>
-            <ProductRegistrySection productId={product.id} isAdmin={isAdmin} />
+            <ProductRegistrySection productId={product.id} isAdmin={isAdmin} version={registryVersion} />
           </section>
 
           {Object.keys(product.extra_specifications ?? {}).length > 0 && (
             // Характеристики с сайта производителя, которым не нашлось поля в справочнике:
             // это данные, а не мусор — человек может перенести значение в нужное поле.
+            // Перечни («Интерфейсы», «Дополнительные функции») и дубли полей справочника сюда
+            // больше не попадают — их раскладывает обход сайта (замечание 13.10.2026, п.8).
             <section className="rounded-xl border border-white/[0.08] px-4 py-3">
               <h3 className="mb-1 text-[11px] font-medium uppercase tracking-wide text-zinc-500">Вне справочника</h3>
               <p className="mb-2 text-[11px] text-zinc-600">
-                Извлечены из документации, но подходящего поля нет. Значение можно перенести в нужное поле вручную.
+                Есть на сайте производителя, но в справочнике для этого нет поля. Если значение относится к параметру выше — перенесите его вручную.
               </p>
               <table className="w-full text-left text-sm">
                 <tbody>

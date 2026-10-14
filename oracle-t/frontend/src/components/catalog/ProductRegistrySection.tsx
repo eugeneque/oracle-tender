@@ -2,15 +2,17 @@ import { useCallback, useEffect, useState } from "react";
 import { BadgeCheck, ExternalLink, Loader2, ShieldCheck, Trash2 } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
-import type { ProductRegistryRow, RegistryRecordUpsert } from "../../api/types";
+import type { ProductRegistryRow, RegistryPoll, RegistryRecordUpsert } from "../../api/types";
 import { formatDate, registryStateStyle } from "../../utils/format";
 
 // Реестры допуска модели: ПП 719 (ГИСП), ЗАК ПАО «Россети», реестр российского ПО
 // (замечание тестировщика 16.09.2026).
 //
-// Записи вводятся руками: оба реестра закрыты для автоматической сверки (ГИСП отвечает
-// роботам 403, ezak.rosseti.ru открыт только из российских сетей), поэтому у каждой
-// строки есть официальная ссылка — сверить и занести. Состояние («действует», «истекает»,
+// До 13.10.2026 записи вводились только руками. Теперь ГИСП и перечень Россетей сервер
+// опрашивает сам раз в неделю (`registry_polling.py`), а если реестр не отдал выгрузку —
+// её загружает администратор в панели «Источники данных». Найденное автоматически помечено;
+// ручная запись автоматикой не перезаписывается. Ссылка «сверить в реестре» осталась: опрос
+// ищет модель по обозначению, и «не найдено» ещё не доказывает, что записи нет. Состояние («действует», «истекает»,
 // «истекла») сервер считает по датам; в форме его нет, чтобы не заводить противоречий
 // вида «истекла, но действует».
 //
@@ -37,6 +39,23 @@ const EMPTY_DRAFT: Draft = {
   verified: true,
 };
 
+// Что известно об автоматической сверке реестра, у которого записи по модели нет.
+function pollStatus(row: ProductRegistryRow): { text: string; tone: string } | null {
+  if (!row.pollable) return null;
+  const last: RegistryPoll | null = row.last_poll;
+  if (last?.status === "running") return { text: "идёт опрос реестра…", tone: "text-sky-400" };
+  const ok = row.last_successful_poll;
+  if (ok) {
+    const when = formatDate(ok.finished_at ?? ok.started_at);
+    return {
+      text: `реестр опрошен ${when}: по обозначению модель не найдена — сверьте вручную по ссылке`,
+      tone: "text-zinc-500",
+    };
+  }
+  if (last?.status === "error") return { text: `опрос не удался: ${last.message ?? "ошибка"}`, tone: "text-rose-400" };
+  return { text: "реестр ещё не опрашивался — опросите его в «Источниках данных» выше", tone: "text-amber-400" };
+}
+
 function draftFrom(row: ProductRegistryRow): Draft {
   if (!row.record) return EMPTY_DRAFT;
   return {
@@ -53,9 +72,12 @@ function draftFrom(row: ProductRegistryRow): Draft {
 export function ProductRegistrySection({
   productId,
   isAdmin,
+  version = 0,
 }: {
   productId: string;
   isAdmin: boolean;
+  // Меняется карточкой после опроса реестра или загрузки выгрузки — пора перечитать.
+  version?: number;
 }) {
   const [rows, setRows] = useState<ProductRegistryRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -77,6 +99,10 @@ export function ProductRegistrySection({
     setEditing(null);
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (version > 0) void load();
+  }, [version, load]);
 
   const startEdit = (row: ProductRegistryRow) => {
     setEditing(row.registry);
@@ -165,6 +191,9 @@ export function ProductRegistrySection({
                         <span className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${style.className}`}>
                           {style.label}
                         </span>
+                        {!row.record && pollStatus(row) && (
+                          <div className={`mt-1 text-[11px] ${pollStatus(row)!.tone}`}>{pollStatus(row)!.text}</div>
+                        )}
                         {row.record && (
                           <div className="mt-1 text-xs text-zinc-300">
                             {row.record.summary}
@@ -186,8 +215,12 @@ export function ProductRegistrySection({
                                 <span className="inline-flex items-center gap-0.5 text-emerald-500/80">
                                   <BadgeCheck size={11} /> сверено {formatDate(row.record.verified_at)}
                                 </span>
+                              ) : row.record.auto_found_at ? (
+                                <span className="text-sky-400/80">
+                                  найдено опросом реестра {formatDate(row.record.auto_found_at)}
+                                </span>
                               ) : (
-                                "не сверялось с реестром"
+                                "внесено вручную, с реестром не сверялось"
                               )}
                             </div>
                           </div>

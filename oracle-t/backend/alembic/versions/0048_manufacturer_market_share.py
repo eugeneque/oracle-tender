@@ -19,11 +19,19 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-from app.seed.manufacturers_data import (
-    MANUFACTURERS_ADDED_2026_09,
-    MARKET_SHARE_SOURCE,
-    MARKET_SHARES_2024,
-)
+from app.seed.manufacturers_data import MANUFACTURERS_ADDED_2026_09
+
+# Данные миграции перенесены сюда из `app/seed/manufacturers_data.py` 13.10.2026, когда доля
+# рынка была убрана из справочника (миграция 0073): история миграций должна проходить и после
+# удаления констант из сида.
+MARKET_SHARE_SOURCE = "Onside, итоги 2024 г. (по данным TAdviser)"
+MARKET_SHARES_2024: dict[str, float] = {
+    "ООО «Завод Нартис»": 26.0,
+    "АО «Энергомера»": 23.0,
+    "ООО «Телематические Решения»": 13.0,
+    'ООО «НПК "Инкотекс"»': 12.0,
+    "ООО «МИРТЕК»": 7.0,
+}
 
 revision: str = "0048_manufacturer_market_share"
 down_revision: Union[str, None] = "0047_ai_decision"

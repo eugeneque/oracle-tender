@@ -604,6 +604,18 @@ step_config() {
     case "$(get_env JWT_SECRET_KEY "$env_file" || true)" in
       ""|change-me*|insecure*) warn "JWT_SECRET_KEY в .env — значение из шаблона, замените его перед боевой эксплуатацией" ;;
     esac
+    # Расписание опроса площадок сменилось с 09:00/14:00 на 06:00/20:00 МСК (13.10.2026).
+    # Старые значения шаблона переводим на новые; время, выставленное вручную, не трогаем.
+    if [ "$DRY_RUN" != 1 ]; then
+      if [ "$(get_env SCHEDULER_MORNING_TIME "$env_file" || true)" = "09:00" ]; then
+        set_env SCHEDULER_MORNING_TIME "06:00" "$env_file"
+        ok "опрос площадок утром: 09:00 → 06:00 МСК"
+      fi
+      if [ "$(get_env SCHEDULER_AFTERNOON_TIME "$env_file" || true)" = "14:00" ]; then
+        set_env SCHEDULER_AFTERNOON_TIME "20:00" "$env_file"
+        ok "опрос площадок вечером: 14:00 → 20:00 МСК"
+      fi
+    fi
   elif [ "$DRY_RUN" = 1 ]; then
     info "будет создан $env_file со сгенерированными секретами"
   else

@@ -3,7 +3,7 @@ import uuid
 from app.adapters.fgis import SiSearchResult
 from app.db.session import SessionLocal
 from app.models.manufacturer import Manufacturer
-from app.seed.manufacturers_data import MANUFACTURERS, MANUFACTURERS_ADDED_2026_09, MARKET_SHARES_2024
+from app.seed.manufacturers_data import MANUFACTURERS, MANUFACTURERS_ADDED_2026_09
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -100,23 +100,16 @@ def test_manufacturers_list_includes_seeded_13(client, admin_token):
     assert sum(1 for m in body if m["is_mirtek"]) == 1
 
 
-def test_manufacturers_ordered_by_market_share(client, admin_token):
-    """Список — по убыванию доли рынка (замечание тестировщика 18.09.2026); у кого доля не
-    опубликована — после всех, кто с долей. Источник оценки хранится рядом с цифрой."""
-    resp = client.get("/manufacturers", headers=_auth_headers(admin_token))
-    body = resp.json()
-    with_share = [m for m in body if m["market_share_pct"] is not None]
-    shares = [m["market_share_pct"] for m in with_share]
-    assert shares == sorted(shares, reverse=True)
-    first_without = next(i for i, m in enumerate(body) if m["market_share_pct"] is None)
-    assert first_without == len(with_share)
-    by_name = {m["legal_name"]: m for m in body}
-    for legal_name, pct in MARKET_SHARES_2024.items():
-        assert by_name[legal_name]["market_share_pct"] == pct
-        assert by_name[legal_name]["market_share_source"]
+def test_manufacturers_ordered_alphabetically_without_market_share(client, admin_token):
+    """Доля рынка убрана (замечание 13.10.2026, п.11): список — по алфавиту бренда, поля
+    доли в ответе нет."""
+    body = client.get("/manufacturers", headers=_auth_headers(admin_token)).json()
+    titles = [(m["brand_name"] or m["legal_name"]).casefold().replace("ё", "е") for m in body]
+    assert titles == sorted(titles)
+    assert all("market_share_pct" not in m for m in body)
 
 
-def test_manufacturer_create_and_update_market_share(client, admin_token):
+def test_manufacturer_create_and_update(client, admin_token):
     name = f'ООО «Новый {uuid.uuid4().hex[:8]}»'
     created = client.post(
         "/manufacturers",
@@ -124,19 +117,15 @@ def test_manufacturer_create_and_update_market_share(client, admin_token):
         headers=_auth_headers(admin_token),
     )
     assert created.status_code == 201, created.text
-    assert created.json()["market_share_pct"] is None
 
     patched = client.patch(
         f"/manufacturers/{created.json()['id']}",
-        json={"market_share_pct": 99.5, "market_share_source": "тест"},
+        json={"website": "https://example.org/"},
         headers=_auth_headers(admin_token),
     )
     assert patched.status_code == 200, patched.text
-    assert patched.json()["market_share_pct"] == 99.5
+    assert patched.json()["website"] == "https://example.org/"
     assert patched.json()["brand_name"] == "Новый"  # не присланное поле не тронуто
-
-    body = client.get("/manufacturers", headers=_auth_headers(admin_token)).json()
-    assert body[0]["legal_name"] == name
 
     # Обычному пользователю запись запрещена.
     user_token = _create_regular_user(client, admin_token)
@@ -351,9 +340,17 @@ def test_extraction_endpoint_requires_loaded_description_type(client, admin_toke
         headers=headers,
     ).json()["id"]
 
+    # С 13.10.2026 кнопка сама загружает текст; если он не загрузился — понятная 422.
+    import app.api.endpoints.manufacturers as endpoint_module
+
+    class _NoText:
+        def fetch_description_type_text(self, url, *, mirror_url=None):
+            return None
+
+    monkeypatch.setattr(endpoint_module, "FgisAdapter", lambda: _NoText())
     resp = client.post(f"/products/{product_id}/extract-characteristics/from-si-type", headers=headers)
     assert resp.status_code == 422
-    assert "не загружен" in resp.json()["detail"]
+    assert "не загрузилось" in resp.json()["detail"]
 
 
 def test_extraction_endpoint_requires_si_type_link(client, admin_token):

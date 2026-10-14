@@ -61,10 +61,11 @@ from app.models.manufacturer import (
     ProductDataSource,
     ProductStatus,
     ReviewStatus,
+    source_may_replace,
 )
 from app.models.user import User
-from app.seed.characteristics_data import is_known_field
-from app.services import catalog_queue_service, si_type_linking
+from app.seed.characteristics_data import is_known_field, resolve_field
+from app.services import catalog_queue_service, characteristic_values, si_type_linking
 from app.services.audit import log_action
 from app.services.catalog_queue_service import TaskOutcome
 
@@ -721,6 +722,7 @@ def _save_card_characteristics(
         taken_fields.add(mapped)
         values.append((mapped[0], mapped[1], raw_value))
 
+    unmapped = _spread_unmapped(unmapped, values, taken_fields)
     values.extend(_document_values(details))
 
     for group_name, field_name, value in values:
@@ -769,6 +771,46 @@ def _document_values(details: CatalogProductDetails) -> list[tuple[str, str, str
     return values
 
 
+def _spread_unmapped(
+    unmapped: dict[str, str],
+    values: list[tuple[str, str, str]],
+    taken_fields: set[tuple[str, str]],
+) -> dict[str, str]:
+    """Строки сайта без поля в справочнике, которые на деле поля справочника и есть.
+
+    У Энергомеры «Интерфейсы: Bluetooth со встроенной антенной; Оптопорт» и «Дополнительные
+    функции: Реле управления нагрузкой; Электронная пломба…; Датчик магнитного поля» —
+    перечни, где каждый пункт — отдельное поле Приложения C со значением «есть». Не
+    разложенные, они лежали в «Вне справочника» рядом с теми же полями карточки, а поля
+    П15–П31 при этом стояли пустыми (замечание 13.10.2026, п.8). «Диапазон входных сигналов»
+    и «Время усреднения профилей нагрузки» — другие названия «Частоты сети» и «Интервала
+    профиля»: в поле справочника они идут, только если оно ещё не занято. Возвращает то, что
+    разложить не удалось."""
+
+    remaining: dict[str, str] = {}
+    for raw_key, raw_value in unmapped.items():
+        split = characteristic_values.split_feature_list(raw_key, raw_value)
+        if split:
+            features, leftover = split
+            for field_name, value in features:
+                resolved = resolve_field("", field_name)
+                if resolved and resolved not in taken_fields:
+                    taken_fields.add(resolved)
+                    values.append((resolved[0], resolved[1], value))
+            if leftover:
+                remaining[raw_key] = leftover
+            continue
+        duplicate_of = characteristic_values.DUPLICATE_FIELDS.get(raw_key.strip().casefold())
+        if duplicate_of:
+            resolved = resolve_field("", duplicate_of)
+            if resolved and resolved not in taken_fields:
+                taken_fields.add(resolved)
+                values.append((resolved[0], resolved[1], raw_value))
+            continue
+        remaining[raw_key] = raw_value
+    return remaining
+
+
 def _upsert_characteristic(
     db: Session, product: Product, group_name: str, field_name: str, value: str
 ) -> bool:
@@ -789,19 +831,32 @@ def _upsert_characteristic(
             ProductCharacteristic.field_name == field_name,
         )
     )
+    normalised = characteristic_values.normalise_value(field_name, value)
+    if normalised is None:
+        return False
+    value = normalised
+
     if existing is not None:
         if (
             existing.verified_by_user
             or existing.source == CharacteristicSource.MANUAL_ENTRY.value
         ):
             return False
-        if existing.value == value:
+        if existing.value == value and existing.source == CharacteristicSource.MANUFACTURER_SITE.value:
+            return False
+        # Руководство по рангу выше сайта (раздел 5.3 ТЗ); «Описание типа» — ниже, и
+        # значение с сайта его заменяет — так восстанавливаются поля, которые обучение по
+        # Аршину затёрло до 13.10.2026.
+        if existing.value and not source_may_replace(
+            CharacteristicSource.MANUFACTURER_SITE.value, existing.source
+        ):
             return False
         existing.value = value
         existing.source = CharacteristicSource.MANUFACTURER_SITE.value
         # Значение взято из таблицы на сайте дословно, а не выведено моделью, — здесь нет
         # вероятностной оценки, и `confidence` остаётся пустым осознанно.
         existing.confidence = None
+        existing.ai_extracted = False
         db.flush()
         return True
 
@@ -814,6 +869,7 @@ def _upsert_characteristic(
             source=CharacteristicSource.MANUFACTURER_SITE.value,
             confidence=None,
             verified_by_user=False,  # раздел 5.3 ТЗ — обязательная проверка человеком
+            ai_extracted=False,
         )
     )
     db.flush()

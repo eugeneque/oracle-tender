@@ -340,9 +340,16 @@ class TestDescriptionIngest:
         _fake_reading(monkeypatch, seen=seen)
         si_type = _si_type(db_session, manufacturer, description_type_url="https://fgis.example/doc", mit_uuid="u")
         family = _product(db_session, manufacturer, "НАРТИС-И100", si_type_id=si_type.id)
+        # Исполнение заведено из реестра — только у таких обозначение расшифровывается.
         w115 = _product(
-            db_session, manufacturer, "НАРТИС-И100-W115", si_type_id=si_type.id, registry_modification=W115
+            db_session,
+            manufacturer,
+            "НАРТИС-И100-W115",
+            si_type_id=si_type.id,
+            registry_modification=W115,
         )
+        w115.data_source = ProductDataSource.FGIS.value
+        db_session.commit()
         adapter = _StubFgis()
 
         outcome = fgis_description_ingest.ingest_description_types(db_session, manufacturer, adapter=adapter)
