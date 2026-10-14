@@ -37,7 +37,7 @@ from app.seed.characteristics_data import CHARACTERISTIC_GROUPS
 from app.seed.meter_parameters import PARAMETERS_BY_NO, detect_parameter, parameters_prompt_list
 from app.services.audit import log_action
 from app.services.document_service import classify_document, reextract_stale_documents
-from app.services.ai_client import AiQuotaExceededError, chunk_text, run_structured
+from app.services.ai_client import AiQuotaExceededError, chunk_text, fit_chars, run_structured
 from app.services.meter_kind import METER_KINDS, fill_tender_kinds
 from app.services import okpd2_service
 
@@ -714,16 +714,20 @@ def _extract_requirements(
     primary_document_id: uuid.UUID | None,
     outcome: AnalysisOutcome,
 ) -> None:
-    chunks = _select_chunks(chunk_text(_prioritised_text(text), max_chars=MAX_CHUNK_CHARS))
-    if not chunks:
-        return
-
     system_prompt = _REQUIREMENTS_SYSTEM_PROMPT.format(
         groups_list=_groups_list(),
         parameters_list=parameters_prompt_list(),
         meter_kinds="; ".join(f"«{label}»" for label in METER_KINDS.values()),
         manufacturers_list=_manufacturers_list(db),
     )
+    # Кусок — не длиннее, чем помещается в окно модели вместе с промптом (14.10.2026): на
+    # модели с окном 32 тыс. токенов и коротким потолком ответа 14 тыс. символов проходят, на
+    # меньшем окне кусок сужается, а не отклоняется провайдером.
+    max_chars = fit_chars(db, MAX_CHUNK_CHARS, reserved=len(system_prompt))
+    chunks = _select_chunks(chunk_text(_prioritised_text(text), max_chars=max_chars))
+    if not chunks:
+        return
+
     extracted: list[ExtractedRequirement] = []
     for index, chunk in enumerate(chunks):
         try:

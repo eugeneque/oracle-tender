@@ -3,9 +3,10 @@ import { ExternalLink, X } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
 import type { Characteristic, DataSource, MeterParameter, Product, ProductSupport, SiType } from "../../api/types";
+import { productDisplayName } from "../../utils/format";
 import { meterKindLabel } from "../../utils/meterKinds";
 import { DataSourcesPanel } from "./DataSourcesPanel";
-import { CharacteristicOrigin, MeterParametersTable } from "./MeterParametersTable";
+import { CharacteristicLine, MeterParametersTable } from "./MeterParametersTable";
 import { ProductRegistrySection } from "./ProductRegistrySection";
 
 // Карточка модели прибора — отдельным окном поверх каталога (замечание 28.09.2026): раньше
@@ -15,7 +16,10 @@ import { ProductRegistrySection } from "./ProductRegistrySection";
 // Приложение C, реестры допуска и то, что не легло в справочник.
 //
 // 13.10.2026 (замечания тендерного отдела): кнопки извлечения переехали в панель «Источники
-// данных» — рядом с объяснением, почему источник не прочитан; кнопки с моделью ИИ помечены.
+// данных» — рядом с объяснением, почему источник не прочитан.
+//
+// 14.10.2026 (редизайн каталога): значение правится прямо в строке, а не окном браузера;
+// цветные подписи (ПО верхнего уровня, обозначение по реестру) приглушены до нейтральных.
 
 export const SOURCE_LABELS: Record<string, string> = {
   fgis_description_type: "ФГИС «Описание типа»",
@@ -186,18 +190,21 @@ export function ProductDrawer({
       prev.some((c) => c.id === updated.id) ? prev.map((c) => (c.id === updated.id ? updated : c)) : [...prev, updated]
     );
 
-  const handleSetField = (groupName: string, fieldName: string, current: Characteristic | null) => {
-    const next = window.prompt(`${groupName} → ${fieldName}`, current?.value ?? "");
-    if (next === null || next === (current?.value ?? "")) return;
-    void run(`set-${groupName}/${fieldName}`, async () => {
+  // Ошибка показывается в окне и пробрасывается дальше — строка остаётся в режиме правки.
+  const handleSaveField = async (groupName: string, fieldName: string, value: string) => {
+    setError(null);
+    try {
       upsert(
         await api.put<Characteristic>(`/products/${productId}/characteristics`, {
           group_name: groupName,
           field_name: fieldName,
-          value: next,
+          value,
         })
       );
-    });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось сохранить значение");
+      throw err;
+    }
   };
 
   const handleVerify = (characteristic: Characteristic) =>
@@ -229,12 +236,14 @@ export function ProductDrawer({
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
               <div className="text-[11px] uppercase tracking-wide text-zinc-500">Модель прибора</div>
-              <h2 className="truncate text-xl font-semibold tracking-tight text-zinc-50">{product.model_name}</h2>
+              <h2 className="truncate text-xl font-semibold tracking-tight text-zinc-50" title={product.model_name}>
+                {productDisplayName(product.model_name)}
+              </h2>
               {product.registry_modification && (
                 // Полное обозначение — образец из карточки типа, на котором держатся
                 // характеристики исполнения; подпись нужна, иначе его читают как имя модели.
                 <p className="mt-0.5 text-[11px] text-zinc-500" title="Полное условное обозначение исполнения из реестра ФГИС">
-                  исполнение по реестру ФГИС: <span className="font-mono text-sky-400/80">{product.registry_modification}</span>
+                  исполнение по реестру ФГИС: <span className="font-mono text-zinc-400">{product.registry_modification}</span>
                 </p>
               )}
             </div>
@@ -255,7 +264,10 @@ export function ProductDrawer({
             </div>
           </div>
           {product.review_status === "needs_review" && product.review_reason && (
-            <p className="mt-2 text-[12px] text-amber-400/90">⚠ {product.review_reason}</p>
+            <p className="mt-2 flex items-center gap-2 text-[12px] text-zinc-400">
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" aria-hidden="true" />
+              {product.review_reason}
+            </p>
           )}
         </div>
 
@@ -295,7 +307,7 @@ export function ProductDrawer({
                   <span className="text-zinc-500">ни в одном списке поддерживаемого оборудования</span>
                 ) : (
                   platforms.map((row) => (
-                    <span key={row.adapter_key} title={`${row.device_raw} — ${row.section}`} className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-emerald-400">
+                    <span key={row.adapter_key} title={`${row.device_raw} — ${row.section}`} className="rounded-full border border-white/10 px-2 py-0.5 text-zinc-300">
                       {row.name}
                     </span>
                   ))
@@ -348,7 +360,7 @@ export function ProductDrawer({
                   dataSources={sources}
                   isAdmin={isAdmin}
                   busyKey={busy}
-                  onEdit={handleSetField}
+                  onSave={handleSaveField}
                   onVerify={handleVerify}
                 />
               ) : characteristics.length === 0 ? (
@@ -361,22 +373,19 @@ export function ProductDrawer({
                       <table className="w-full text-left text-sm">
                         <tbody>
                           {items.map((c) => (
-                            <tr key={c.id} className="border-t border-white/[0.06]">
-                              <td className="w-1/3 py-1.5 pr-4 text-zinc-400">{c.field_name}</td>
-                              <td className="py-1.5 pr-4 text-zinc-100">{c.value}</td>
-                              <td className="py-1.5 pr-4">
-                                <CharacteristicOrigin characteristic={c} sourceLabels={SOURCE_LABELS} sourceUrls={sourceUrls} />
+                            <tr key={c.id} className="border-t border-white/[0.06] align-top">
+                              <td className="w-[38%] py-1.5 pr-6 leading-[26px] text-zinc-400">{c.field_name}</td>
+                              <td className="py-1.5">
+                                <CharacteristicLine
+                                  characteristic={c}
+                                  sourceLabels={SOURCE_LABELS}
+                                  sourceUrls={sourceUrls}
+                                  isAdmin={isAdmin}
+                                  verifying={busy === `ch-${c.id}`}
+                                  onSave={(value) => handleSaveField(c.group_name, c.field_name, value)}
+                                  onVerify={handleVerify}
+                                />
                               </td>
-                              {isAdmin && (
-                                <td className="whitespace-nowrap py-1.5 text-right text-[11px]">
-                                  <button onClick={() => handleSetField(c.group_name, c.field_name, c)} className="mr-2 text-indigo-400 hover:underline">
-                                    править
-                                  </button>
-                                  <button onClick={() => handleVerify(c)} disabled={busy === `ch-${c.id}`} className="text-zinc-400 hover:underline disabled:opacity-50">
-                                    {c.verified_by_user ? "снять" : "подтвердить"}
-                                  </button>
-                                </td>
-                              )}
                             </tr>
                           ))}
                         </tbody>

@@ -94,10 +94,21 @@ def queue_order(db: Session) -> list[Manufacturer]:
     return sorted(manufacturers, key=lambda m: (m.id in with_products, not m.is_mirtek))
 
 
-def enqueue_all(db: Session, *, actor_id: uuid.UUID | None = None) -> int:
+def enqueue_all(
+    db: Session, *, actor_id: uuid.UUID | None = None, with_learning: bool | None = None
+) -> int:
     """Ставит оба прохода по всем производителям сразу: сначала все быстрые, за ними все
     дополнения. Очередь идёт по времени постановки, поэтому порядок сохраняется и после
-    перезапуска сервера — ничего не нужно помнить в памяти процесса."""
+    перезапуска сервера — ничего не нужно помнить в памяти процесса.
+
+    `with_learning` — ставить ли второй проход (дополнение характеристик моделью ИИ). По
+    умолчанию — только при ручном запуске (`actor_id`): плановый опрос дважды в день и
+    актуализация при старте сервера идут без модели, а второй проход — раз в неделю
+    (`catalog_learning_weekday`) или по кнопке. Так решено 14.10.2026: за день плановые
+    проходы расходовали ~7,5 млн токенов, почти всё — на повторное чтение тех же документов."""
+
+    if with_learning is None:
+        with_learning = actor_id is not None
 
     from app.services import catalog_learning
 
@@ -122,8 +133,9 @@ def enqueue_all(db: Session, *, actor_id: uuid.UUID | None = None) -> int:
     for manufacturer in manufacturers:
         if enqueue(db, manufacturer, actor_id=actor_id, run_now=False) is not None:
             queued += 1
-    for manufacturer in manufacturers:
-        catalog_learning.enqueue(db, manufacturer, actor_id=actor_id, run_now=False)
+    if with_learning:
+        for manufacturer in manufacturers:
+            catalog_learning.enqueue(db, manufacturer, actor_id=actor_id, run_now=False)
     return queued
 
 
@@ -139,12 +151,14 @@ def current_run_started_at(db: Session):
     )
 
 
-def run_all_in_background(*, actor_id: uuid.UUID | None = None) -> int:
+def run_all_in_background(
+    *, actor_id: uuid.UUID | None = None, with_learning: bool | None = None
+) -> int:
     """Опрос всего каталога: постановка в очередь сразу, выполнение — в потоке очереди."""
 
     db = SessionLocal()
     try:
-        queued = enqueue_all(db, actor_id=actor_id)
+        queued = enqueue_all(db, actor_id=actor_id, with_learning=with_learning)
     finally:
         db.close()
     catalog_queue_service.submit(_process_all)

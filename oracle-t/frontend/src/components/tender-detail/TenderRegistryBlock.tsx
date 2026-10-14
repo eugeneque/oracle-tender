@@ -4,7 +4,6 @@ import { ExternalLink, ShieldCheck } from "lucide-react";
 import { ApiError, api } from "../../api/client";
 import type { TenderRegistryCheck } from "../../api/types";
 import { registryStateStyle } from "../../utils/format";
-import { CriticalityBadge } from "./TenderRequirementsTab";
 
 // Проверка допусков по закупке: реестр промпродукции (ПП 719), ЗАК ПАО «Россети»,
 // реестр российского ПО (замечание тестировщика 16.09.2026).
@@ -63,7 +62,6 @@ export function TenderRegistryBlock({ tenderId }: { tenderId: string }) {
           {data.requirements.map((requirement) => (
             <li key={requirement.id} className="text-[12px] leading-snug text-zinc-400">
               <span className="text-zinc-300">{requirement.text}</span>
-              {requirement.criticality && <CriticalityBadge value={requirement.criticality} />}
               <span className="text-indigo-400"> → {requirement.registries.map(labelOf).join(", ")}</span>
             </li>
           ))}
@@ -98,7 +96,6 @@ export function TenderRegistryBlock({ tenderId }: { tenderId: string }) {
               <tr key={row.manufacturer_id} className="border-b border-white/[0.04]">
                 <td className="px-3 py-1.5 text-zinc-300">
                   {row.name}
-                  {row.is_mirtek && <span className="ml-1.5 text-[11px] text-indigo-400">наш</span>}
                 </td>
                 {registries.map((registry) => {
                   const cell = row.registries[registry.key];

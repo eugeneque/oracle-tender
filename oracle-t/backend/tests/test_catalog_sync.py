@@ -556,6 +556,25 @@ class TestMirtekCatalogSync:
         assert {p.model_name for p in saved} == {"МИРТЕК-12-РУ-D17"}
         assert all(p.data_source == ProductDataSource.MANUFACTURER_SITE.value for p in saved)
 
+    def test_progress_reported_per_card(self, db_session, mirtek):
+        """Ход обхода отдаётся наружу «N из M» — по нему интерфейс рисует полосу и
+        оставшееся время (14.10.2026)."""
+
+        suffix = uuid.uuid4().hex[:6]
+        items = [
+            _item(f"mirtek-1-{suffix}", "МИРТЕК-1-РУ"),
+            _item(f"mirtek-2-{suffix}", "МИРТЕК-2-РУ"),
+        ]
+        adapter = _StubMirtekSite(items, {item.url: _details(item) for item in items})
+        calls: list[tuple[int, int, str | None]] = []
+        catalog_site_sync.sync_catalog(
+            db_session, adapter=adapter, use_ai=False, on_progress=lambda *a: calls.append(a)
+        )
+
+        assert calls[0] == (0, 2, None)
+        assert calls[1] == (0, 2, "МИРТЕК-1-РУ")
+        assert calls[-1][:2] == (2, 2)
+
     def test_repeat_run_updates_instead_of_duplicating(self, db_session, mirtek):
         """Критерий приёмки 7: повторный запуск не создаёт дублей.
 

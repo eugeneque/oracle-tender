@@ -40,7 +40,7 @@ from app.models.manufacturer import (
 )
 from app.models.user import User
 from app.seed.characteristics_data import resolve_field
-from app.services import catalog_queue_service, characteristic_values
+from app.services import catalog_queue_service, characteristic_values, product_form_factor
 from app.services.audit import log_action
 from app.services.registry_modifications import modification_belongs_to
 
@@ -67,7 +67,7 @@ class RepairOutcome:
 
 
 def _repair_value(
-    row: ProductCharacteristic, tokens: set[str], designation: str | None
+    row: ProductCharacteristic, tokens: set[str], designation: str | None, product: Product | None = None
 ) -> tuple[str | None, str]:
     """Новое значение и причина. `(row.value, "")` — менять нечего; `(None, причина)` — удалить."""
 
@@ -78,6 +78,18 @@ def _repair_value(
     normalised = characteristic_values.normalise_value(row.field_name, value)
     if normalised is None:
         return None, "негодное значение"
+    if product is not None:
+        narrowed = product_form_factor.model_specific_value(
+            row.field_name,
+            normalised,
+            model_code=product.model_code,
+            model_name=product.model_name,
+            family_source=from_fgis,
+        )
+        if narrowed is None:
+            return None, "перечень способов установки всей серии"
+        if narrowed != normalised:
+            return narrowed, "вариант своей модели из перечня семейства"
     if characteristic_values.is_family_level(normalised):
         picked = characteristic_values.resolve_family_value(normalised, tokens)
         if picked is not None:
@@ -164,7 +176,7 @@ def repair(db: Session, *, apply: bool, actor: User) -> RepairOutcome:
         for row in rows:
             if row.verified_by_user or row.source == CharacteristicSource.MANUAL_ENTRY.value or not row.value:
                 continue
-            new_value, reason = _repair_value(row, tokens, designation)
+            new_value, reason = _repair_value(row, tokens, designation, product)
             if new_value == row.value:
                 continue
             touched = True

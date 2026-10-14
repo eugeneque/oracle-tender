@@ -18,6 +18,7 @@ import { useAuth } from "../context/useAuth";
 import { daysLeft, percentValue, scoreBadgeClass } from "../utils/format";
 import { dropdownVariants, scrimVariants } from "../utils/motion";
 import { DecisionMark } from "./DecisionMark";
+import { ThemeToggle } from "./ThemeToggle";
 import { UserAvatar } from "./UserAvatar";
 
 // Сколько отложенных закупок показывать в меню: это напоминание «к чему вернуться»,
@@ -237,6 +238,13 @@ export function AccountMenu() {
                       Пользователи
                     </Link>
                   )}
+                </div>
+
+                {/* Тема — здесь, а не в шапке (14.10.2026): её переключают редко, а место в
+                    шапке нужнее поиску. */}
+                <div className="flex items-center justify-between gap-3 border-t border-white/[0.07] px-4 py-2.5">
+                  <span className="text-sm text-zinc-300">Тема</span>
+                  <ThemeToggle />
                 </div>
 
                 <div className="border-t border-white/[0.07] p-1.5">

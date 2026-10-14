@@ -42,11 +42,19 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     throw new ApiError(response.status, detail);
   }
 
+  // Любой запуск (POST) может начать фоновый процесс — центр уведомлений в шапке
+  // перечитывает список сразу, а не на следующем редком опросе (14.10.2026).
+  if (options.method === "POST") {
+    window.dispatchEvent(new Event(ACTIVITY_EVENT));
+  }
+
   if (response.status === 204) {
     return undefined as T;
   }
   return (await response.json()) as T;
 }
+
+export const ACTIVITY_EVENT = "oraclet:activity";
 
 export const api = {
   get: <T>(path: string) => request<T>(path, { method: "GET" }),

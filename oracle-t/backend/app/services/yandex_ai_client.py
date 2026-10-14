@@ -24,7 +24,10 @@ from loguru import logger
 from sqlalchemy.orm import Session
 
 from app.models.integration_setting import YandexAiStudioSettings
-from app.services.ai_provider_service import AiNotConfiguredError
+from app.services.ai_provider_service import PROVIDER_YANDEX, AiNotConfiguredError, get_model_limits
+from app.models.log import LogLevel
+from app.services.ai_log_service import log_ai_event
+from app.services.ai_usage_service import record_call, usage_from_openai, usage_from_yandex
 from app.services.yandex_ai_service import _SINGLETON_ID
 
 # Модель по умолчанию. `yandexgpt` (Pro) — а не `yandexgpt-lite`: задачи раздела 5.4-5.5 ТЗ
@@ -34,11 +37,11 @@ from app.services.yandex_ai_service import _SINGLETON_ID
 DEFAULT_MODEL = "yandexgpt"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 
-# Предел длины ответа. Без него действует умолчание платформы, и длинный JSON обрывается
-# посреди строки («EOF while parsing», ~9 тыс. символов): на ТЗ с десятками параметров кусок
-# документации терялся после трёх попыток (25.09.2026, закупка 32616309303). 8000 —
-# потолок ответа моделей YandexGPT.
-MAX_OUTPUT_TOKENS = 8000
+# Предел длины ответа задаётся обязательно — из настроек модели (`get_model_limits`,
+# по умолчанию 8000 — потолок ответа моделей YandexGPT). Без него действует умолчание
+# платформы, и длинный JSON обрывается посреди строки («EOF while parsing», ~9 тыс.
+# символов): на ТЗ с десятками параметров кусок документации терялся после трёх попыток
+# (25.09.2026, закупка 32616309303).
 
 # Повторные попытки при сбое обращения к модели (раздел 5.9 ТЗ). Сбои здесь двух видов:
 # сетевые/квотные (лечатся повтором) и «модель вернула не тот JSON» (лечится тоже — при
@@ -179,11 +182,13 @@ def run_structured(
     from yandex_ai_studio_sdk import AIStudio
 
     api_key, folder_id = get_credentials(db)
+    max_tokens = get_model_limits(db, PROVIDER_YANDEX).max_output_tokens
 
     sdk = AIStudio(folder_id=folder_id, auth=api_key)
     model = sdk.models.completions(model_name).configure(
-        temperature=temperature, response_format=response_model, max_tokens=MAX_OUTPUT_TOKENS
+        temperature=temperature, response_format=response_model, max_tokens=max_tokens
     )
+    run_kwargs = {"db": db, "model_name": model_name}
 
     try:
         return _run_with_retries(
@@ -192,6 +197,7 @@ def run_structured(
             user_text=user_text,
             response_model=response_model,
             attempts=RETRY_ATTEMPTS,
+            **run_kwargs,
         )
     except YandexContentFilterError as refusal:
         logger.warning(
@@ -208,6 +214,7 @@ def run_structured(
             user_text=soften_for_filter(user_text),
             response_model=response_model,
             attempts=1,
+            **run_kwargs,
         )
         _note_fallback("YandexGPT ответил только на смягчённую формулировку (фильтр тематики)")
         return answer
@@ -229,6 +236,8 @@ def run_structured(
             user_text=user_text,
             response_model=response_model,
             temperature=temperature,
+            db=db,
+            max_tokens=max_tokens,
         )
     except Exception as exc:  # noqa: BLE001
         raise YandexContentFilterError(
@@ -249,13 +258,40 @@ def _run_with_retries(
     user_text: str,
     response_model: type[ResponseT],
     attempts: int,
+    db: Session | None = None,
+    model_name: str = DEFAULT_MODEL,
 ) -> ResponseT:
     """Обращение к одной модели с повторами. Отказ по фильтру поднимается сразу, без
-    повторов: при temperature=0 он воспроизводится один в один."""
+    повторов: при temperature=0 он воспроизводится один в один.
+
+    `db` — для учёта расхода (`ai_usage_service`); без него попытки не записываются."""
 
     last_error: Exception | None = None
     raw_text = ""
+    prompt_chars = len(system_prompt) + len(user_text)
     for attempt in range(1, attempts + 1):
+        started = time.monotonic()
+        result = None
+        raw_text = ""
+
+        def _record(status: str, error: Exception | None = None) -> None:
+            if db is None:
+                return
+            record_call(
+                db,
+                provider=PROVIDER_YANDEX,
+                model=model_name,
+                operation=response_model.__name__,
+                prompt_chars=prompt_chars,
+                completion_chars=len(raw_text),
+                usage=usage_from_yandex(result),
+                duration_s=time.monotonic() - started,
+                status=status,
+                attempt=attempt,
+                attempts=attempts,
+                error=str(error) if error else None,
+            )
+
         try:
             result = model.run(
                 [
@@ -268,19 +304,24 @@ def _run_with_retries(
             status = getattr(getattr(result[0], "status", None), "name", "")
             if status == "CONTENT_FILTER" or is_refusal(raw_text):
                 raise YandexContentFilterError(raw_text.strip()[:120] or status)
-            return response_model.model_validate_json(raw_text)
-        except YandexContentFilterError:
+            answer = response_model.model_validate_json(raw_text)
+            _record("success")
+            return answer
+        except YandexContentFilterError as exc:
+            _record("filter", exc)
             raise
         except pydantic.ValidationError as exc:
             # Модель вернула JSON, не подходящий под схему (бывает при обрыве по лимиту токенов).
             # Логируем начало ответа — этого достаточно для диагностики, но не засоряет лог
             # многокилобайтным текстом.
+            _record("invalid", exc)
             last_error = exc
             logger.warning(
                 f"YandexGPT вернул ответ, не соответствующий схеме {response_model.__name__} "
                 f"(попытка {attempt} из {attempts}): {exc}; начало ответа: {raw_text[:300]!r}"
             )
         except Exception as exc:  # noqa: BLE001 - сетевые сбои и квоты тоже лечатся повтором
+            _record("error", exc)
             last_error = exc
             logger.warning(
                 f"Обращение к YandexGPT не удалось (попытка {attempt} из {attempts}): {exc}"
@@ -305,6 +346,8 @@ def _run_openai_compatible(
     response_model: type[ResponseT],
     temperature: float,
     attempts: int = 2,
+    db: Session | None = None,
+    max_tokens: int = 8000,
 ) -> ResponseT:
     """Модель каталога Yandex AI Studio через OpenAI-совместимый API (Qwen, gpt-oss): ключ и
     каталог те же, что у YandexGPT. Тело запроса и разбор ответа — как у RouterAI."""
@@ -327,7 +370,30 @@ def _run_openai_compatible(
     }
     last_error: Exception | None = None
     raw_text = ""
+    prompt_chars = len(system_prompt) + len(user_text)
     for attempt in range(1, attempts + 1):
+        started = time.monotonic()
+        payload = None
+        raw_text = ""
+
+        def _record(status: str, error: Exception | None = None) -> None:
+            if db is None:
+                return
+            record_call(
+                db,
+                provider=PROVIDER_YANDEX,
+                model=model_name,
+                operation=response_model.__name__,
+                prompt_chars=prompt_chars,
+                completion_chars=len(raw_text),
+                usage=usage_from_openai(payload),
+                duration_s=time.monotonic() - started,
+                status=status,
+                attempt=attempt,
+                attempts=attempts,
+                error=str(error) if error else None,
+            )
+
         try:
             payload = _chat_completion(
                 api_key=api_key,
@@ -338,7 +404,7 @@ def _run_openai_compatible(
                     {"role": "user", "content": user_text},
                 ],
                 temperature=temperature,
-                max_tokens=MAX_OUTPUT_TOKENS,
+                max_tokens=max_tokens,
                 response_format=response_format,
                 timeout=DEFAULT_TIMEOUT_SECONDS,
             )
@@ -346,10 +412,14 @@ def _run_openai_compatible(
             raw_text = _strip_fences(_message_text(choice.get("message") or {}))
             if choice.get("finish_reason") == "content_filter" or is_refusal(raw_text):
                 raise YandexContentFilterError(raw_text[:120] or "content_filter")
-            return response_model.model_validate(_coerce_shape(raw_text, response_model))
-        except YandexContentFilterError:
+            answer = response_model.model_validate(_coerce_shape(raw_text, response_model))
+            _record("success")
+            return answer
+        except YandexContentFilterError as exc:
+            _record("filter", exc)
             raise
         except Exception as exc:  # noqa: BLE001
+            _record("invalid" if payload is not None else "error", exc)
             last_error = exc
             logger.warning(
                 f"Запасная модель {model_name} не ответила (попытка {attempt} из {attempts}): "
@@ -404,6 +474,21 @@ def embed_text(db: Session, text: str, *, model_name: str = EMBEDDINGS_MODEL) ->
             last_error = exc
             logger.warning(
                 f"Не удалось получить эмбеддинг (попытка {attempt} из {RETRY_ATTEMPTS}): {exc}"
+            )
+            # Эмбеддинги идут мимо `record_call` (токены не учитываются) — в журнал ИИ отдельно.
+            log_ai_event(
+                db,
+                action=(
+                    "Эмбеддинг не получен"
+                    if attempt == RETRY_ATTEMPTS
+                    else "Сбой запроса эмбеддинга"
+                ),
+                error=exc,
+                level=LogLevel.ERROR if attempt == RETRY_ATTEMPTS else LogLevel.WARNING,
+                provider=PROVIDER_YANDEX,
+                model=model_name,
+                attempt=attempt,
+                attempts=RETRY_ATTEMPTS,
             )
             if attempt < RETRY_ATTEMPTS:
                 time.sleep(RETRY_BACKOFF_SECONDS * attempt)

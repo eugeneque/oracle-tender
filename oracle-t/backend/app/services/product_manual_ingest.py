@@ -40,6 +40,7 @@ from app.models.manufacturer import (
     ProductCharacteristic,
 )
 from app.models.user import User
+from app.services.ai_client import AiQuotaExceededError
 from app.services.audit import log_action
 from app.services.document_extraction import extract_text, sniff_extension
 
@@ -189,11 +190,18 @@ def ingest_manuals(
                 outcome.skipped_by_robots += 1
                 continue
 
+            # Это руководство уже прочитано для модели, и ничего не извлеклось — повторный
+            # разбор того же файла даст то же, но стоит токенов (14.10.2026).
+            if not refresh and product.manual_read_url == url:
+                outcome.skipped_have_data += 1
+                continue
+
             if url in parsed:
                 # Тот же документ уже разобран в этом прогоне — записываем результат модели
                 # без повторного скачивания и без повторного обращения к YandexGPT.
                 outcome.reused_documents += 1
                 outcome.characteristics_saved += _apply(db, product, parsed[url], actor=actor)
+                product.manual_read_url = url
                 continue
 
             # Предел считается по числу разобранных документов, и проверяется он здесь, а
@@ -210,13 +218,21 @@ def ingest_manuals(
             outcome.processed += 1
             if not use_ai:
                 continue
-            characteristics, saved = _extract(db, product, text, actor=actor)
+            try:
+                characteristics, saved = _extract(db, product, text, actor=actor)
+            except AiQuotaExceededError as exc:
+                # Лимит, отклонённый ключ, нет связи — остальные руководства получат тот же
+                # отказ, перебирать их незачем.
+                outcome.ai_failed += 1
+                outcome.messages.append(f"Разбор руководств остановлен: {exc}")
+                break
             if characteristics is None:
                 outcome.ai_failed += 1
                 outcome.messages.append(f"{product.model_name}: модель ИИ не ответила, руководство не прочитано")
                 continue
             parsed[url] = characteristics
             outcome.characteristics_saved += saved
+            product.manual_read_url = url
 
     log_action(
         db,
@@ -277,7 +293,10 @@ def ingest_uploaded_manual(
     if not text.strip():
         raise ValueError("В файле нет текста (скан без текстового слоя?) — характеристики не извлечь")
 
-    characteristics, saved = _extract(db, product, text, actor=actor)
+    try:
+        characteristics, saved = _extract(db, product, text, actor=actor)
+    except AiQuotaExceededError as exc:
+        raise ValueError(str(exc)) from exc
     if characteristics is None:
         raise ValueError(AI_DID_NOT_ANSWER)
     outcome.processed = 1
@@ -393,6 +412,9 @@ def _extract(db: Session, product: Product, text: str, *, actor: User) -> tuple[
         reading = characteristic_extraction.read_characteristics(
             db, text=text, document_source="manufacturer"
         )
+    except AiQuotaExceededError:
+        # Лимит, отклонённый ключ, нет связи — остальные руководства получат тот же отказ.
+        raise
     except Exception as exc:  # noqa: BLE001 - недоступность модели не должна ронять прогон
         logger.warning(f"Разбор руководства модели {product.model_name} не удался: {exc}")
         return None, 0

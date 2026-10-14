@@ -202,6 +202,27 @@ def test_already_parsed_manual_is_not_downloaded_again(
     assert outcome.processed == 0
 
 
+def test_manual_with_empty_result_is_not_read_again(
+    db_session, admin_user: User, no_network, monkeypatch
+):
+    """Руководство, из которого модель ничего не извлекла, не отправляется в ИИ на каждом
+    опросе (14.10.2026: 349 таких моделей перечитывались дважды в день)."""
+
+    manufacturer = _manufacturer(db_session)
+    _product_with_manual(db_session, manufacturer, "https://example.test/empty.pdf")
+    calls = []
+    monkeypatch.setattr(
+        ingest_module, "_extract", lambda db, product, text, actor: (calls.append(1), ([], 0))[1]
+    )
+
+    first = ingest_manuals(db_session, manufacturer, actor=admin_user, limit=5)
+    second = ingest_manuals(db_session, manufacturer, actor=admin_user, limit=5)
+
+    assert first.processed == 1
+    assert second.processed == 0 and second.skipped_have_data == 1
+    assert len(calls) == 1
+
+
 def test_product_without_manual_link_is_skipped(db_session, admin_user: User, no_network):
     manufacturer = _manufacturer(db_session)
     product = Product(manufacturer_id=manufacturer.id, model_name="Без руководства")

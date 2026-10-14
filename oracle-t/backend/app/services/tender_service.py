@@ -404,10 +404,11 @@ def poll_source(
     return SourcePollResult(source.key, processed, created, updated, len(errors))
 
 
-def poll_all_active_sources(
-    db: Session, *, actor_id: uuid.UUID | None = None
-) -> list[SourcePollResult]:
-    sources = db.scalars(
+def list_pollable_sources(db: Session) -> list[Source]:
+    """Площадки, которые обходит плановый опрос. Отдельно — чтобы планировщик мог записать
+    в журнал «запущен: площадок N» до начала долгого обхода (14.10.2026)."""
+
+    return list(db.scalars(
         select(Source).where(
             Source.status == SourceStatus.ACTIVE.value,
             Source.adapter_key.is_not(None),
@@ -417,8 +418,25 @@ def poll_all_active_sources(
             # заявки — тоже не площадка: их заводит человек, опрашивать там нечего.
             Source.type.notin_(POLL_EXCLUDED_SOURCE_TYPES),
         )
-    ).all()
-    return [poll_source(db, source, actor_id=actor_id) for source in sources]
+    ))
+
+
+def poll_all_active_sources(
+    db: Session, *, actor_id: uuid.UUID | None = None
+) -> list[SourcePollResult]:
+    from app.core import activity
+
+    sources = list_pollable_sources(db)
+    results = []
+    for index, source in enumerate(sources):
+        # Ход планового опроса — в центр уведомлений шапки (14.10.2026); вне задания
+        # планировщика вызов ничего не делает.
+        activity.progress(
+            "poll_sources", done=index, total=len(sources), message=f"Опрос: {source.name}"
+        )
+        results.append(poll_source(db, source, actor_id=actor_id))
+    activity.progress("poll_sources", done=len(sources), message="ИИ-отбор новых закупок…")
+    return results
 
 
 def poll_sources(
@@ -476,6 +494,10 @@ class TenderFilters:
     # Раздел «Релевантные» / «Неактуальные» (06.10.2026): закупки, которые специалист уже
     # отметил. `relevant` — «Релевантна» и дальше по пайплайну, `rejected` — «Неактуально».
     marked: str | None = None
+    # Только разобранные закупки (14.10.2026): у которых ИИ-разбор документации уже извлёк
+    # требования. Разобранных единицы на тысячи собранных, и без отдельного раздела их
+    # приходилось выискивать по счётчику требований в карточках.
+    analyzed: bool = False
     # Поля, которые заполняет ИИ-анализ (Этапы 5-6). Пока анализ не выполнен, они пустые —
     # тендер просто не попадёт в выдачу с таким фильтром, и это верно: пользователь ищет
     # разобранные закупки.
@@ -544,6 +566,31 @@ DEFAULT_SORT = "created_at"
 # Ключ, под которым и счётчики, и колонки собирают тендеры с пустым статусом. Тем же
 # словом интерфейс называет колонку «Без статуса».
 UNCLASSIFIED = "unclassified"
+
+
+def fold_yo(text: str) -> str:
+    """«Ё» → «е» для поиска без учёта разницы между ними."""
+
+    return text.replace("ё", "е").replace("Ё", "Е")
+
+
+def _folded(column):
+    return func.replace(func.replace(column, "ё", "е"), "Ё", "Е")
+
+
+def analyzed_condition():
+    """Закупка разобрана — ИИ-разбор извлёк из документации хотя бы одно требование.
+    Требования лежат у записи с разбором (`analysed_tender_id`), поэтому двойник из
+    Госплана считается разобранным вместе с оригиналом."""
+
+    from app.models.analysis import Requirement
+
+    return (
+        select(Requirement.id)
+        .where(Requirement.tender_id == analysed_tender_id())
+        .correlate(Tender)
+        .exists()
+    )
 
 
 def analysed_tender_id():
@@ -657,9 +704,11 @@ def _build_conditions(filters: TenderFilters) -> list:
     conditions = []
 
     if filters.search:
-        pattern = f"%{filters.search}%"
+        # Е и Ё не различаются (14.10.2026): пользователь пишет «счетчик», а в наименовании
+        # «счётчик» (или наоборот) — и закупка не находилась. Обе стороны приводятся к «е».
+        pattern = f"%{fold_yo(filters.search)}%"
         conditions.append(
-            Tender.title.ilike(pattern) | Tender.customer_name.ilike(pattern)
+            _folded(Tender.title).ilike(pattern) | _folded(Tender.customer_name).ilike(pattern)
         )
     feed_condition = feed_condition_for(filters.feed)
     if feed_condition is not None:
@@ -706,6 +755,8 @@ def _build_conditions(filters: TenderFilters) -> list:
         conditions.append(Tender.relevance_status == RelevanceStatus.CONFIRMED.value)
     elif filters.marked == "rejected":
         conditions.append(Tender.relevance_status == RelevanceStatus.REJECTED.value)
+    if filters.analyzed:
+        conditions.append(analyzed_condition())
     if filters.same_day_deadline:
         conditions.append(
             cast(func.timezone("Europe/Moscow", Tender.application_end), Date)

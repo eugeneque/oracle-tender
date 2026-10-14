@@ -39,8 +39,8 @@ from app.models.manufacturer import (
 from app.models.user import User
 from app.seed.characteristics_data import fields_for_source, resolve_field
 from app.services.audit import log_action
-from app.services import characteristic_values
-from app.services.ai_client import chunk_text, run_structured
+from app.services import characteristic_values, product_form_factor
+from app.services.ai_client import AiQuotaExceededError, chunk_text, fit_chars, run_structured
 
 # Кусок текста на один запрос к модели. Контекст YandexGPT Pro — 32k токенов (раздел 5.4 ТЗ
 # упоминает облачную модель без указания лимита); 12k символов кириллицы — консервативная
@@ -161,8 +161,10 @@ def read_characteristics(db: Session, *, text: str, document_source: str) -> Doc
 
     reading = DocumentReading()
     system_prompt = _build_system_prompt(document_source)
+    # Не длиннее, чем помещается в окно активной модели вместе с промптом (14.10.2026).
+    max_chars = fit_chars(db, MAX_CHUNK_CHARS, reserved=len(system_prompt))
 
-    for chunk in chunk_text(text, max_chars=MAX_CHUNK_CHARS):
+    for chunk in chunk_text(text, max_chars=max_chars):
         try:
             result = run_structured(
                 db,
@@ -170,6 +172,10 @@ def read_characteristics(db: Session, *, text: str, document_source: str) -> Doc
                 user_text=chunk,
                 response_model=ExtractionResult,
             )
+        except AiQuotaExceededError:
+            # Лимит, отклонённый ключ, нет связи: остальные куски получат тот же отказ.
+            # Поднимаем наверх, чтобы весь проход остановился, а не перебирал документы.
+            raise
         except Exception as exc:  # noqa: BLE001 - сбой одного куска не должен терять уже извлечённое из остальных
             reading.chunks_failed += 1
             logger.warning(f"Экстракция характеристик: кусок текста не обработан: {exc}")
@@ -358,6 +364,17 @@ def _product_value(
     13.10.2026, п.2–3), — а из руководства остаётся: там это часто единственный ответ."""
 
     value = characteristic_values.normalise_value(field_name, raw)
+    if value is None:
+        return None
+    # Перечень способов установки / корпусов всей серии — сужается по коду корпуса в
+    # обозначении модели (14.10.2026, см. `product_form_factor.model_specific_value`).
+    value = product_form_factor.model_specific_value(
+        field_name,
+        value,
+        model_code=product.model_code,
+        model_name=product.model_name,
+        family_source=source is CharacteristicSource.FGIS_DESCRIPTION_TYPE,
+    )
     if value is None or not characteristic_values.is_family_level(value):
         return value
     tokens = characteristic_values.designation_tokens(

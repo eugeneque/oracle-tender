@@ -1,6 +1,10 @@
 import { useMemo } from "react";
 
+import { Info } from "lucide-react";
+
 import type { Product, ProductMounting, SiType } from "../../api/types";
+import { productDisplayName } from "../../utils/format";
+import { Tooltip } from "../ui/Tooltip";
 
 // Модели производителя, разложенные по исполнениям: строки — фазность, столбцы — способ
 // установки (предложение тестировщика 18.09.2026). Сплошной список из двух сотен позиций
@@ -10,6 +14,11 @@ import type { Product, ProductMounting, SiType } from "../../api/types";
 // продавцу важно, что прибор подходит под щит, а не то, что он «в первую очередь» DIN.
 // Снятые с производства уходят в конец ячейки и приглушены: они интересны только когда
 // заказчик всё ещё указывает их в документации.
+//
+// 14.10.2026 (редизайн каталога): у плашки модели — только название и номер ГРСИ. Пометки
+// «из реестра ФГИС», «снят с производства», «⚠ проверить» разными цветами превращали
+// матрицу в пёструю ленту; снятые и так стоят отдельным списком в конце ячейки, «нужно
+// проверить» — янтарная точка с причиной в подсказке, происхождение — в подсказке названия.
 
 type ColumnKey = ProductMounting | "unknown";
 // Строки — фазность и способ включения, как в одиннадцати типах файла «Параметры для ПУ»
@@ -28,7 +37,7 @@ const COLUMNS: { key: ColumnKey; label: string; hint: string }[] = [
   { key: "split", label: "Сплит", hint: "наружная установка, на опору" },
   { key: "din", label: "DIN-рейка", hint: "рейка ТН35, компактный корпус" },
   { key: "panel", label: "Щит / шкаф", hint: "крепление на винты, щитовой корпус" },
-  { key: "unknown", label: "Установка не определена", hint: "нет характеристик «Тип монтажа» / «Тип корпуса»" },
+  { key: "unknown", label: "Не определено", hint: "нет характеристик «Тип монтажа» / «Тип корпуса»" },
 ];
 
 const ROWS: { key: RowKey; label: string }[] = [
@@ -59,7 +68,7 @@ function columnsOf(p: Product): ColumnKey[] {
 }
 
 function byName(a: Product, b: Product) {
-  return a.model_name.localeCompare(b.model_name, "ru");
+  return productDisplayName(a.model_name).localeCompare(productDisplayName(b.model_name), "ru");
 }
 
 export function ProductMatrix({
@@ -102,46 +111,36 @@ export function ProductMatrix({
   const renderChip = (p: Product) => {
     const discontinued = p.status === "discontinued";
     const siCode = p.si_type_id ? siCodeById.get(p.si_type_id) ?? null : null;
+    const needsReview = p.review_status === "needs_review";
+    const origin = [
+      p.model_name !== productDisplayName(p.model_name) ? p.model_name : null,
+      p.execution ? `Исполнение: ${p.execution}` : null,
+      p.data_source === "fgis" ? `Заведена из реестра ФГИС${p.registry_modification ? `: ${p.registry_modification}` : ""}` : null,
+      needsReview ? `Проверить: ${p.review_reason ?? "нужна проверка"}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
     return (
-      <button
-        key={p.id}
-        onClick={() => onSelect(p.id)}
-        className={`flex w-full flex-col gap-0.5 rounded-lg border px-2.5 py-1.5 text-left text-xs ${
-          p.id === selectedProductId
-            ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-300"
-            : discontinued
-              ? "border-white/5 text-zinc-500 hover:bg-white/5"
-              : "border-white/10 text-zinc-300 hover:bg-white/5"
-        }`}
-      >
-        <span className="truncate" title={p.model_name}>
-          {p.model_name}
-          {p.execution && <span className="ml-1.5 text-[10px] text-zinc-500">{p.execution}</span>}
-        </span>
-        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px]">
-          {/* Регистрационный номер в Госреестре СИ — у каждой модели, у которой он найден;
-              «без кода СИ» — отдельная пометка, а не пустое место (вопрос тестировщика
-              18.09.2026). */}
-          {siCode ? (
-            <span className="font-mono text-emerald-400/80" title="Регистрационный номер в Госреестре СИ">
-              ГРСИ {siCode}
+      <Tooltip key={p.id} content={origin} className="w-full">
+        <button
+          onClick={() => onSelect(p.id)}
+          className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-xs transition-colors ${
+            p.id === selectedProductId
+              ? "border-indigo-500/40 bg-indigo-500/10"
+              : "border-white/[0.08] hover:border-white/15 hover:bg-white/[0.04]"
+          }`}
+        >
+          <span className="min-w-0 flex-1">
+            <span className={`block truncate ${discontinued ? "text-zinc-500" : "text-zinc-200"}`}>
+              {productDisplayName(p.model_name)}
             </span>
-          ) : (
-            <span className="text-zinc-500">без кода СИ</span>
-          )}
-          {discontinued && <span className="text-amber-400/70">снят с производства</span>}
-          {p.data_source === "fgis" && (
-            <span className="text-sky-400" title={p.registry_modification ?? undefined}>
-              из реестра ФГИС
-            </span>
-          )}
-          {p.review_status === "needs_review" && (
-            <span className="text-amber-400" title={p.review_reason ?? undefined}>
-              ⚠ проверить
-            </span>
-          )}
-        </span>
-      </button>
+            {/* Регистрационный номер в Госреестре СИ; «без кода СИ» — пометка, а не пустое
+                место (вопрос тестировщика 18.09.2026). */}
+            <span className="block font-mono text-[10px] text-zinc-500">{siCode ?? "без кода СИ"}</span>
+          </span>
+          {needsReview && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" aria-label="нужно проверить" />}
+        </button>
+      </Tooltip>
     );
   };
 
@@ -155,9 +154,7 @@ export function ProductMatrix({
         {active.map(renderChip)}
         {discontinued.length > 0 && (
           <>
-            <div className="mt-1 text-[10px] uppercase tracking-wide text-zinc-600">
-              снято с производства · {discontinued.length}
-            </div>
+            <div className="mt-2 text-[11px] text-zinc-600">Сняты с производства · {discontinued.length}</div>
             {discontinued.map(renderChip)}
           </>
         )}
@@ -171,18 +168,30 @@ export function ProductMatrix({
         className="grid"
         style={{ gridTemplateColumns: `9rem repeat(${columns.length}, minmax(12rem, 1fr))` }}
       >
-        <div className="border-b border-white/[0.08] px-3 py-2" />
+        <div className="flex items-end border-b border-white/[0.08] px-3 py-2">
+          <Tooltip
+            content={
+              "Исполнение выведено из характеристик «Количество фаз», «Тип монтажа», «Тип корпуса» и обозначения модели; " +
+              "универсальный корпус (DIN-рейка + винты) показан в обоих столбцах.\n" +
+              "Включение — по напряжению и токам: 230 В и 60–100 А — прямое, 230 В и 10 А — полукосвенное, " +
+              "57,7 В — косвенное, 6–10 кВ — ВПУ."
+            }
+          >
+            <Info size={13} className="text-zinc-600 hover:text-zinc-300" aria-label="Как разложены модели" />
+          </Tooltip>
+        </div>
         {columns.map((c) => (
           <div key={c.key} className="border-b border-l border-white/[0.08] px-3 py-2">
-            <div className="text-xs font-semibold text-zinc-200">
-              {c.label} <span className="font-normal text-zinc-500">· {columnCount(c.key)}</span>
-            </div>
-            <div className="text-[10px] text-zinc-500">{c.hint}</div>
+            <Tooltip content={c.hint}>
+              <span className="text-xs font-medium text-zinc-200">
+                {c.label} <span className="font-normal tabular-nums text-zinc-500">{columnCount(c.key)}</span>
+              </span>
+            </Tooltip>
           </div>
         ))}
         {rows.map((r) => (
           <div key={r.key} className="contents">
-            <div className="border-b border-white/[0.06] px-3 py-3 text-xs font-medium text-zinc-300">{r.label}</div>
+            <div className="border-b border-white/[0.06] px-3 py-3 text-xs text-zinc-400">{r.label}</div>
             {columns.map((c) => (
               <div key={c.key} className="border-b border-l border-white/[0.06] px-3 py-3 align-top">
                 {renderCell(r.key, c.key)}
@@ -191,12 +200,6 @@ export function ProductMatrix({
           </div>
         ))}
       </div>
-      <p className="px-1 pt-2 text-[10px] text-zinc-500">
-        Исполнение выведено из характеристик «Количество фаз», «Тип монтажа», «Тип корпуса» и обозначения
-        модели; универсальный корпус (DIN-рейка + винты) показан в обоих столбцах. Включение — по
-        напряжению и токам: 230 В и 60–100 А — прямое, 230 В и 10 А — полукосвенное, 57,7 В — косвенное,
-        6–10 кВ — ВПУ; универсальный счётчик 3×(57,7–230) В, 10 А стоит в обеих строках.
-      </p>
     </div>
   );
 }

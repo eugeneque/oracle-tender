@@ -26,6 +26,38 @@
       ],
       "cwd": "oracle-t/backend",
       "port": 8000
+    },
+    {
+      "name": "oracle-t-verify-backend",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "POSTGRES_HOST=localhost",
+        "SCHEDULER_ENABLED=false",
+        "JOBS_RESUME_INTERRUPTED=false",
+        ".venv/bin/uvicorn",
+        "app.main:app",
+        "--port",
+        "8001"
+      ],
+      "cwd": "oracle-t/backend",
+      "port": 8001
+    },
+    {
+      "name": "oracle-t-verify-frontend",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "VITE_API_TARGET=http://localhost:8001",
+        "npm",
+        "run",
+        "dev",
+        "--prefix",
+        "oracle-t/frontend",
+        "--",
+        "--port",
+        "5180",
+        "--strictPort"
+      ],
+      "port": 5180
     }
   ]
 }

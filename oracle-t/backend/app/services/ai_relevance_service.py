@@ -23,13 +23,14 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import pydantic
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.log import LogLevel
@@ -88,6 +89,10 @@ class BatchResult:
     relevant: int = 0
     rejected: int = 0
     failed: int = 0
+    # Сколько из проверенных решено без вызова модели: правилом по названию и по уже
+    # проверенной закупке с тем же названием.
+    by_rule: int = 0
+    from_cache: int = 0
     messages: list[str] = field(default_factory=list)
 
 
@@ -108,6 +113,113 @@ def _tender_text(tender: Tender) -> str:
     return "\n".join(parts)
 
 
+# --- Решения без модели (14.10.2026) --------------------------------------------------------
+#
+# Модель нужна там, где по названию не понять, наше ли это: «строительство ВЛ с установкой
+# прибора учёта», «материалы для монтажа электросчётчиков». Но заметная часть потока решается
+# по названию однозначно — «Поставка электросчётчиков "Миртек"». Сверка на 933 закупках,
+# уже размеченных моделью: правила ниже сработали на 265 (28%) и не разошлись с моделью ни
+# разу. Правила нарочно узкие: всё, где есть сомнение, по-прежнему уходит модели.
+
+# Предмет — именно приборы учёта электроэнергии или системы учёта.
+_METER_RE = re.compile(
+    r"(электро\s*сч[её]тчик|сч[её]тчик\w*\s+(активной\s+|реактивной\s+)?(электр|э/э)"
+    r"|прибор\w*\s+(коммерческого\s+|технического\s+)?уч[её]та\s+(электр|э/э)"
+    r"|аскуэ|аиис\s*куэ)"
+)
+# Действие с ними стоит в начале названия: «Поставка…», «Лот №1 Поставка…», «Право
+# заключения договора на поставку…». В середине длинного названия то же слово чаще всего
+# описывает часть строительного объекта.
+_ACTION_RE = re.compile(
+    r"^(\S+\s+){0,3}?(на\s+)?(право\s+заключения\s+договора\s+на\s+)?"
+    r"(поставк|приобретени|закупк|замен|поверк)"
+)
+# Признаки того, что счётчики — не предмет, а часть чужого предмета (стройка, материалы,
+# сопутствующее оборудование) или речь о другом ресурсе. Любое совпадение — решает модель.
+_NOT_SURE_RE = re.compile(
+    r"(строительств|смр|пир\b|реконструкц|испытательн|коробк|модул|журнал|расходн|опор"
+    r"|снят\w*\s+показ|информац|диагност|вод|газ|тепл|жидкост|аренд"
+    r"|ремонт\s+(здани|помещ)|трансформатор|кабел|провод|щит|шкаф|пломб|печат|программн"
+    r"|лицензи|материал|сервер|компьютер|обогрев|комплектующ|запасн|зип\b"
+    r"|для\s+(монтажа|работы|оборудования|обслуживания)|услуг\w*\s+по\s+(сбор|передач))"
+)
+# Счётчик или узел учёта другого ресурса: воды, газа, тепла, жидкости, частиц.
+_OTHER_RESOURCE_RE = re.compile(
+    r"(сч[её]тчик|прибор\w*\s+уч[её]та|узл\w*\s+уч[её]та|расходомер)\w*[^.;]{0,40}"
+    r"(вод|газ|тепл|жидкост|частиц|семян|аэрозол)"
+)
+# Длинные названия — почти всегда сводные строительные объекты, по ним решает модель.
+_RULE_MAX_TITLE = 250
+RULE_CONFIDENCE = 95
+
+
+def normalize_title(title: str | None) -> str:
+    return re.sub(r"\s+", " ", (title or "").lower().replace("ё", "е")).strip()
+
+
+def rule_answer(tender: Tender) -> RelevanceAnswer | None:
+    """Решение по названию без модели или `None`, если название неоднозначно."""
+
+    title = normalize_title(tender.title)
+    if not title:
+        return None
+    if "электр" not in title and "э/э" not in title and _OTHER_RESOURCE_RE.search(title):
+        return RelevanceAnswer(
+            is_relevant=False,
+            confidence=RULE_CONFIDENCE,
+            reason="Определено без модели: прибор учёта воды, газа, тепла или другого ресурса.",
+        )
+    if (
+        len(title) <= _RULE_MAX_TITLE
+        and _METER_RE.search(title)
+        and _ACTION_RE.search(title)
+        and not _NOT_SURE_RE.search(title)
+    ):
+        return RelevanceAnswer(
+            is_relevant=True,
+            confidence=RULE_CONFIDENCE,
+            reason="Определено без модели: предмет — поставка, замена или поверка приборов учёта электроэнергии.",
+        )
+    return None
+
+
+def _title_key():
+    """Выражение SQL для того же ключа, что `normalize_title` (без замены «ё»: в названиях
+    закупок её почти не бывает, а повторы приходят с одной площадки побайтно)."""
+
+    return func.btrim(func.regexp_replace(func.lower(Tender.title), r"\s+", " ", "g"))
+
+
+def _cached_answers(db: Session, tenders: list[Tender]) -> dict[str, RelevanceAnswer]:
+    """Ответы, уже полученные для закупок с тем же названием.
+
+    Каждая четвёртая закупка в потоке повторяет название уже проверенной (переторжка, лоты,
+    одна закупка на нескольких площадках): спрашивать модель второй раз о том же тексте —
+    платить за тот же ответ.
+    """
+
+    keys = {normalize_title(item.title) for item in tenders if item.title}
+    if not keys:
+        return {}
+    key = _title_key()
+    rows = db.execute(
+        select(key, Tender.ai_relevant, Tender.ai_relevance_confidence, Tender.ai_relevance_reason)
+        .where(
+            key.in_(keys),
+            Tender.ai_relevance_checked_at.is_not(None),
+            Tender.ai_relevant.is_not(None),
+        )
+        .order_by(Tender.ai_relevance_checked_at.desc())
+    ).all()
+    cached: dict[str, RelevanceAnswer] = {}
+    for title_key, relevant, confidence, reason in rows:
+        cached.setdefault(
+            title_key,
+            RelevanceAnswer(is_relevant=relevant, confidence=confidence or 0, reason=reason or ""),
+        )
+    return cached
+
+
 def check_tender(db: Session, tender: Tender) -> RelevanceAnswer | None:
     """Спрашивает модель об одном тендере и сохраняет ответ. `None` — проверить не удалось."""
 
@@ -123,6 +235,11 @@ def check_tender(db: Session, tender: Tender) -> RelevanceAnswer | None:
         logger.warning(f"ИИ-отбор тендера {tender.external_id} не удался: {exc}")
         return None
 
+    _store(tender, answer)
+    return answer
+
+
+def _store(tender: Tender, answer: RelevanceAnswer) -> None:
     tender.ai_relevant = answer.is_relevant
     tender.ai_relevance_reason = answer.reason.strip()[:1000] or None
     # Уверенность приводим к диапазону: модель изредка отдаёт долю (0.85) вместо процентов.
@@ -131,7 +248,6 @@ def check_tender(db: Session, tender: Tender) -> RelevanceAnswer | None:
         confidence = int(confidence * 100)
     tender.ai_relevance_confidence = max(0, min(100, int(confidence)))
     tender.ai_relevance_checked_at = datetime.now(timezone.utc)
-    return answer
 
 
 def check_batch(
@@ -159,13 +275,30 @@ def check_batch(
     tenders = list(db.scalars(query.limit(limit)))
 
     result = BatchResult()
+    # Явный перезапуск по выбранным закупкам — просьба спросить именно модель: ни правило, ни
+    # повтор старого ответа её бы не выполнили.
+    shortcuts = not tender_ids
+    cached = _cached_answers(db, tenders) if shortcuts else {}
     for tender in tenders:
-        answer = check_tender(db, tender)
+        key = normalize_title(tender.title)
+        answer = rule_answer(tender) if shortcuts else None
+        if answer is not None:
+            _store(tender, answer)
+            result.by_rule += 1
+        elif key in cached:
+            answer = cached[key]
+            _store(tender, answer)
+            result.from_cache += 1
+        else:
+            answer = check_tender(db, tender)
+            if answer is not None and key:
+                cached[key] = answer
         if answer is None:
             result.failed += 1
             # Первый же сбой обычно означает недоступную интеграцию, а не проблему тендера:
             # продолжать пачку смысла нет, только жечь время.
-            if result.failed >= 3 and result.checked == 0:
+            # Решённые без модели не в счёт: они ничего не говорят о её доступности.
+            if result.failed >= 3 and result.checked == result.by_rule + result.from_cache:
                 result.messages.append(
                     "Модель недоступна — проверка остановлена. Проверьте настройки "
                     "интеграции с Yandex AI Studio."
@@ -178,6 +311,12 @@ def check_batch(
         else:
             result.rejected += 1
 
+    if result.by_rule or result.from_cache:
+        result.messages.append(
+            f"Без обращения к модели решено {result.by_rule + result.from_cache}: "
+            f"по названию — {result.by_rule}, по уже проверенной закупке с тем же названием — "
+            f"{result.from_cache}"
+        )
     if result.checked or result.failed:
         log_action(
             db,
@@ -187,7 +326,8 @@ def check_batch(
             level=LogLevel.INFO if not result.failed else LogLevel.WARNING,
             details=(
                 f"Проверено {result.checked}: подобрано {result.relevant}, "
-                f"отклонено {result.rejected}, сбоев {result.failed}"
+                f"отклонено {result.rejected}, сбоев {result.failed}; без модели: "
+                f"по правилу {result.by_rule}, по такому же названию {result.from_cache}"
             ),
             user_id=actor.id if actor else None,
         )

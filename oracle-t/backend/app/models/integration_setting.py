@@ -70,6 +70,13 @@ class AiProviderSettings(Base):
     disabled_providers: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default="{}"
     )
+    # Окно контекста и потолок ответа по моделям (14.10.2026): `{"yandex": {"context_tokens":
+    # 32768, "max_output_tokens": 8000}}`. Пустое — значения по умолчанию
+    # (`ai_provider_service.DEFAULT_MODEL_LIMITS`). От окна считается, сколько текста
+    # помещается в запрос: карточка производителя в матрице, куски документации.
+    model_limits: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

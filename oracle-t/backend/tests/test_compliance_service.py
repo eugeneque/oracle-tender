@@ -24,6 +24,8 @@ from app.models.manufacturer import Manufacturer, Product, ProductCharacteristic
 from app.models.source import Source
 from app.models.tender import Tender
 from app.models.user import User
+from app.services.compliance_numeric import ENABLED as NUMERIC_ENABLED
+from app.services.compliance_numeric import CatalogModel, prejudge
 from app.services.compliance_service import (
     ComplianceOutcome,
     ComplianceResult,
@@ -583,3 +585,135 @@ def test_quota_error_stops_matrix_instead_of_saving_empty_cells(db_session, admi
 
     with pytest.raises(AiQuotaExceededError):
         evaluate_tender(db_session, tender, actor=admin_user)
+
+
+# ------------------------------------------------- предрешение числовых требований (14.10.2026)
+
+
+def _model(name: str, groups: set[str] | None = None, **values: str) -> CatalogModel:
+    fields = {
+        "accuracy": "Класс точности",
+        "voltage": "Номинальное напряжение",
+        "nominal": "Номинальный ток",
+        "maximum": "Максимальный ток",
+        "frequency": "Частота сети",
+        "mtbf": "Средняя наработка на отказ",
+        "life": "Срок службы",
+        "mpi": "Межповерочный интервал",
+        "tariffs": "Количество тарифов",
+        "temperature": "Диапазон рабочих температур",
+        "ip": "Степень защиты",
+    }
+    return CatalogModel(name, {fields[key]: value for key, value in values.items()}, groups or {"3ph_direct"})
+
+
+def _decide(text: str, *models: CatalogModel, groups: set[str] | None = None) -> str | None:
+    found = prejudge(text, list(models), groups if groups is not None else {"3ph_direct"}, NUMERIC_ENABLED)
+    return found.status if found else None
+
+
+def test_numeric_requirement_meets_by_any_model_of_purchased_type():
+    """«Межповерочный интервал: 16 лет» при «192 мес.» в каталоге — соответствует (модель
+    путала месяцы с годами); одной подходящей модели производителю достаточно."""
+
+    assert _decide("Межповерочный интервал: 16 лет", _model("А", mpi="120 мес."), _model("Б", mpi="192 мес.")) == "meets"
+    assert _decide("Средний срок службы: не менее 30 лет", _model("А", life="32 года")) == "meets"
+    assert _decide("Средняя наработка на отказ: 280 000 часов", _model("А", mtbf="не менее 400 000 ч")) == "meets"
+    assert _decide("Диапазон рабочих температур: от -40 до +70 °C", _model("А", temperature="от минус 45 до плюс 70 °С")) == "meets"
+    assert _decide("Номинальная частота: 50 ± 2,5 Гц", _model("А", frequency="50±7,5 Гц")) == "meets"
+    assert _decide("Количество тарифов: 4", _model("А", tariffs="4/12")) == "meets"
+    assert _decide("Степень защиты корпуса: IP51", _model("А", ip="IP54")) == "meets"
+
+
+def test_accuracy_better_class_meets_and_worse_goes_to_model():
+    """CRITERIA.md, п. 3.1: лучшее значение — соответствует. 0,5S/1 против 0,5S/0,5 —
+    реактивная хуже; «не соответствует» код не ставит — решает модель."""
+
+    assert _decide("Класс точности активной/реактивной энергии: ½", _model("А", accuracy="1/1")) == "meets"
+    assert _decide("Класс точности активной энергии: 1, реактивной энергии: 2", _model("А", accuracy="0,5S/1")) == "meets"
+    assert _decide("Класс точности: 0,5S/0,5", _model("А", accuracy="0,5S/1")) is None
+    # Одно число у модели — класс активной энергии; о реактивной оно не говорит.
+    assert _decide("Класс точности реактивной энергии: 2,0", _model("А", accuracy="1")) is None
+    # Классы ТТ и ТН — не свойство счётчика.
+    assert _decide("Класс точности ТТ: не ниже 0,5S", _model("А", accuracy="0,5S/0,5")) is None
+
+
+def test_currents_and_voltage_are_compared_exactly():
+    assert _decide("Номинальный ток: 5 А; Максимальный ток: 100 А", _model("А", nominal="5 (100) А")) == "meets"
+    assert _decide("Базовый ток: 5 А", _model("А", nominal="5(60)")) == "meets"
+    assert _decide("Номинальное напряжение: 3×230/400 В", _model("А", voltage="3x230/400 В")) == "meets"
+    assert _decide("Номинальный ток: 10 А", _model("А", nominal="5 (10)")) is None
+    # «230 В» против «3×230/400 В» — разные записи, сравнивать нечего.
+    assert _decide("Номинальное напряжение: 230 В", _model("А", voltage="3x230/400 В")) is None
+
+
+def test_kind_bound_parameters_need_single_purchased_type():
+    """Ток в многопозиционной закупке (однофазные и трёхфазные) или без типа — модели:
+    «Базовый ток: 5 А» однофазного не ответ трёхфазной позиции."""
+
+    model = _model("А", {"1ph_direct"}, nominal="5(60)")
+    assert _decide("Базовый ток: 5 А", model, groups={"1ph_direct", "3ph_direct"}) is None
+    assert _decide("Базовый ток: 5 А", model, groups=set()) is None
+    # Срок службы от типа не зависит.
+    assert _decide("Срок службы: 30 лет", _model("А", life="35 лет"), groups=set()) == "meets"
+    # Модели другого типа не сравниваются.
+    assert _decide("Срок службы: 30 лет", _model("А", {"1ph_direct"}, life="35 лет")) is None
+
+
+def test_ambiguous_requirements_and_values_go_to_model():
+    one = _model("А", mpi="192 мес.", maximum="60, 80 или 100 А", temperature="от -40 до +70 °С (блок); от -10 до +50")
+    # Требование не целиком числовое.
+    assert _decide("Номинальное напряжение: 230 В; рабочий диапазон: 170–255 В", one) is None
+    assert _decide("Межповерочный интервал ТТ: не менее 8 лет", one) is None
+    assert _decide("Номинальный ток: 5 А ± 0,1 А", one) is None
+    # «Не более» у срока — не «больше лучше».
+    assert _decide("Межповерочный интервал: не более 16 лет", one) is None
+    # Подходит лишь одно из исполнений — «частично» решает модель.
+    assert _decide("Максимальный ток: 100 А", one) is None
+    # Два диапазона у разных блоков — неоднозначно.
+    assert _decide("Диапазон рабочих температур: от -40 до +70 °C", one) is None
+    # Значения нет — нет и вердикта кодом.
+    assert _decide("Срок службы: 30 лет", one) is None
+
+
+def test_prejudged_requirements_are_not_sent_to_model(db_session, admin_user: User, monkeypatch):
+    tender = _make_tender(db_session)
+    _add_requirement(db_session, tender, text="Класс точности не хуже 1,0")
+    _add_requirement(db_session, tender, text="Средний срок службы: не менее 30 лет")
+    manufacturer = _make_manufacturer(db_session, with_catalog=True)
+    product = db_session.query(Product).filter(Product.manufacturer_id == manufacturer.id).one()
+    db_session.add(
+        ProductCharacteristic(
+            product_id=product.id,
+            group_name="Надёжность",
+            field_name="Срок службы",
+            value="35 лет",
+            source="manufacturer_site",
+        )
+    )
+    db_session.commit()
+
+    asked: list[str] = []
+
+    def fake_run(db, **kwargs):
+        # В тестовой базе есть производители других тестов — считаем только свой.
+        if manufacturer.brand_name in kwargs["user_text"]:
+            asked.append(kwargs["user_text"].split("ТРЕБОВАНИЯ ЗАКУПКИ:", 1)[1])
+        return ComplianceResult(verdicts=[_verdict(1, ComplianceStatus.MEETS.value, source="catalog")])
+
+    monkeypatch.setattr(compliance_module, "run_structured", fake_run)
+    outcome = evaluate_tender(db_session, tender, actor=admin_user, use_manual_fallback=False)
+
+    assert len(asked) == 1
+    assert "Класс точности" in asked[0] and "срок службы" not in asked[0].lower()
+    assert outcome.prejudged >= 1
+    entries = {
+        (entry.explanation or "").split(":", 1)[0]: entry
+        for entry in db_session.query(ComplianceMatrixEntry).filter(
+            ComplianceMatrixEntry.manufacturer_id == manufacturer.id
+        )
+    }
+    coded = entries["ТЕСТ-12-РУ"]
+    assert coded.status == ComplianceStatus.MEETS.value
+    assert coded.source == ComplianceSource.PRODUCT_CATALOG.value
+    assert "35 лет" in coded.explanation and "сверено кодом" in coded.explanation

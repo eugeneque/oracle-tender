@@ -554,3 +554,9 @@ html.theme-switching *::after {
 }
 /* В шапке боковой панели блок заливает её целиком — без рамки и ореола, край = граница. */
 .brand-gradient--flush { box-shadow: none; }
+
+/* Шкала без известного хода — центр уведомлений в шапке (14.10.2026). */
+@keyframes activity-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}

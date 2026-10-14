@@ -102,8 +102,10 @@ def test_tenders_filter_by_search(client, admin_token):
     body = response.json()["items"]
     ids = {t["id"] for t in body}
     assert matching_id in ids
+    # «е» и «ё» не различаются (14.10.2026): «счетчиков» в выдаче — тоже совпадение.
+    fold = lambda text: (text or "").lower().replace("ё", "е")  # noqa: E731
     assert all(
-        "счётчиков" in t["title"].lower() or "счётчиков" in (t["customer_name"] or "").lower()
+        "счетчиков" in fold(t["title"]) or "счетчиков" in fold(t["customer_name"])
         for t in body
     )
 

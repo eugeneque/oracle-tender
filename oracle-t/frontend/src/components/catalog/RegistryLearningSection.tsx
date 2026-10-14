@@ -10,7 +10,7 @@ import type {
   ModificationsOutcome,
   UnknownField,
 } from "../../api/types";
-import { AI_HINT, AiBadge } from "./AiBadge";
+import { AI_COST_NOTE, Tooltip } from "../ui/Tooltip";
 
 // Обучение справочника по Аршину и документации (замечание заказчика 15.09.2026).
 //
@@ -141,19 +141,19 @@ export function RegistryLearningSection({
     title: string,
     icon: React.ReactNode,
     onClick: () => void,
-    // Шаг вызывает модель ИИ — кнопка помечена (замечание 13.10.2026).
+    // Шаг вызывает модель ИИ — это сказано в подсказке (14.10.2026: вместо значка-звёздочки).
     ai = false
   ) => (
-    <button
-      onClick={onClick}
-      disabled={busy !== null}
-      title={ai ? `${title}. ${AI_HINT}` : title}
-      className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-    >
-      {busy === key ? <Loader2 size={13} className="animate-spin" /> : icon}
-      {label}
-      {ai && <AiBadge compact />}
-    </button>
+    <Tooltip content={ai ? `${title}.\n${AI_COST_NOTE}` : title}>
+      <button
+        onClick={onClick}
+        disabled={busy !== null}
+        className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+      >
+        {busy === key ? <Loader2 size={13} className="animate-spin" /> : icon}
+        {label}
+      </button>
+    </Tooltip>
   );
 
   return (
@@ -161,21 +161,21 @@ export function RegistryLearningSection({
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] px-5 py-3">
         <div>
           <h2 className="text-sm font-semibold text-zinc-100">
-            Обучение по Аршину
+            Реестр и руководства
             {unknownFields.length > 0 && (
               <span className="ml-1.5 text-zinc-500">· вне справочника {unknownFields.length}</span>
             )}
           </h2>
           <p className="mt-0.5 text-xs text-zinc-500">
-            Исполнения и характеристики из реестра ФГИС, документация с официального сайта через поиск.
+            Исполнения и характеристики из реестра ФГИС и руководств по эксплуатации.
           </p>
         </div>
         {isAdmin && manufacturerId && (
           <div className="flex flex-wrap gap-2">
             {button(
               "learn",
-              "Обучить (в фоне)",
-              "Полный проход: карточки Аршина → исполнения → «Описание типа» → поиск документации → руководства",
+              "Полный проход",
+              "В фоне: карточки Аршина → исполнения → «Описание типа» → поиск документации → руководства",
               <GraduationCap size={13} />,
               handleLearn,
               true

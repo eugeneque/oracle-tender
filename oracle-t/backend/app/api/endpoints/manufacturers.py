@@ -60,7 +60,7 @@ from app.services import (
     registry_modifications,
     si_type_linking,
 )
-from app.services.ai_client import AiNotConfiguredError
+from app.services.ai_client import AiNotConfiguredError, AiQuotaExceededError
 
 router = APIRouter(tags=["manufacturers"])
 
@@ -328,7 +328,7 @@ def post_extract_from_si_type(
             characteristic_source=CharacteristicSource.FGIS_DESCRIPTION_TYPE,
             actor=admin,
         )
-    except AiNotConfiguredError as exc:
+    except (AiNotConfiguredError, AiQuotaExceededError) as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     return ExtractionOutcomeOut(**vars(outcome))
 
@@ -360,7 +360,7 @@ def post_extract_from_manufacturer_site(
         outcome = characteristic_extraction.extract_characteristics_from_manufacturer_site(
             db, product, website=manufacturer.website, actor=admin
         )
-    except AiNotConfiguredError as exc:
+    except (AiNotConfiguredError, AiQuotaExceededError) as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
     return ManualExtractionOutcomeOut(
@@ -494,7 +494,7 @@ def post_catalog_site_sync(
 @router.post("/catalog/sites/{adapter_key}/sync-now", response_model=CatalogSyncOutcomeOut)
 def post_catalog_site_sync_now(
     adapter_key: str,
-    use_ai: bool = True,
+    use_ai: bool = False,
     full_refresh: bool = False,
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
@@ -888,7 +888,7 @@ def post_read_manual(
         outcome = product_manual_ingest.ingest_manuals(
             db, manufacturer, actor=admin, limit=1, refresh=True, products=[product]
         )
-    except AiNotConfiguredError as exc:
+    except (AiNotConfiguredError, AiQuotaExceededError) as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     if outcome.skipped_by_robots:
         raise HTTPException(
@@ -936,7 +936,7 @@ def post_manual_upload(
         outcome = product_manual_ingest.ingest_uploaded_manual(
             db, product, content=content, file_name=file.filename or "руководство.pdf", actor=admin
         )
-    except AiNotConfiguredError as exc:
+    except (AiNotConfiguredError, AiQuotaExceededError) as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))

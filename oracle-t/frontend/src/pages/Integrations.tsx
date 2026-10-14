@@ -1,10 +1,11 @@
 import { useSearchParams } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
-import { Bell, BrainCircuit, Globe, Plug2 } from "lucide-react";
+import { Bell, BrainCircuit, Globe, Plug2, Receipt } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 
 import { AppShell } from "../components/AppShell";
 import { AiIntegrationSection } from "../components/settings/AiIntegrationSection";
+import { AiUsageSection } from "../components/settings/AiUsageSection";
 import { BitrixSection } from "../components/settings/BitrixSection";
 import { NotificationsSection } from "../components/settings/NotificationsSection";
 import { RusprofileSection } from "../components/settings/RusprofileSection";
@@ -27,7 +28,7 @@ import { SPRING_SNAPPY } from "../utils/motion";
  * 08.10.2026: пояснения под заголовком и вкладками убраны — интерфейс перегружали.
  */
 
-type TabKey = "ai" | "mail" | "bitrix" | "rusprofile";
+type TabKey = "ai" | "usage" | "mail" | "bitrix" | "rusprofile";
 
 interface TabDef {
   key: TabKey;
@@ -41,6 +42,13 @@ const TABS: TabDef[] = [
     key: "ai",
     label: "Модели ИИ",
     icon: BrainCircuit,
+    adminOnly: true,
+  },
+  {
+    // Расход токенов ИИ (14.10.2026): сколько тратит Сова и на что — для прогноза бюджета.
+    key: "usage",
+    label: "Детализация ИИ",
+    icon: Receipt,
     adminOnly: true,
   },
   {
@@ -125,6 +133,7 @@ export function IntegrationsPage() {
             className="pb-16"
           >
             {activeTab === "ai" && isAdmin && <AiIntegrationSection />}
+            {activeTab === "usage" && isAdmin && <AiUsageSection />}
             {activeTab === "mail" && <NotificationsSection isAdmin={isAdmin} embedded />}
             {activeTab === "bitrix" && <BitrixSection isAdmin={isAdmin} embedded />}
             {activeTab === "rusprofile" && isAdmin && <RusprofileSection embedded />}

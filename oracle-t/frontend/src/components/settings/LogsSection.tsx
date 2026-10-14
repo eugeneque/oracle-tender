@@ -48,8 +48,11 @@ function formatTime(value: string): string {
  *
  * Доступен всем пользователям: по журналу человек понимает, почему у тендера нет требований
  * или почему площадка не опрашивалась.
+ *
+ * `fixedComponent` закрепляет компонент (14.10.2026): вкладка «Ошибки ИИ» — тот же журнал,
+ * только записи `ai_models`, и выбор компонента на ней не нужен.
  */
-export function LogsSection() {
+export function LogsSection({ fixedComponent }: { fixedComponent?: string } = {}) {
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [facets, setFacets] = useState<LogFacets | null>(null);
@@ -57,7 +60,7 @@ export function LogsSection() {
   const [isLoading, setIsLoading] = useState(false);
 
   const [levels, setLevels] = useState<string[]>([]);
-  const [component, setComponent] = useState("");
+  const [component, setComponent] = useState(fixedComponent ?? "");
   const [search, setSearch] = useState("");
   const [hours, setHours] = useState<number | null>(24);
   const [isLive, setIsLive] = useState(true);
@@ -148,7 +151,8 @@ export function LogsSection() {
     }
   };
 
-  const hasFilters = levels.length > 0 || component !== "" || search.trim() !== "";
+  const hasFilters =
+    levels.length > 0 || (!fixedComponent && component !== "") || search.trim() !== "";
 
   return (
     <div className="space-y-6">
@@ -233,18 +237,20 @@ export function LogsSection() {
             </button>
           ))}
 
-          <select
-            value={component}
-            onChange={(e) => setComponent(e.target.value)}
-            className="rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs text-zinc-300 focus:border-indigo-500/50 focus:outline-none"
-          >
-            <option value="">все компоненты</option>
-            {facets?.components.map((item) => (
-              <option key={item} value={item}>
-                {item}
-              </option>
-            ))}
-          </select>
+          {!fixedComponent && (
+            <select
+              value={component}
+              onChange={(e) => setComponent(e.target.value)}
+              className="rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs text-zinc-300 focus:border-indigo-500/50 focus:outline-none"
+            >
+              <option value="">все компоненты</option>
+              {facets?.components.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          )}
 
           <select
             value={hours === null ? "" : String(hours)}

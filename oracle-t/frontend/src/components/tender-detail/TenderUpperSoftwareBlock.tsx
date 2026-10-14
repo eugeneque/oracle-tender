@@ -4,7 +4,6 @@ import { ChevronDown, ChevronRight, MonitorCheck } from "lucide-react";
 import { ApiError, api } from "../../api/client";
 import type { PlatformSupportStatus, TenderUpperSoftware } from "../../api/types";
 import { supportStatusStyle } from "../../utils/format";
-import { CriticalityBadge } from "./TenderRequirementsTab";
 
 // Интеграция в ПО верхнего уровня по закупке (замечание тестировщика 16.09.2026).
 //
@@ -63,7 +62,6 @@ export function TenderUpperSoftwareBlock({ tenderId }: { tenderId: string }) {
           {data.requirements.map((requirement) => (
             <li key={requirement.id} className="text-[12px] leading-snug text-zinc-400">
               <span className="text-zinc-300">{requirement.text}</span>
-              {requirement.criticality && <CriticalityBadge value={requirement.criticality} />}
               {requirement.platforms.length > 0 ? (
                 <span className="text-indigo-400">
                   {" "}
@@ -107,7 +105,6 @@ export function TenderUpperSoftwareBlock({ tenderId }: { tenderId: string }) {
               <tr key={row.manufacturer_id} className="border-b border-white/[0.04]">
                 <td className="px-3 py-1.5 text-zinc-300">
                   {row.name}
-                  {row.is_mirtek && <span className="ml-1.5 text-[11px] text-indigo-400">наш</span>}
                 </td>
                 {visiblePlatforms.map((platform) => {
                   const cell = row.support[platform.adapter_key];

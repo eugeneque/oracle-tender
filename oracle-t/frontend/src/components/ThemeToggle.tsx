@@ -3,7 +3,7 @@ import { Moon, Sun } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { SegmentedControl } from "./ui/SegmentedControl";
 
-/** Переключатель «Тёмная / Светлая» в шапке: два сегмента, подложка переезжает к активному. */
+/** Переключатель «Тёмная / Светлая» в меню аватара: два сегмента, подложка переезжает к активному. */
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme();
 

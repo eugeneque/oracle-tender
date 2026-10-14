@@ -11,21 +11,25 @@ import type {
   ProductDocumentation,
   RegistryPoll,
 } from "../../api/types";
-import { AI_HINT, AiBadge } from "./AiBadge";
+import { AI_COST_NOTE, Tooltip } from "../ui/Tooltip";
 
 // Источники данных модели (замечание тендерного отдела 13.10.2026). Пустые П18–П28 и
 // «СПОДЭС: —» выглядели как «ИИ не справился», хотя причина была в другом: руководство
 // Энергомеры закрыто для роботов, реестры не опрашивались. Панель говорит по каждому
-// источнику прямо — прочитан ли он, почему нет и что сделать; кнопки, которые вызывают
-// модель ИИ, помечены. Состояние собирает сервер (`product_sources.py`).
+// источнику прямо — прочитан ли он, почему нет и что сделать. Состояние собирает сервер
+// (`product_sources.py`).
+//
+// 14.10.2026 (редизайн каталога): панель по умолчанию свёрнута в одну строку — она нужна,
+// когда параметр пуст и хочется понять почему, а не при каждом открытии модели. Состояние —
+// точкой, подпись нейтральная; что кнопка вызывает модель ИИ — в подсказке, а не значком.
 
-const STATE_STYLE: Record<DataSourceState, { label: string; dot: string; text: string }> = {
-  ok: { label: "прочитан", dot: "bg-emerald-400", text: "text-emerald-400" },
-  pending: { label: "нужно опросить", dot: "bg-amber-400", text: "text-amber-400" },
-  blocked: { label: "нужен файл", dot: "bg-amber-400", text: "text-amber-400" },
-  error: { label: "ошибка опроса", dot: "bg-rose-400", text: "text-rose-400" },
-  missing: { label: "нет источника", dot: "bg-zinc-600", text: "text-zinc-500" },
-  running: { label: "опрашивается", dot: "bg-sky-400 animate-pulse", text: "text-sky-400" },
+const STATE_STYLE: Record<DataSourceState, { label: string; dot: string }> = {
+  ok: { label: "прочитан", dot: "bg-emerald-400" },
+  pending: { label: "не опрошен", dot: "bg-amber-400" },
+  blocked: { label: "нужен файл", dot: "bg-amber-400" },
+  error: { label: "ошибка опроса", dot: "bg-rose-400" },
+  missing: { label: "нет источника", dot: "bg-zinc-600" },
+  running: { label: "опрашивается", dot: "bg-indigo-400 animate-pulse" },
 };
 
 // Что требует действия человека: «нет источника» — не требует, сделать тут нечего.
@@ -82,8 +86,7 @@ export function DataSourcesPanel({
   if (sources === null) return null;
 
   const attention = sources.filter((s) => NEEDS_ATTENTION.includes(s.state));
-  // Раскрыта, пока есть что опросить; когда всё прочитано — свёрнута до одной строки.
-  const open = expanded ?? attention.length > 0;
+  const open = expanded ?? false;
 
   const perform = async (source: DataSource, action: DataSourceAction, file?: File): Promise<string> => {
     switch (action.key) {
@@ -150,15 +153,10 @@ export function DataSourcesPanel({
         className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
         aria-expanded={open}
       >
-        <span className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">Источники данных</span>
-        <span className="flex items-center gap-2 text-right text-[12px]">
-          {attention.length > 0 ? (
-            <span className="text-amber-400">
-              {attention.length} из {sources.length} нужно опросить — без них часть параметров пуста
-            </span>
-          ) : (
-            <span className="text-zinc-500">все доступные источники прочитаны</span>
-          )}
+        <span className="text-sm text-zinc-300">Источники данных</span>
+        <span className="flex items-center gap-2 text-right text-xs text-zinc-500">
+          {attention.length > 0 && <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden="true" />}
+          {attention.length > 0 ? `не прочитано ${attention.length} из ${sources.length}` : "все прочитаны"}
           <ChevronDown size={14} className={`shrink-0 text-zinc-500 transition-transform ${open ? "rotate-180" : ""}`} />
         </span>
       </button>
@@ -176,15 +174,16 @@ export function DataSourcesPanel({
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                     <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${style.dot}`} aria-hidden="true" />
                     <span className="text-sm text-zinc-200">{source.label}</span>
-                    <span className={`text-[11px] ${style.text}`}>{style.label}</span>
+                    <span className="text-xs text-zinc-500">{style.label}</span>
                     {source.url && (
                       <a
                         href={source.url}
                         target="_blank"
                         rel="noreferrer"
-                        className="inline-flex items-center gap-0.5 text-[11px] text-indigo-400 hover:text-indigo-300"
+                        aria-label="Открыть источник"
+                        className="text-zinc-500 hover:text-zinc-200"
                       >
-                        открыть <ExternalLink size={10} />
+                        <ExternalLink size={12} />
                       </a>
                     )}
                   </div>
@@ -196,17 +195,16 @@ export function DataSourcesPanel({
                       const key = `${source.key}/${action.key}`;
                       const upload = action.key === "upload_manual" || action.key === "upload_registry";
                       return (
-                        <button
-                          key={action.key}
-                          onClick={() => click(source, action)}
-                          disabled={busy !== null || source.state === "running"}
-                          title={action.ai ? AI_HINT : "Без ИИ"}
-                          className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                        >
-                          {busy === key ? <Loader2 size={12} className="animate-spin" /> : upload && <Upload size={12} />}
-                          {action.label}
-                          {action.ai && <AiBadge compact />}
-                        </button>
+                        <Tooltip key={action.key} content={action.ai ? AI_COST_NOTE : null}>
+                          <button
+                            onClick={() => click(source, action)}
+                            disabled={busy !== null || source.state === "running"}
+                            className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+                          >
+                            {busy === key ? <Loader2 size={12} className="animate-spin" /> : upload && <Upload size={12} />}
+                            {action.label}
+                          </button>
+                        </Tooltip>
                       );
                     })}
                   </div>

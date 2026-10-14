@@ -74,3 +74,30 @@ def test_products_endpoint_returns_form_factor(client, admin_token):
     rows = client.get(f"/manufacturers/{manufacturer_id}/products", headers=headers).json()
     assert rows[0]["phases"] == 3
     assert rows[0]["mountings"] == ["din", "panel"]
+
+
+def test_body_code_in_designation_beats_series_wide_list():
+    # 14.10.2026: «Описание типа» на весь номер Госреестра перечисляет корпуса всей серии —
+    # МИРТЕК-12-РУ-SP17 стоял и в «Сплите», и на «DIN-рейке», и в «Щите».
+    series = {"Тип монтажа": "на щиток, на DIN-рейку, на опору ЛЭП", "Тип корпуса": "W1, W3, W9, D1, D17, SP3, SP17"}
+    assert _ff("МИРТЕК-12-РУ-SP17", "МИРТЕК-12-РУ-SP17", **series).mountings == ["split"]
+    assert _ff("МИРТЕК-212-РУ-D17", "МИРТЕК-12-РУ-D17", **series).mountings == ["din"]
+    assert _ff("НАРТИС-И100-W115", "НАРТИС-И100-W115", **series).mountings == ["panel"]
+    # Обозначение из реестра (`registry_modification`) кодом корпуса не считается: в нём те же
+    # буквы встречаются в кодах интерфейсов и функций.
+    assert _ff("Счётчик", None, "X-1-RS485-D").mountings == []
+
+
+def test_series_wide_value_is_narrowed_or_dropped():
+    from app.services.product_form_factor import FIELD_BODY, FIELD_MOUNTING, model_specific_value
+
+    series = "на щиток, на DIN-рейку, на опору ЛЭП"
+    kw = {"model_code": "МИРТЕК-12-РУ-SP17", "model_name": "МИРТЕК-12-РУ-SP17"}
+    assert model_specific_value(FIELD_MOUNTING, series, family_source=True, **kw) == "Сплит"
+    assert model_specific_value(FIELD_BODY, "W1, D1, SP17", family_source=True, **kw) == "SP17"
+    # Без кода в обозначении перечень остаётся: у записи серии он верен.
+    plain = {"model_code": "МИРТЕК-101", "model_name": "МИРТЕК-101"}
+    assert model_specific_value(FIELD_MOUNTING, "на щиток или на DIN-рейку", family_source=True, **plain) == "на щиток или на DIN-рейку"
+    # Код есть, а его способа в перечне нет — значение «Описания типа» противоречит модели.
+    assert model_specific_value(FIELD_MOUNTING, "на щиток; на DIN-рейку", family_source=True, **kw) is None
+    assert model_specific_value(FIELD_MOUNTING, "Сплит", family_source=True, **kw) == "Сплит"

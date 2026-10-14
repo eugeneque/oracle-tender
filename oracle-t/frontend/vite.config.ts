@@ -12,7 +12,9 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       "/api": {
-        target: "http://localhost:8000",
+        // VITE_API_TARGET — второй стенд рядом с основным (проверка правки, пока на 8000
+        // крутится рабочий API с задачами в очереди); по умолчанию — API из `run.sh`.
+        target: process.env.VITE_API_TARGET ?? "http://localhost:8000",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ""),
         // Бэкенд авторизует по Bearer-токену, cookie ему не нужны. А чужие cookie с localhost

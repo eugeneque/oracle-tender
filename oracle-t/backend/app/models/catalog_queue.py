@@ -78,6 +78,11 @@ class CatalogLookupTask(Base):
     # Что искать. Хранится строкой, а не только ссылкой на `Product`: по событию из модуля
     # сопоставления в очередь попадает и модель конкурента, которой в справочнике ещё нет.
     model_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Кто запустил (14.10.2026) — центр уведомлений показывает запуск автору. Пусто —
+    # плановый прогон или событие модуля сопоставления.
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Рассмотренные кандидаты реестра при неоднозначности — чтобы человек видел, из чего

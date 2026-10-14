@@ -1,4 +1,5 @@
 from app.models.ai_feedback import AiScoreFeedback, FeedbackKind, FeedbackStatus
+from app.models.ai_usage import AiUsageRecord
 from app.models.ai_profile import (
     AiProfileScore,
     EvidenceType,
@@ -88,6 +89,7 @@ from app.models.upper_software import UpperSoftwareDevice, UpperSoftwareProductL
 from app.models.user import User
 
 __all__ = [
+    "AiUsageRecord",
     "Bitrix24Settings",
     "BitrixDealLink",
     "AiScoreFeedback",

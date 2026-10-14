@@ -48,7 +48,13 @@ oracle-tender-main/            ← не git-репозиторий (git status/d
   реестр — `adapters/registry.py`.
 - `core/scheduler.py` (APScheduler: опрос площадок, сроки, уборка), `core/jobs.py` (фоновые задачи).
 - `models/` — одна сущность на файл; `alembic/versions/NNNN_name.py` — миграции с нумерацией
-  (последняя на 14.10.2026 — `0073_catalog_data_quality`), докстринг миграции объясняет «зачем».
+  (последняя на 14.10.2026 — `0076_catalog_queue_author`), докстринг миграции объясняет «зачем».
+- Учёт токенов ИИ — `ai_usage_service` (пишут клиенты моделей), окно контекста моделей —
+  `ai_provider_service.get_model_limits`/`input_budget_chars`; см. раздел 52 ARCHITECTURE.md.
+- Центр уведомлений в шапке — `GET /activity` (`activity_service`, задания планировщика —
+  `core/activity.py`), фронт `components/nav/NotificationCenter.tsx`; раздел 58 ARCHITECTURE.md.
+- Ошибки обращений к ИИ — `ai_log_service.log_ai_event` (компонент журнала `ai_models`, файл
+  `logs/ai.log`, вкладка «Логирование → Ошибки ИИ»); см. раздел 56 ARCHITECTURE.md.
 - `seed/snapshot.py` — наполнение базы «из коробки» (`python -m app.seed.snapshot prepare`).
 - `tests/` — pytest, ~77 файлов, против реальной БД `oraclet_test`.
 
@@ -108,5 +114,3 @@ cd oracle-t && ./run.sh                 # http://localhost:5173, API http://loca
 - Новая колонка/таблица — только через новую миграцию Alembic со следующим номером.
 - Важные решения дописываются новым разделом в `oracle-t/ARCHITECTURE.md`.
 - Ошибки пользователю — понятным текстом (`HTTPException(detail="…")`), не пустой выдачей.
-- В сессии активен хук GateGuard: перед первой правкой файла он требует перечислить импортёров
-  файла, затронутые функции и процитировать инструкцию пользователя.

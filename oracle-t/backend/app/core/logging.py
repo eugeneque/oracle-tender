@@ -22,3 +22,15 @@ def configure_logging() -> None:
         backtrace=False,
         diagnose=False,
     )
+    # Ошибки обращений к моделям ИИ — ещё и отдельным файлом (14.10.2026, `ai_log_service`):
+    # при отладке промптов их удобно смотреть `tail -f logs/ai.log`, не выискивая в общем логе.
+    logger.add(
+        log_dir / "ai.log",
+        level="INFO",
+        filter=lambda record: record["extra"].get("ai") is True,
+        rotation="1 day",
+        retention="180 days",
+        compression="zip",
+        backtrace=False,
+        diagnose=False,
+    )

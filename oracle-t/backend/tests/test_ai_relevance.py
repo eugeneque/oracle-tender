@@ -126,23 +126,25 @@ def test_batch_skips_tenders_that_failed_profile(db_session, monkeypatch):
     ровно то, от чего предостерегает раздел 5.1.1 ТЗ.
     """
 
-    _tender(db_session, "Поставка канцтоваров", passed_relevance_filter=False)
+    foreign = _tender(db_session, "Поставка канцтоваров", passed_relevance_filter=False)
     _answer(monkeypatch, is_relevant=True, confidence=90, reason="Причина.")
 
-    result = ai_relevance_service.check_batch(db_session, limit=10)
+    ai_relevance_service.check_batch(db_session, limit=10)
 
+    # Сравнивать с числом всех проверенных в базе нельзя: там остаются закупки других тестов.
+    assert foreign.ai_relevance_checked_at is None
     checked = db_session.scalars(
         select(Tender).where(Tender.ai_relevance_checked_at.is_not(None))
     ).all()
     assert all(item.passed_relevance_filter is True for item in checked)
-    assert result.checked == len(checked)
 
 
 def test_batch_stops_when_model_is_down(db_session, monkeypatch):
     """Подряд идущие сбои останавливают пачку: это недоступная интеграция, а не данные."""
 
     for index in range(6):
-        _tender(db_session, f"Поставка счетчиков электрической энергии {index}")
+        # Названия неоднозначные: однозначные решаются правилом и до модели не доходят.
+        _tender(db_session, f"Строительство ВЛИ-0,4 кВ с установкой прибора учета, объект {index}")
     db_session.commit()
 
     def boom(db, **kwargs):
@@ -155,6 +157,58 @@ def test_batch_stops_when_model_is_down(db_session, monkeypatch):
     assert result.checked == 0
     assert result.failed == 3
     assert any("Модель недоступна" in message for message in result.messages)
+
+
+# --- Решения без модели --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Поставка электросчетчиков \"Миртек\"", True),
+        ("Лот №1 Поставка счетчиков электроэнергии", True),
+        ("Право заключения договора на поставку приборов учета электрической энергии", True),
+        ("Выполнение работ по замене приборов учета электрической энергии", True),
+        ("Поставка расходомера - счетчика ультразвукового для учета воды", False),
+        ("Техническое обслуживание приборов учета тепловой энергии", False),
+        # Счётчики упомянуты, но предмет другой — решает модель.
+        ("Поставка материалов для монтажа электросчетчиков", None),
+        ("Поставка серверов для работы АСКУЭ", None),
+        ("ПИР и СМР. Строительство ВЛИ-0,4 кВ с установкой выносных приборов учета электроэнергии", None),
+        ("Аренда помещения с приборами учета электрической энергии", None),
+    ],
+)
+def test_rule_answer(db_session, title, expected):
+    answer = ai_relevance_service.rule_answer(_tender(db_session, title))
+    assert (None if answer is None else answer.is_relevant) is expected
+
+
+def test_batch_uses_rules_and_same_title_without_model(db_session, monkeypatch):
+    """Однозначное название решает правило, повтор названия — прошлый ответ модели."""
+
+    obvious = _tender(db_session, "Поставка электросчетчиков")
+    first = _tender(db_session, "Выполнение работ по объекту «Энергосбережение»")
+    calls: list[str] = []
+
+    def fake(db, **kwargs):
+        calls.append(kwargs["user_text"])
+        return RelevanceAnswer(is_relevant=False, confidence=80, reason="Не наш предмет.")
+
+    monkeypatch.setattr(ai_relevance_service, "run_structured", fake)
+    ai_relevance_service.check_batch(db_session, tender_ids=[obvious.id, first.id])
+    assert len(calls) == 2  # явный перезапуск — только модель
+
+    calls.clear()
+    repeat = _tender(db_session, "Выполнение  работ по объекту «Энергосбережение» ")
+    other = _tender(db_session, "Поставка электросчетчиков однофазных")
+    db_session.commit()
+    result = ai_relevance_service.check_batch(db_session, limit=50)
+
+    # В тестовой базе есть закупки других тестов — смотрим только на свои.
+    assert not [text for text in calls if "Энергосбережение" in text or "однофазных" in text]
+    assert repeat.ai_relevant is False and repeat.ai_relevance_reason == "Не наш предмет."
+    assert other.ai_relevant is True
+    assert result.by_rule >= 1 and result.from_cache >= 1
 
 
 def test_ai_selected_tenders_come_first_by_default(db_session, monkeypatch):

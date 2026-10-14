@@ -63,6 +63,28 @@ class AiProviderEnabledUpdate(BaseModel):
     enabled: bool
 
 
+class AiModelLimitsOut(BaseModel):
+    """Окно контекста и потолок ответа модели (14.10.2026). `input_budget_chars` — сколько
+    символов текста это даёт на один запрос: от него режутся куски документации и карточка
+    производителя в матрице."""
+
+    provider: AiProviderKey
+    label: str
+    context_tokens: int
+    max_output_tokens: int
+    default_context_tokens: int
+    default_max_output_tokens: int
+    is_default: bool
+    input_budget_chars: int
+
+
+class AiModelLimitsUpdate(BaseModel):
+    """Оба поля пустые — вернуть значения по умолчанию."""
+
+    context_tokens: int | None = None
+    max_output_tokens: int | None = None
+
+
 class AiProviderSwitch(BaseModel):
     active_provider: AiProviderKey
 

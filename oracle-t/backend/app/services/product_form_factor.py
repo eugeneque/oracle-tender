@@ -14,7 +14,9 @@
 перечислены явно и по производителям, а не выведены «первой цифрой номера» для всех.
 
 Модель может подходить под несколько способов установки («DIN-рейка ; 3 винта» —
-универсальный корпус) — тогда она попадает в каждый столбец. Не определено — пустой
+универсальный корпус) — тогда она попадает в каждый столбец. Но если код корпуса есть в
+самом обозначении (МИРТЕК-12-РУ-SP17), модель стоит ровно в одном столбце: перечень из
+нескольких способов у такой модели — значит, перечень всей серии (14.10.2026). Не определено — пустой
 список, а не «щит по умолчанию»: в интерфейсе такие модели показываются отдельно, чтобы
 было видно, у кого характеристики ещё не заполнены."""
 
@@ -141,6 +143,85 @@ def _mountings_from_name(*names: str | None) -> list[str]:
     return found
 
 
+# Код корпуса в самом обозначении модели: МИРТЕК-12-РУ-**SP17**, НАРТИС-И100-**W115**,
+# МИРТЕК-32-РУ-**D31**. Буква — способ установки (SP — сплит, D — DIN-рейка, W — щиток), цифры —
+# исполнение корпуса. Ищется отдельным сегментом обозначения (между дефисами/пробелами), чтобы
+# не цеплять буквы внутри кодов интерфейсов и функций.
+_BODY_CODE_RE = re.compile(r"(?:^|[\s\-‑])(SP|D|W)(\d{1,3}[a-z]?)(?=$|[\s\-‑,.;)])")
+_BODY_PREFIX_MOUNT = {"SP": MOUNT_SPLIT, "D": MOUNT_DIN, "W": MOUNT_PANEL}
+# Как способ установки записывается в характеристику, когда его пришлось выбрать из перечня
+# серии, — теми же словами, что у МИРТЕК на сайте.
+MOUNT_LABELS = {MOUNT_SPLIT: "Сплит", MOUNT_DIN: "DIN-рейка", MOUNT_PANEL: "Щиток"}
+
+
+def body_code(*designations: str | None) -> str | None:
+    """Код корпуса из обозначения модели («SP17») или `None`, если его там нет."""
+
+    for designation in designations:
+        match = _BODY_CODE_RE.search(designation or "")
+        if match:
+            return match.group(1) + match.group(2)
+    return None
+
+
+def mounting_from_designation(*designations: str | None) -> str | None:
+    """Способ установки, названный обозначением модели: код корпуса МИРТЕК/НАРТИС
+    («-SP17») либо обозначения Энергомеры и Ротек («CE102-R5», «ЦЭ6807Б-Ш1», «РТМ-03 D1»).
+    `None` — обозначение способа не называет или называет несколько."""
+
+    code = body_code(*designations)
+    if code:
+        prefix = "SP" if code.startswith("SP") else code[0]
+        return _BODY_PREFIX_MOUNT[prefix]
+    # Только коды корпуса, а не слово «сплит» в наименовании: слово пишут и в названиях
+    # серий, а ручная характеристика должна оставаться важнее его.
+    found = {
+        mount
+        for designation in designations
+        if designation
+        for pattern, mount in _MOUNT_BY_CODE
+        if pattern.search(designation)
+    }
+    return found.pop() if len(found) == 1 else None
+
+
+def model_specific_value(
+    field_name: str,
+    value: str | None,
+    *,
+    model_code: str | None,
+    model_name: str | None,
+    family_source: bool,
+) -> str | None:
+    """Значение «Тип монтажа» / «Тип корпуса» для одной модели, а не для всей серии.
+
+    Причина (замечание 14.10.2026, «МИРТЕК-12-РУ-SP17 стоит и в Сплите, и на DIN-рейке»):
+    «Описание типа» ФГИС — один документ на весь номер Госреестра (61891-15 описывает
+    корпуса W1…W9, D1…D17, SP1…SP17 сразу), и модель переносила в каждую модель серии общий
+    перечень «на щиток, на DIN-рейку, на опору ЛЭП» / «W1, W2, …, SP17». По такому значению
+    справочник ставил модель во все три столбца, а сопоставление с ТЗ считало, что сплит
+    подходит под «крепление на DIN-рейку».
+
+    Перечень сужается по коду корпуса в обозначении модели. Если код в обозначении есть, а
+    его способа в перечне нет, значение из «Описания типа» не записывается (`None`): оно
+    противоречит самой модели. Без кода перечень остаётся — у записи серии («МИРТЕК-101»,
+    «СЕ 101») он верен, а у модели с универсальным корпусом («DIN-рейка ; 3 винта») — тоже.
+    """
+
+    if field_name not in (FIELD_MOUNTING, FIELD_BODY) or not value:
+        return value
+    mounts = _mountings_from_text(value)
+    if len(mounts) < 2:
+        return value
+    code = body_code(model_code, model_name)
+    own = mounting_from_designation(model_code, model_name)
+    if own is None:
+        return value
+    if own in mounts:
+        return code if field_name == FIELD_BODY and code else MOUNT_LABELS[own]
+    return None if family_source else value
+
+
 def classify(
     *,
     model_name: str | None,
@@ -153,6 +234,13 @@ def classify(
     phases = _phases_from_value(characteristics.get(FIELD_PHASES))
     if phases is None:
         phases = _phases_from_name(model_code, model_name, registry_modification)
+
+    # Код корпуса в обозначении («-SP17», «-D1», «-W9») — самый надёжный признак: он
+    # называет исполнение именно этой модели, а характеристики могли прийти из документа
+    # на всю серию (см. `model_specific_value`). Поэтому он важнее характеристик.
+    own = mounting_from_designation(model_code, model_name)
+    if own:
+        return FormFactor(phases=phases, mountings=[own])
 
     mountings = _mountings_from_text(characteristics.get(FIELD_MOUNTING))
     if not mountings:
