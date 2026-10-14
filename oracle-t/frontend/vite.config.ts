@@ -1,6 +1,11 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
+// Конфиг выполняется в Node, но @types/node в зависимостях нет: локально его подтягивало
+// транзитивно, а чистый `npm install` на сервере (update.sh, 14.10.2026) его не ставит —
+// и `tsc -b` падал на TS2580. Нам нужен один `process.env`, тащить ради него пакет незачем.
+declare const process: { env: Record<string, string | undefined> };
+
 export default defineConfig({
   plugins: [react()],
   server: {
