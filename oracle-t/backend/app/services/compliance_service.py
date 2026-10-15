@@ -91,6 +91,7 @@ from app.services.tz_reference import (
     TzReference,
     find_reference,
     is_model_requirement,
+    is_registry_requirement,
     match_manufacturer,
     names_reference_model,
 )
@@ -1060,6 +1061,7 @@ def _evaluate_manufacturer(
     )
     if needs_kinds:
         made_kinds = manufacturer_kind_groups(db, manufacturer)
+    apply_confidence_floor(requirements, verdicts)
     apply_transformer_scope(requirements, verdicts)
     apply_duration_check(requirements, verdicts)
     apply_evidence_check(requirements, verdicts)
@@ -1359,11 +1361,42 @@ def apply_reference_rules(
             owner = match_manufacturer(requirement.vendor, manufacturers) or (
                 reference.manufacturer if reference is not None else None
             )
+            designation = (requirement.normalized_text or "").split(":", 1)[-1].strip()
             if owner is None:
+                # Чья модель — неизвестно (нет ни производителя у требования, ни эталона), но
+                # «модель не та» — это не отказ: чужой прибор поставляют как эквивалент
+                # (сверка 15.10.2026: «Наименование товара: … МИР С-04…» без эталона давало
+                # конкурентам «не соответствует» с уверенностью 0 и «не проходит»).
+                if status == ComplianceStatus.NOT_MEETS.value and (
+                    current is None or current.source not in ("rule", "tz")
+                ):
+                    verdicts[index] = RequirementVerdict(
+                        number=index,
+                        status=ComplianceStatus.PARTIAL.value,
+                        source="rule",
+                        explanation=(
+                            f"ТЗ называет конкретную модель «{designation}»; прибор этого "
+                            "производителя — эквивалент, проверить по паспорту и допустимость "
+                            "эквивалента"
+                        )[:300],
+                        confidence=0.5,
+                    )
                 continue
             owner_name = owner.brand_name or owner.legal_name
-            designation = (requirement.normalized_text or "").split(":", 1)[-1].strip()
-            if owner.id == manufacturer.id:
+            if owner.id == manufacturer.id and is_registry_requirement(requirement):
+                # Номер типа СИ из ТЗ — тип эталона; в каталоге может стоять номер после
+                # перерегистрации (32616407181: РиМ 384.02/2, «55522-13» — «не проходит»).
+                verdicts[index] = RequirementVerdict(
+                    number=index,
+                    status=ComplianceStatus.MEETS.value,
+                    source="tz",
+                    explanation=(
+                        f"ТЗ называет тип СИ этого производителя: {designation} — проверить "
+                        "действующий номер во ФГИС «Аршин»"
+                    )[:300],
+                    confidence=REFERENCE_FILL_CONFIDENCE,
+                )
+            elif owner.id == manufacturer.id:
                 verdicts[index] = RequirementVerdict(
                     number=index,
                     status=ComplianceStatus.MEETS.value,
@@ -1635,6 +1668,39 @@ def apply_evidence_check(
             source=verdict.source,
             explanation=f"{verdict.explanation} [{UNEVIDENCED_EXPLANATION}]".strip()[:300],
             confidence=0.4,
+        )
+
+
+# Ниже этой уверенности «не соответствует» модели — не вывод, а отказ отвечать.
+NOT_MEETS_CONFIDENCE_FLOOR = 0.3
+UNSURE_EXPLANATION = "модель не уверена в ответе — проверить по паспорту"
+
+
+def apply_confidence_floor(
+    requirements: list[Requirement], verdicts: dict[int, RequirementVerdict]
+) -> None:
+    """«Не соответствует» с уверенностью ниже 0,3 — «нет данных».
+
+    Сверка матрицы на сервере 15.10.2026: модель ставила «не соответствует» с уверенностью
+    0,0 («Модель не соответствует заданному наименованию»), и такой ответ по критичному
+    требованию решал «не проходит» наравне с фактом из каталога. Сама модель вывода не
+    сделала — решать за неё итог нельзя. Правила кода (`rule`, `tz`, `astra`) не трогаем."""
+
+    for index in range(1, len(requirements) + 1):
+        verdict = verdicts.get(index)
+        if (
+            verdict is None
+            or verdict.status != ComplianceStatus.NOT_MEETS.value
+            or verdict.source in ("rule", "tz", "astra")
+            or verdict.confidence >= NOT_MEETS_CONFIDENCE_FLOOR
+        ):
+            continue
+        verdicts[index] = RequirementVerdict(
+            number=index,
+            status=ComplianceStatus.NO_DATA.value,
+            source=verdict.source,
+            explanation=f"{verdict.explanation} [{UNSURE_EXPLANATION}]".strip()[:300],
+            confidence=verdict.confidence,
         )
 
 
