@@ -277,7 +277,21 @@ class ComplianceOutcome:
     # Требования, решённые кодом без модели (`prejudge_numeric`).
     prejudged: int = 0
     needs_review: int = 0
+    # Ячейки, по которым модель не вернула вердикт (сбой, отказ фильтра, запасная модель
+    # недоступна), и у скольких производителей они есть. Разбор при этом «успешен», а процент
+    # считается по меньшему числу требований — без счётчика это видно только в «Ошибках ИИ»
+    # (15.10.2026: пересчёт 18 закупок прошёл «успешно» при 112 пакетах без ответа).
+    unanswered: int = 0
+    manufacturers_unanswered: int = 0
     messages: list[str] = field(default_factory=list)
+
+    def unanswered_text(self) -> str | None:
+        if not self.unanswered:
+            return None
+        return (
+            f"без ответа модели: {self.unanswered} ячеек у {self.manufacturers_unanswered} "
+            "производителей — пересчитать, когда модель будет доступна"
+        )
 
 
 # Пояснение к «нет данных», когда модель не ответила (сбой запроса, обрыв ответа): это не
@@ -788,6 +802,10 @@ def evaluate_tender(
     total = len(pending)
 
     def finish(manufacturer: Manufacturer, verdicts: dict[int, RequirementVerdict]) -> None:
+        unanswered = count_unanswered(verdicts)
+        if unanswered:
+            outcome.unanswered += unanswered
+            outcome.manufacturers_unanswered += 1
         apply_reference_rules(manufacturer, requirements, verdicts, reference, manufacturers)
         _save_entries(db, tender, manufacturer, requirements, verdicts, outcome)
         _calculate_percentage(
@@ -833,8 +851,18 @@ def evaluate_tender(
         )
     db.commit()
     _request_missing_catalog_data(db, manufacturers, actor=actor)
-    _log(db, tender, outcome, actor)
+    _log(db, tender, outcome, actor, level=LogLevel.WARNING if outcome.unanswered else LogLevel.INFO)
     return outcome
+
+
+def count_unanswered(verdicts: dict[int, RequirementVerdict]) -> int:
+    """Ячейки, по которым модель не ответила (`MODEL_NO_VERDICT`), — не «в каталоге нет данных»."""
+
+    return sum(
+        1
+        for verdict in verdicts.values()
+        if verdict.status == ComplianceStatus.NO_DATA.value and verdict.explanation == MODEL_NO_VERDICT
+    )
 
 
 # Сколько производителей считать одновременно. Матрица — 4-5 запросов к модели на
@@ -2358,6 +2386,8 @@ def _log(
         f"решено кодом без модели: {outcome.prejudged}; "
         f"требуют проверки человеком: {outcome.needs_review}"
     )
+    if outcome.unanswered_text():
+        details = f"Внимание, {outcome.unanswered_text()}; {details}"
     if outcome.messages:
         details += "; " + "; ".join(outcome.messages)
 

@@ -327,6 +327,21 @@ def test_model_failure_does_not_break_calculation(db_session, admin_user: User, 
 
     assert outcome.messages
     assert outcome.entries_saved >= 1
+    # Разбор «успешен», но неполнота видна: счётчик, текст итога и предупреждение в журнале
+    # (15.10.2026 — пересчёт 18 закупок без ответа модели выглядел обычным успехом).
+    assert outcome.unanswered >= 1 and outcome.manufacturers_unanswered >= 1
+    assert "без ответа модели" in (outcome.unanswered_text() or "")
+
+    from sqlalchemy import select
+
+    from app.models.log import Log, LogLevel
+
+    entry = db_session.scalars(
+        select(Log)
+        .where(Log.action == f"evaluate_tender:{tender.external_id}")
+        .order_by(Log.timestamp.desc())
+    ).first()
+    assert entry is not None and entry.level == LogLevel.WARNING and "без ответа модели" in entry.details
 
 
 def test_tender_without_requirements_is_reported(db_session, admin_user: User):
