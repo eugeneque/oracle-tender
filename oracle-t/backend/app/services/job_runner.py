@@ -102,6 +102,10 @@ def _run_evaluation(
         f"производителей обработано: {outcome.manufacturers_processed}",
         f"ячеек матрицы: {outcome.entries_saved}",
     ]
+    # Неполная матрица — первым: итог разбора виден в карточке и центре уведомлений, и
+    # «успешно» без этой оговорки скрывало бы, что процент посчитан не по всем требованиям.
+    if outcome.unanswered_text():
+        parts.insert(0, outcome.unanswered_text())
     if outcome.needs_review:
         parts.append(f"требуют проверки: {outcome.needs_review}")
     if outcome.manual_fallback_used:

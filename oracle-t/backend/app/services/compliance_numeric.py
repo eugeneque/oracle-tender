@@ -155,7 +155,18 @@ def _voltage(value: str) -> tuple[int, float, float | None] | None:
     phase = float(match.group(2))
     line = float(match.group(3)) if match.group(3) else None
     phases = int(match.group(1)) if match.group(1) else (3 if line else 1)
+    # Прежнее обозначение сетей 220/380 В — то же, что нынешние 230/400 В (ГОСТ 29322-2014),
+    # а «380 В» / «400 В» без фазного — линейное напряжение трёхфазной сети. 32616386816
+    # (15.10.2026): эталон Милур 307S «не проходил» по «Номинальное напряжение: 380 В» при
+    # «3×230/400 В» в каталоге.
+    phase = _LEGACY_VOLTAGE.get(phase, phase)
+    line = _LEGACY_VOLTAGE.get(line, line) if line is not None else None
+    if line is None and phase == 400:
+        phases, phase, line = 3, 230.0, 400.0
     return phases, phase, line
+
+
+_LEGACY_VOLTAGE = {220.0: 230.0, 380.0: 400.0}
 
 
 def _voltage_check(value: str) -> Check | None:

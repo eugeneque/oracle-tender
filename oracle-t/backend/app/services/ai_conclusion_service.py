@@ -55,7 +55,7 @@ from app.services.product_relevance import (
     select_products_for_context,
     tender_named_text,
 )
-from app.services.tz_reference import is_model_requirement, match_manufacturer
+from app.services.tz_reference import is_model_requirement, is_vendor_exclusive, match_manufacturer
 
 # --- словари ---------------------------------------------------------------------------
 
@@ -411,7 +411,7 @@ def detect_brand_lock(
     best.exclusive = [
         (item.normalized_text or item.text or "")[:150]
         for item in requirements
-        if item.vendor_exclusive and match_manufacturer(item.vendor, [best.manufacturer])
+        if is_vendor_exclusive(item) and match_manufacturer(item.vendor, [best.manufacturer])
     ]
 
     documents = _documents_text(db, tender)
@@ -434,7 +434,7 @@ def _lock_by_vendor(
     counts: dict = {}
     for item in requirements:
         owner = match_manufacturer(item.vendor, manufacturers)
-        if owner is not None and (item.vendor_exclusive or is_model_requirement(item)):
+        if owner is not None and (is_vendor_exclusive(item) or is_model_requirement(item)):
             counts.setdefault(owner.id, [owner, []])[1].append(item)
     if not counts:
         return None

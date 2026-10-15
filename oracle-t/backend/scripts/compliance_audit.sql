@@ -6,7 +6,8 @@
 --   reference_low        эталон ТЗ ниже 90%
 --   all_fail             «не проходят» все производители закупки (обычно ошибка извлечения)
 --   lot_conflict         «не соответствует» по значению параметра, другое значение которого
---                        тот же производитель выполнил (смешанный лот: 230 В и 400 В)
+--                        тот же производитель выполнил в той же позиции (смешанный лот без
+--                        позиций: 230 В и 400 В); требования разных позиций не сравниваются
 --   transformer_vs_meter требование к ТТ/ТН решено по характеристикам счётчика
 --   rule_wording         правило «трёхпозиционное реле» на требовании не про реле
 --   critical_weak_fail   «не соответствует» по критичному требованию с уверенностью < 0,75
@@ -28,6 +29,10 @@ cells AS (
 ),
 req AS (
     SELECT r.id, r.tender_id, r.normalized_text,
+           -- Позиция спецификации (миграция 0077): номер, иначе подпись. Требования разных
+           -- позиций — разные изделия, их значения противоречить друг другу не могут.
+           coalesce(substring(r.position from '^\s*(?:(?:позици[яи]|поз|лот|пункт|п)\.?\s*)?№?\s*(\d+)'),
+                    lower(btrim(r.position)), '') AS pos,
            lower(btrim(split_part(r.normalized_text, ':', 1))) AS subject,
            lower(btrim(substr(r.normalized_text, strpos(r.normalized_text, ':') + 1))) AS value
     FROM requirements r
@@ -50,21 +55,25 @@ FROM wp GROUP BY tender_id
 HAVING count(*) >= 3 AND bool_and(verdict = 'fails')
 
 UNION ALL
-SELECT 'lot_conflict', c.external_id, c.title, c.maker, NULL, NULL,
-       b.normalized_text, c.status, c.source, c.confidence,
-       'выполнено: ' || a.normalized_text || ' | ' || left(coalesce(c.explanation, ''), 180)
-FROM req a
-JOIN req b ON b.tender_id = a.tender_id AND b.subject = a.subject AND b.id <> a.id
-JOIN compliance_matrix_entries ca ON ca.requirement_id = a.id AND ca.status = 'meets'
-JOIN cells c ON c.requirement_id = b.id AND c.manufacturer_id = ca.manufacturer_id
-            AND c.status = 'not_meets' AND c.source NOT IN ('expert_rule', 'tz_reference')
-WHERE a.subject NOT LIKE 'модель прибора%'
-  AND (
-        (a.value IN ('да', 'есть', 'имеется') AND b.value IN ('нет', 'отсутствует', 'не допускается'))
-     OR (b.value IN ('да', 'есть', 'имеется') AND a.value IN ('нет', 'отсутствует', 'не допускается'))
-     OR (a.value ~ '\d' AND b.value ~ '\d'
-         AND regexp_replace(a.value, '[^0-9.,]', '', 'g') <> regexp_replace(b.value, '[^0-9.,]', '', 'g'))
-  )
+SELECT * FROM (
+    SELECT DISTINCT ON (c.id)
+           'lot_conflict', c.external_id, c.title, c.maker, NULL::numeric, NULL::varchar,
+           b.normalized_text, c.status, c.source, c.confidence,
+           'выполнено: ' || a.normalized_text || ' | ' || left(coalesce(c.explanation, ''), 180)
+    FROM req a
+    JOIN req b ON b.tender_id = a.tender_id AND b.subject = a.subject AND b.id <> a.id AND b.pos = a.pos
+    JOIN compliance_matrix_entries ca ON ca.requirement_id = a.id AND ca.status = 'meets'
+    JOIN cells c ON c.requirement_id = b.id AND c.manufacturer_id = ca.manufacturer_id
+                AND c.status = 'not_meets' AND c.source NOT IN ('expert_rule', 'tz_reference')
+    WHERE a.subject NOT LIKE 'модель прибора%'
+      AND (
+            (a.value IN ('да', 'есть', 'имеется') AND b.value IN ('нет', 'отсутствует', 'не допускается'))
+         OR (b.value IN ('да', 'есть', 'имеется') AND a.value IN ('нет', 'отсутствует', 'не допускается'))
+         OR (a.value ~ '\d' AND b.value ~ '\d'
+             AND regexp_replace(a.value, '[^0-9.,]', '', 'g') <> regexp_replace(b.value, '[^0-9.,]', '', 'g'))
+      )
+    ORDER BY c.id
+) lot
 
 UNION ALL
 SELECT 'transformer_vs_meter', external_id, title, maker, NULL, NULL, req, status, source, confidence,
