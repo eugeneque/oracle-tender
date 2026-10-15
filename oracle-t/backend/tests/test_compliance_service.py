@@ -645,6 +645,10 @@ def test_currents_and_voltage_are_compared_exactly():
     assert _decide("Номинальный ток: 10 А", _model("А", nominal="5 (10)")) is None
     # «230 В» против «3×230/400 В» — разные записи, сравнивать нечего.
     assert _decide("Номинальное напряжение: 230 В", _model("А", voltage="3x230/400 В")) is None
+    # Прежнее обозначение 220/380 В — то же, что 230/400 В (32616386816, эталон Милур 307S).
+    assert _decide("Номинальное напряжение: 380 В", _model("А", voltage="3x230/400 В")) == "meets"
+    assert _decide("Номинальное напряжение: 3х220/380 В", _model("А", voltage="3x230/400 В")) == "meets"
+    assert _decide("Номинальное напряжение: 220 В", _model("А", voltage="230 В")) == "meets"
 
 
 def test_kind_bound_parameters_need_single_purchased_type():

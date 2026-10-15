@@ -107,3 +107,42 @@ def test_not_meets_without_confidence_does_not_decide():
     assert verdicts[1].status == "no_data" and "не уверена" in verdicts[1].explanation
     assert verdicts[2].status == "not_meets"
     assert verdicts[3].status == "not_meets"
+
+
+# --- повторная сверка после пересчёта (15.10.2026) ------------------------------------
+
+METRONIKA = Manufacturer(id=uuid.uuid4(), brand_name="Метроника (АЛЬФА)", legal_name="ООО «Метроника»")
+
+
+def test_upper_level_software_is_not_vendor_exclusive():
+    """32616409293: «Интеграция в ПО: Альфа Центр» как фирменное ПО Метроники — «не
+    проходили» все 17 производителей."""
+
+    from app.services.tz_reference import is_vendor_exclusive
+
+    alpha = _requirement("Интеграция в ПО: Альфа Центр", vendor="ООО «Метроника»", vendor_exclusive=True)
+    admin_tools = _requirement("ПО для работы со счётчиком: AdminTools", vendor="Метроника", vendor_exclusive=True)
+    assert not is_vendor_exclusive(alpha) and is_vendor_exclusive(admin_tools)
+
+    verdicts = {1: _verdict("no_data"), 2: _verdict("no_data")}
+    apply_reference_rules(MIRTEK, [alpha, admin_tools], verdicts, None, [MIRTEK, METRONIKA])
+    assert verdicts[1].status == "no_data"  # решает сверка с ПО верхнего уровня, не правило
+    assert verdicts[2].status == "not_meets"
+
+
+def test_reference_is_not_failed_for_missing_position_type():
+    """32616409293: эталону правило позиций ставило «в каталоге нет высоковольтных ПУ»."""
+
+    from app.services.compliance_service import POSITION_KIND_PREFIX
+
+    requirements = [_requirement("Тип прибора: Высоковольтный прибор учёта", position="1. ВПУ")]
+    reference = TzReference(manufacturer=METRONIKA, designations=[])
+    explanation = f"{POSITION_KIND_PREFIX}1. ВПУ»: в каталоге производителя нет приборов типа «ВПУ»"
+
+    verdicts = {1: _verdict("not_meets", explanation, 0.6, source="rule")}
+    apply_reference_rules(METRONIKA, requirements, verdicts, reference, [METRONIKA, MIRTEK])
+    assert verdicts[1].status == "partial" and "ТЗ составлено" in verdicts[1].explanation
+
+    verdicts = {1: _verdict("not_meets", explanation, 0.6, source="rule")}
+    apply_reference_rules(MIRTEK, requirements, verdicts, reference, [METRONIKA, MIRTEK])
+    assert verdicts[1].status == "not_meets"  # конкуренту отказ по типу остаётся

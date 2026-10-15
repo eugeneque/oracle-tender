@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
+from app.adapters.upper_software import PLATFORMS
 from app.models.analysis import Requirement
 from app.models.manufacturer import Manufacturer, Product, ProductCharacteristic
 from app.services.product_relevance import named_products
@@ -99,6 +100,30 @@ def _has_designation_code(text: str) -> bool:
         if len(token) >= 5 and not _DIMENSION_RE.match(token) and _LETTER_BEFORE_DIGIT_RE.search(token):
             return True
     return False
+
+
+# ПО верхнего уровня («Пирамида», «АльфаЦЕНТР», «Энергосфера»…) поддерживает приборы многих
+# производителей — это не фирменное ПО, хотя модель извлечения то и дело ставит ему
+# `vendor_exclusive` с производителем. 32616409293 (15.10.2026): «Интеграция в ПО: Альфа
+# Центр» как фирменное ПО Метроники — «не проходили» все 17 производителей, а Метроника стала
+# «эталоном» по одному этому требованию. Поддержку площадкой проверяет `upper_software`.
+_PLATFORM_RES = [
+    re.compile(alias, re.IGNORECASE) for profile in PLATFORMS.values() for alias in profile.aliases
+]
+
+
+def text_names_upper_software(text: str | None) -> bool:
+    return bool(text) and any(pattern.search(text) for pattern in _PLATFORM_RES)
+
+
+def names_upper_software(requirement: Requirement) -> bool:
+    return text_names_upper_software(f"{requirement.text or ''} {requirement.normalized_text or ''}")
+
+
+def is_vendor_exclusive(requirement: Requirement) -> bool:
+    """Фирменное ПО или сервис производителя — без ПО верхнего уровня."""
+
+    return bool(requirement.vendor_exclusive) and not names_upper_software(requirement)
 
 
 def is_registry_requirement(requirement: Requirement) -> bool:
@@ -206,6 +231,8 @@ def find_reference(
         for requirement in requirements:
             if match_manufacturer(requirement.vendor, [manufacturer]) is None:
                 continue
+            if not is_model_requirement(requirement) and names_upper_software(requirement):
+                continue  # ПО верхнего уровня — не признак эталона
             if is_model_requirement(requirement):
                 from_requirements += 3
                 designation = (requirement.normalized_text or "").split(":", 1)[-1].strip()

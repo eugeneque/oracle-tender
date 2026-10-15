@@ -39,6 +39,7 @@ from app.services.audit import log_action
 from app.services.document_service import classify_document, reextract_stale_documents
 from app.services.ai_client import AiQuotaExceededError, chunk_text, fit_chars, run_structured
 from app.services.lot_position import position_key
+from app.services.tz_reference import text_names_upper_software
 from app.services.meter_kind import METER_KINDS, fill_tender_kinds
 from app.services import okpd2_service
 
@@ -974,7 +975,13 @@ def _replace_requirements(
             if parameter_no is None:
                 parameter_no = detect_parameter(f"{text_value} {item.normalized_text or ''}")
         vendor = (item.vendor or "").strip()[:100] or None
-        vendor_exclusive = bool(vendor) and bool(item.vendor_exclusive)
+        # ПО верхнего уровня («АльфаЦЕНТР», «Пирамида») — не фирменное, хоть модель и
+        # называет его производителя (`tz_reference.names_upper_software`, 15.10.2026).
+        vendor_exclusive = (
+            bool(vendor)
+            and bool(item.vendor_exclusive)
+            and not text_names_upper_software(f"{text_value} {item.normalized_text or ''}")
+        )
         if vendor_exclusive and kind == RequirementKind.PRODUCT.value:
             # Фирменное ПО или сервис чужого производителя: заявку с другим прибором по нему
             # отклонят, как бы модель ни оценила «важность» формулировки.

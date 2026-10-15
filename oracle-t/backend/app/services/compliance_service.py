@@ -92,6 +92,7 @@ from app.services.tz_reference import (
     find_reference,
     is_model_requirement,
     is_registry_requirement,
+    is_vendor_exclusive,
     match_manufacturer,
     names_reference_model,
 )
@@ -1185,6 +1186,10 @@ def _position_groups(requirements: list[Requirement]) -> set[str] | None:
 POSITION_KIND_CONFIDENCE = 0.55
 
 
+# Начало пояснения отказа `apply_position_kinds` — по нему его узнаёт `apply_reference_rules`.
+POSITION_KIND_PREFIX = "Позиция «"
+
+
 def apply_position_kinds(
     requirements: list[Requirement],
     verdicts: dict[int, RequirementVerdict],
@@ -1223,7 +1228,7 @@ def apply_position_kinds(
         ]
         label = subset[0].position or ""
         explanation = (
-            f"Позиция «{label[:80]}»: в каталоге производителя нет приборов типа "
+            f"{POSITION_KIND_PREFIX}{label[:80]}»: в каталоге производителя нет приборов типа "
             f"«{'; '.join(kind_labels(sorted(wanted)))}» (есть: "
             f"{'; '.join(kind_labels(sorted(made_kinds)))}) — проверить, не неполон ли справочник"
         )[:300]
@@ -1439,7 +1444,7 @@ def apply_reference_rules(
                 )
             continue
 
-        if requirement.vendor_exclusive:
+        if is_vendor_exclusive(requirement):
             owner = match_manufacturer(requirement.vendor, manufacturers)
             if owner is None:
                 continue  # производителя нет в справочнике — решает модель по фактам
@@ -1463,6 +1468,27 @@ def apply_reference_rules(
                     explanation=f"Фирменное ПО/сервис самого производителя: {what}"[:300],
                     confidence=0.8,
                 )
+            continue
+
+        if (
+            is_reference
+            and status == ComplianceStatus.NOT_MEETS.value
+            and current is not None
+            and current.source == "rule"
+            and current.explanation.startswith(POSITION_KIND_PREFIX)
+        ):
+            # Нет в каталоге прибора типа позиции — у эталона это неполнота справочника, а не
+            # отказ: ТЗ написано под его прибор (32616409293, 15.10.2026: эталон Метроника «не
+            # проходил» по «Высоковольтный прибор учёта» — таких моделей в её карточке нет).
+            verdicts[index] = RequirementVerdict(
+                number=index,
+                status=ComplianceStatus.PARTIAL.value,
+                source="tz",
+                explanation=(
+                    f"ТЗ составлено по прибору {who_reference}. {current.explanation}"
+                )[:300],
+                confidence=REFERENCE_CONFLICT_CONFIDENCE,
+            )
             continue
 
         if (
