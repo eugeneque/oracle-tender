@@ -16,6 +16,7 @@ from app.api.endpoints import (
     integrations,
     logs,
     manufacturers,
+    matrix_recalc,
     notifications,
     relevance,
     sources,
@@ -51,3 +52,4 @@ api_router.include_router(relevance.router)
 api_router.include_router(integration_api.router)
 api_router.include_router(upper_software.router)
 api_router.include_router(registry_records.router)
+api_router.include_router(matrix_recalc.router)

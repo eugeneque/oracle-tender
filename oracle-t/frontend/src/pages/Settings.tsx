@@ -4,6 +4,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import {
   ArrowUpRight,
+  Calculator,
   CornerDownLeft,
   Globe,
   KeyRound,
@@ -24,6 +25,7 @@ import { AppShell } from "../components/AppShell";
 import { CredentialsSection } from "../components/settings/CredentialsSection";
 import { FeedChannelSection } from "../components/settings/FeedChannelSection";
 import { InterfaceSection } from "../components/settings/InterfaceSection";
+import { MatrixRecalcSection } from "../components/settings/MatrixRecalcSection";
 import { RegionResponsiblesSection } from "../components/settings/RegionResponsiblesSection";
 import { RelevanceProfileSection } from "../components/settings/RelevanceProfileSection";
 import { SourcesSection } from "../components/settings/SourcesSection";
@@ -51,6 +53,7 @@ type TabKey =
   | "relevance"
   | "regions"
   | "feedback"
+  | "matrix"
   | "interface";
 
 interface TabDef {
@@ -68,6 +71,7 @@ const TABS: TabDef[] = [
   { key: "credentials", label: "Доступы", icon: KeyRound, adminOnly: true },
   { key: "regions", label: "Регионы", icon: MapPin, adminOnly: true },
   { key: "feedback", label: "Ответы специалистов", icon: MessageSquareText },
+  { key: "matrix", label: "Пересчёт матрицы", icon: Calculator, adminOnly: true },
   { key: "interface", label: "Интерфейс", icon: Palette },
 ];
 
@@ -103,6 +107,7 @@ const SEARCH_INDEX: SearchEntry[] = [
   { tab: "credentials", anchor: "credentials-list", title: "Доступы к площадкам", hint: "Логины и пароли личных кабинетов", keywords: "логин пароль учётка учетные данные личный кабинет доступ", adminOnly: true },
   { tab: "regions", anchor: "regions-assign", title: "Ответственный за регион", hint: "Назначение ответственного и руководителя", keywords: "регион ответственный руководитель выгрузка excel", adminOnly: true },
   { tab: "regions", anchor: "regions-list", title: "Назначенные регионы", hint: "Список назначений", keywords: "регионы список", adminOnly: true },
+  { tab: "matrix", anchor: "matrix-recalc-run", title: "Пересчёт матрицы соответствия", hint: "Пересчитать итоги «проходит / не проходит» после обновления правил или каталога", keywords: "матрица соответствие пересчитать пересчёт разобрать заново итог проходит эталон стоимость токены", adminOnly: true },
   { tab: "feedback", title: "Ответы специалистов", hint: "Замечания специалистов к заключениям ИИ", keywords: "заключение ии несогласия согласия замечания обратная связь" },
   { tab: "interface", anchor: "interface-dark-theme", title: "Тёмная тема", hint: "Оформление приложения", keywords: "тема светлая тёмная темная оформление цвет" },
   { tab: "interface", anchor: "interface-nav", title: "Вид меню", hint: "Боковое меню или меню в шапке", keywords: "меню сайдбар шапка навигация" },
@@ -440,6 +445,7 @@ export function SettingsPage() {
             {activeTab === "credentials" && isAdmin && <CredentialsSection />}
             {activeTab === "regions" && isAdmin && <RegionResponsiblesSection />}
             {activeTab === "feedback" && <SpecialistFeedbackSection />}
+            {activeTab === "matrix" && isAdmin && <MatrixRecalcSection />}
             {activeTab === "interface" && <InterfaceSection />}
           </motion.div>
         </AnimatePresence>
