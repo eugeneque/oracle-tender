@@ -83,6 +83,7 @@ def select_products_for_context(
     *,
     limit: int,
     named_text: str = "",
+    only_wanted_kinds: bool = False,
 ) -> list[ScoredProduct]:
     """Модели производителя, наиболее отвечающие требованиям закупки, — не более `limit`.
 
@@ -96,6 +97,13 @@ def select_products_for_context(
     ноль пользы, а место они занимают. Исключение — производитель, у которого характеристик
     нет ни у одной модели: тогда возвращаются первые по алфавиту, чтобы он вовсе не исчез из
     матрицы соответствия.
+
+    `only_wanted_kinds` — для позиции спецификации (15.10.2026, раздел 61 ARCHITECTURE.md):
+    если у производителя есть модели типа, который следует из требований позиции, в карточку
+    идут только они. Штраф `KIND_MISMATCH_SCORE` лишь сдвигает чужой тип вниз, а при шести
+    местах и двух-трёх моделях в каталоге однофазная модель оставалась в карточке
+    трёхфазной позиции — и модель сравнивала «400 В» с ней. Нет моделей нужного типа —
+    отбор обычный: модель ответит «нет данных», тип решает код (`apply_position_kinds`).
     """
 
     products = list(
@@ -145,6 +153,14 @@ def select_products_for_context(
     # Сортировка стабильная, а исходный список уже упорядочен по названию: модели с равным
     # счётом идут по алфавиту, то есть отбор воспроизводим от прогона к прогону.
     scored.sort(key=lambda item: item.score, reverse=True)
+    if only_wanted_kinds and wanted_kinds:
+        fitting = [
+            item
+            for item in scored
+            if set(product_kinds(item.product, item.characteristics)) & wanted_kinds
+        ]
+        if fitting:
+            return fitting[:limit]
     return _cover_kinds(scored, limit, wanted_kinds)
 
 

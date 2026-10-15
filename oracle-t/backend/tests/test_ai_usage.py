@@ -331,3 +331,57 @@ def test_user_usage_lists_steps_and_tenders_with_links(db_session, admin_user, c
     assert client.get(f"/ai-usage/users/{admin_user.id}", headers=headers).status_code == 200
     bad = client.get("/ai-usage/users/not-a-uuid", headers=headers)
     assert bad.status_code == 400 and "пользователь" in bad.json()["detail"]
+
+
+
+def test_usage_xlsx_has_sheet_per_section_with_speed_and_cache(db_session, client, admin_token):
+    """Выгрузка: лист на раздел; скорость и время ответа — по успешным обращениям."""
+
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    provider = f"t{uuid.uuid4().hex[:8]}"
+    for status, completion, duration in (("success", 500, 2000), ("error", 0, 100)):
+        db_session.add(
+            AiUsageRecord(
+                provider=provider,
+                model="m",
+                operation="ComplianceResult",
+                prompt_tokens=2000,
+                completion_tokens=completion,
+                cached_tokens=500,
+                duration_ms=duration,
+                status=status,
+            )
+        )
+    db_session.commit()
+
+    today = datetime.now(ai_usage_service.MOSCOW_TZ).date()
+    content, file_name, rows = ai_usage_service.build_usage_xlsx(
+        db_session, date_from=today, date_to=today, provider=provider
+    )
+    assert file_name.endswith(".xlsx") and rows == 2
+    book = load_workbook(BytesIO(content))
+    assert book.sheetnames == [
+        "Итог", "По дням", "Модели", "Шаги разбора", "Виды разбора", "Пользователи", "Закупки", "Обращения",
+    ]
+
+    steps = book["Шаги разбора"]
+    header = [cell.value for cell in steps[1]]
+    step = dict(zip(header, [cell.value for cell in steps[2]]))
+    assert step["Шаг"] == "Матрица соответствия" and step["Обращений"] == 2 and step["Сбоев"] == 1
+    # 1000 из 4000 входящих — из кэша; сбой не тянет вниз время ответа и скорость.
+    assert step["Доля кэша"] == 0.25
+    assert step["Ср. время ответа, с"] == 2.0 and step["Скорость вывода, ток/с"] == 250.0
+    assert steps.freeze_panes == "B2" and steps.auto_filter.ref
+
+    calls = book["Обращения"]
+    assert calls.max_row == 3 and isinstance(calls["A2"].value, datetime)
+
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    response = client.get("/ai-usage/export.xlsx", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/vnd.openxmlformats")
+    assert "sova_ai_usage_" in response.headers["content-disposition"]
+    assert client.get("/ai-usage/export.xlsx").status_code == 401

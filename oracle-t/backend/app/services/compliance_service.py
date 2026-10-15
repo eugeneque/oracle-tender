@@ -78,6 +78,7 @@ from app.seed.meter_parameters import (
     detect_parameter,
     parameter_hint,
 )
+from app.services.lot_position import lot_groups, position_key
 from app.services.meter_kind import kind_group, kind_labels, kinds_from_text, product_kinds
 from app.services.compliance_numeric import (
     CatalogModel,
@@ -235,6 +236,9 @@ confidence 0.8-0.9; в explanation назови код («G — GSM в обоз�
 16. Программа обслуживания (конфигуратор) производителя, названная в [si_type] или \
 [manual] («обслуживание с помощью ПО «Admin Tools»»), подтверждает требование о работе с \
 этой программой — meets.
+17. Если в запросе указана ПОЗИЦИЯ СПЕЦИФИКАЦИИ, все требования относятся к этому изделию \
+закупки, а карточка подобрана под него. Другие позиции той же закупки к этому запросу не \
+относятся.
 """
 
 
@@ -312,6 +316,7 @@ def build_manufacturer_context(
     include_manual: bool,
     requirements: list[Requirement] | None = None,
     named_text: str = "",
+    only_wanted_kinds: bool = False,
 ) -> tuple[str, uuid.UUID | None]:
     """Карточка производителя для модели: факты из трёх источников с пометками.
 
@@ -326,12 +331,20 @@ def build_manufacturer_context(
     названию. `named_text` — документация закупки, где ищется прямо названная модель.
 
     Типы СИ — те, к которым относятся отобранные модели (`_si_types_for`).
+
+    `only_wanted_kinds` — карточка для позиции спецификации: только модели её типа, если
+    такие у производителя есть (раздел 61 ARCHITECTURE.md).
     """
 
     blocks: list[str] = []
 
     selected = select_products_for_context(
-        db, manufacturer, requirements or [], limit=MAX_PRODUCTS_IN_CONTEXT, named_text=named_text
+        db,
+        manufacturer,
+        requirements or [],
+        limit=MAX_PRODUCTS_IN_CONTEXT,
+        named_text=named_text,
+        only_wanted_kinds=only_wanted_kinds,
     )
     primary_product_id = selected[0].product.id if selected else None
 
@@ -1003,16 +1016,100 @@ def _evaluate_manufacturer(
 ) -> dict[int, RequirementVerdict]:
     """Вердикты по всем требованиям для одного производителя.
 
+    Закупка из нескольких позиций спецификации (15.10.2026, раздел 61 ARCHITECTURE.md)
+    считается по позициям: у каждой — своя карточка с моделями её типа, и требования позиции
+    сверяются только с ними; требования без позиции (общие) — с карточкой по всем
+    требованиям, как раньше. Итог производителя — по всем требованиям сразу
+    (`_calculate_percentage`, `decide_verdict`): не проходит хоть одна позиция — не
+    проходит производитель.
+
+    Раньше смесь требований разных приборов уходила одной карточкой: на 32616469643
+    «Россети Тюмень» «Номинальное напряжение: 400 В» трёхфазной позиции сравнивалось с
+    однофазной моделью — «не соответствует» у всех, включая эталон ТЗ."""
+
+    groups = lot_groups([item.position for item in requirements])
+    made_kinds: set[str] | None = None
+    if len(groups) == 1:
+        verdicts = _evaluate_group(
+            db, tender, manufacturer, requirements, outcome,
+            use_manual_fallback=use_manual_fallback, named_text=named_text, reference=reference,
+        )
+    else:
+        verdicts = {}
+        for label, indices in groups:
+            subset = [requirements[index - 1] for index in indices]
+            local = _evaluate_group(
+                db, tender, manufacturer, subset, outcome,
+                use_manual_fallback=use_manual_fallback, named_text=named_text, reference=reference,
+                # Общим требованиям — карточка по всей закупке: в ней модели всех позиций.
+                context_requirements=subset if label else requirements,
+                position=label,
+            )
+            for local_index, verdict in local.items():
+                verdict.number = indices[local_index - 1]
+                verdicts[indices[local_index - 1]] = verdict
+        made_kinds = manufacturer_kind_groups(db, manufacturer)
+        apply_position_kinds(requirements, verdicts, made_kinds)
+
+    # Типы каталога считаются, только когда есть «не соответствует» по типу/фазности:
+    # это запрос по всем моделям производителя, а нужен он редко.
+    needs_kinds = made_kinds is None and any(
+        _parameter_of(requirement) in TYPE_PARAMETERS
+        and verdicts[index].status == ComplianceStatus.NOT_MEETS.value
+        for index, requirement in enumerate(requirements, start=1)
+    )
+    if needs_kinds:
+        made_kinds = manufacturer_kind_groups(db, manufacturer)
+    apply_transformer_scope(requirements, verdicts)
+    apply_duration_check(requirements, verdicts)
+    apply_evidence_check(requirements, verdicts)
+    apply_expert_rules(manufacturer, requirements, verdicts, made_kinds=made_kinds)
+    apply_lot_variants(requirements, verdicts)
+    return verdicts
+
+
+def _evaluate_group(
+    db: Session,
+    tender: Tender,
+    manufacturer: Manufacturer,
+    requirements: list[Requirement],
+    outcome: ComplianceOutcome,
+    *,
+    use_manual_fallback: bool,
+    named_text: str = "",
+    reference: TzReference | None = None,
+    context_requirements: list[Requirement] | None = None,
+    position: str | None = None,
+) -> dict[int, RequirementVerdict]:
+    """Вердикты по группе требований (вся закупка или одна позиция) — номера с единицы
+    внутри группы.
+
     Сначала — два первых источника (описание типа и каталог). Если после этого часть
     требований осталась без данных, а у производителя есть материалы из руководства, делается
     второй проход **только по этим требованиям** — именно так третий шаг описан в разделе
-    5.5 ТЗ (fallback, а не обязательный источник)."""
+    5.5 ТЗ (fallback, а не обязательный источник).
 
-    context, product_id = build_manufacturer_context(
-        db, manufacturer, include_manual=False, requirements=requirements, named_text=named_text
-    )
-    if context.strip() and reference is not None and reference.manufacturer.id == manufacturer.id:
-        context = f"{reference_fact(reference)}\n{context}"
+    `context_requirements` — по каким требованиям собирать карточку (по умолчанию — по
+    самой группе); `position` — подпись позиции: карточка из моделей её типа, числовая
+    сверка — по её типу, а модели позиция названа в запросе."""
+
+    context_requirements = context_requirements if context_requirements is not None else requirements
+    only_wanted_kinds = position is not None
+
+    def context_for(include_manual: bool) -> str:
+        text, _ = build_manufacturer_context(
+            db,
+            manufacturer,
+            include_manual=include_manual,
+            requirements=context_requirements,
+            named_text=named_text,
+            only_wanted_kinds=only_wanted_kinds,
+        )
+        if text.strip() and reference is not None and reference.manufacturer.id == manufacturer.id:
+            text = f"{reference_fact(reference)}\n{text}"
+        return text
+
+    context = context_for(False)
     if not context.strip():
         # Данных о производителе нет вовсе — честный no_data без обращения к модели.
         return {
@@ -1022,17 +1119,22 @@ def _evaluate_manufacturer(
 
     # Однозначные числовые требования решает код — модели уходят только остальные
     # (14.10.2026, раздел 59 ARCHITECTURE.md, `app/services/compliance_numeric.py`).
-    verdicts = prejudge_numeric(db, tender, manufacturer, requirements)
+    # У позиции — по её типу: «400 В» трёхфазной позиции не подтверждается однофазной моделью.
+    verdicts = prejudge_numeric(
+        db, tender, manufacturer, requirements,
+        groups=_position_groups(requirements) if position is not None else None,
+    )
     outcome.prejudged += len(verdicts)
     asked = [index for index in range(1, len(requirements) + 1) if index not in verdicts]
     if asked:
         answered = _ask_in_batches(
-            db, manufacturer, [requirements[index - 1] for index in asked], context, outcome
+            db, manufacturer, [requirements[index - 1] for index in asked], context, outcome,
+            position=position,
         )
-        for position, index in enumerate(asked, start=1):
-            if position in answered:
-                answered[position].number = index
-                verdicts[index] = answered[position]
+        for number, index in enumerate(asked, start=1):
+            if number in answered:
+                answered[number].number = index
+                verdicts[index] = answered[number]
 
     unresolved = [
         index
@@ -1040,20 +1142,14 @@ def _evaluate_manufacturer(
         if verdicts.get(index, _no_data_verdict(index)).status == ComplianceStatus.NO_DATA.value
     ]
     if use_manual_fallback and unresolved:
-        manual_context, _ = build_manufacturer_context(
-            db,
-            manufacturer,
-            include_manual=True,
-            requirements=requirements,
-            named_text=named_text,
-        )
-        if manual_context.strip() and reference is not None and reference.manufacturer.id == manufacturer.id:
-            manual_context = f"{reference_fact(reference)}\n{manual_context}"
+        manual_context = context_for(True)
         if manual_context.strip() and manual_context != context:
             subset = [requirements[index - 1] for index in unresolved]
-            fallback = _ask_in_batches(db, manufacturer, subset, manual_context, outcome)
-            for position, index in enumerate(unresolved, start=1):
-                verdict = fallback.get(position)
+            fallback = _ask_in_batches(
+                db, manufacturer, subset, manual_context, outcome, position=position
+            )
+            for number, index in enumerate(unresolved, start=1):
+                verdict = fallback.get(number)
                 if verdict is None or verdict.status == ComplianceStatus.NO_DATA.value:
                     continue
                 verdict.number = index
@@ -1067,22 +1163,79 @@ def _evaluate_manufacturer(
         verdicts.setdefault(
             index, _no_data_verdict(index, MODEL_NO_VERDICT, 0.0)
         )
-    # Типы каталога считаются, только когда есть «не соответствует» по типу/фазности:
-    # это запрос по всем моделям производителя, а нужен он редко.
-    needs_kinds = any(
-        _parameter_of(requirement) in TYPE_PARAMETERS
-        and verdicts[index].status == ComplianceStatus.NOT_MEETS.value
-        for index, requirement in enumerate(requirements, start=1)
-    )
-    apply_duration_check(requirements, verdicts)
-    apply_evidence_check(requirements, verdicts)
-    apply_expert_rules(
-        manufacturer,
-        requirements,
-        verdicts,
-        made_kinds=manufacturer_kind_groups(db, manufacturer) if needs_kinds else None,
-    )
     return verdicts
+
+
+def _requirement_text(requirement: Requirement) -> str:
+    return f"{requirement.text or ''} {requirement.normalized_text or ''}"
+
+
+def _position_groups(requirements: list[Requirement]) -> set[str] | None:
+    """Группы типов (фазность × включение), которые следуют из требований позиции; `None` —
+    тип из них не следует."""
+
+    text = " ".join(_requirement_text(item) for item in requirements)
+    return {kind_group(code) for code in kinds_from_text(text)} or None
+
+
+# Уверенность «не соответствует» по типу позиции, которого нет в каталоге производителя:
+# ниже порога проверки — справочник бывает неполным, и человек должен это подтвердить.
+POSITION_KIND_CONFIDENCE = 0.55
+
+
+def apply_position_kinds(
+    requirements: list[Requirement],
+    verdicts: dict[int, RequirementVerdict],
+    made_kinds: set[str],
+) -> None:
+    """Позиция спецификации, прибора типа которой у производителя в каталоге нет, —
+    «не соответствует» по её требованиям к типу прибора (параметры 1, 2 или формулировка,
+    из которой следует тип), с пометкой «проверить».
+
+    Отдельной карточкой позиции модель видит только модели другого типа и по правилу 10
+    промпта отвечает «нет данных» — и производитель без трёхфазных полукосвенного включения
+    «проходил» бы закупку, в которой такая позиция есть. Решает код, а не модель: это
+    свойство каталога производителя, а не прочтение карточки. Правило молчит, когда тип
+    моделей каталога не определён ни у одной (`made_kinds` пуст) — тогда судить не по чему;
+    и не трогает «соответствует»: модель видела факт, которого нет в типах каталога."""
+
+    if not made_kinds:
+        return
+    by_position: dict[str, list[int]] = {}
+    for index, requirement in enumerate(requirements, start=1):
+        key = position_key(requirement.position)
+        if key:
+            by_position.setdefault(key, []).append(index)
+    for indices in by_position.values():
+        subset = [requirements[index - 1] for index in indices]
+        wanted = _position_groups(subset)
+        if not wanted or wanted & made_kinds:
+            continue
+        targets = [
+            index
+            for index in indices
+            if _parameter_of(requirements[index - 1]) in TYPE_PARAMETERS
+            or kinds_from_text(_requirement_text(requirements[index - 1]))
+        ] or [
+            index for index in indices if requirements[index - 1].criticality == Criticality.CRITICAL.value
+        ]
+        label = subset[0].position or ""
+        explanation = (
+            f"Позиция «{label[:80]}»: в каталоге производителя нет приборов типа "
+            f"«{'; '.join(kind_labels(sorted(wanted)))}» (есть: "
+            f"{'; '.join(kind_labels(sorted(made_kinds)))}) — проверить, не неполон ли справочник"
+        )[:300]
+        for index in targets:
+            current = verdicts.get(index)
+            if current is not None and current.status == ComplianceStatus.MEETS.value:
+                continue
+            verdicts[index] = RequirementVerdict(
+                number=index,
+                status=ComplianceStatus.NOT_MEETS.value,
+                source="rule",
+                explanation=explanation,
+                confidence=POSITION_KIND_CONFIDENCE,
+            )
 
 
 def _apply_astra_rule(
@@ -1163,6 +1316,11 @@ def reference_fact(reference: TzReference) -> str:
 # заказчик мог дописать своё (настройка модема под оператора). Поэтому ниже порога «на
 # проверку» не опускаем, но и до уверенности фактов из каталога не поднимаем.
 REFERENCE_FILL_CONFIDENCE = 0.65
+# Ниже порога LOW_CONFIDENCE_THRESHOLD — ячейка уходит на проверку человеком.
+REFERENCE_CONFLICT_CONFIDENCE = 0.5
+# Вердикты, полученные сравнением требования с моделями из карточки производителя (в
+# отличие от правил кода и реестров), — у эталона без модели в каталоге они про чужой прибор.
+_MODEL_COMPARISON_SOURCES = frozenset({"si_type", "catalog", "manual", ""})
 
 
 def apply_reference_rules(
@@ -1183,6 +1341,8 @@ def apply_reference_rules(
       критичные (`tender_analysis`), поэтому итог «не проходит», а не «с оговорками».
     * Эталонному производителю «нет данных» заменяется на «соответствует по эталону ТЗ».
       Противоречие из каталога («не соответствует») остаётся — его должен увидеть человек.
+      Если модели эталона в каталоге нет, такое противоречие — сравнение с другой моделью
+      производителя: «частично» на проверку, а не «не проходит» (15.10.2026).
     """
 
     is_reference = reference is not None and reference.manufacturer.id == manufacturer.id
@@ -1301,6 +1461,32 @@ def apply_reference_rules(
                     )
                 )[:300],
                 confidence=0.8 if confirmed else 0.55,
+            )
+            continue
+
+        if (
+            is_reference
+            and status == ComplianceStatus.NOT_MEETS.value
+            and not reference.products
+            and current is not None
+            and current.source in _MODEL_COMPARISON_SOURCES
+        ):
+            # Модели эталона в каталоге нет — «не соответствует» получено сравнением с другой
+            # моделью производителя, а не с прибором, по которому писано ТЗ (32616469643,
+            # 15.10.2026: эталон — ВШУ в сборе с ПУ полукосвенного включения, в каталоге
+            # Нартиса только счётчики, и «Максимальный ток 10 А» сравнили со счётчиком прямого
+            # включения на 100 А). Противоречие остаётся видным — «частично» с пояснением
+            # каталога и на проверку, — но «не проходит» эталону оно не ставит. Если модель
+            # эталона в каталоге есть, противоречие — про неё саму и остаётся «не соответствует».
+            verdicts[index] = RequirementVerdict(
+                number=index,
+                status=ComplianceStatus.PARTIAL.value,
+                source=current.source,
+                explanation=(
+                    f"ТЗ составлено по модели {who_reference} {reference.label}, её нет в "
+                    f"каталоге; по другой модели: {current.explanation} — проверить по паспорту"
+                )[:300],
+                confidence=REFERENCE_CONFLICT_CONFIDENCE,
             )
             continue
 
@@ -1452,6 +1638,153 @@ def apply_evidence_check(
         )
 
 
+# Требование к трансформатору тока/напряжения — по названию параметра (до двоеточия):
+# «Класс точности ТН», «Межповерочный интервал ТТ». «Счётчик трансформаторного включения»
+# и «подключение через ТТ» — свойства самого счётчика, их не трогаем.
+_TRANSFORMER_SUBJECT_RE = re.compile(r"\bт[тн]\b|трансформатор\w*\s+(?:тока|напряжени)", re.IGNORECASE)
+_METER_CONNECTION_RE = re.compile(r"включени|подключ|через", re.IGNORECASE)
+TRANSFORMER_EXPLANATION = (
+    "требование к трансформатору тока/напряжения, а пояснение — о самом приборе учёта; "
+    "проверить по паспорту трансформатора"
+)
+
+
+def is_transformer_requirement(requirement: Requirement) -> bool:
+    text = requirement.normalized_text or requirement.text or ""
+    subject = text.split(":", 1)[0]
+    return bool(_TRANSFORMER_SUBJECT_RE.search(subject)) and not _METER_CONNECTION_RE.search(subject)
+
+
+def apply_transformer_scope(
+    requirements: list[Requirement], verdicts: dict[int, RequirementVerdict]
+) -> None:
+    """Вердикт по требованию к ТТ/ТН, который говорит о счётчике, а не о трансформаторе, —
+    «нет данных».
+
+    Закупка 32616469643 (15.10.2026, ВШУ в сборе с ПУ полукосвенного включения): «Класс
+    точности ТН: не ниже 0,5» — «не соответствует: класс точности A1R1», «Межповерочный
+    интервал ТТ» — «соответствует: у НАРТИС-И100 192 месяца». Модель сравнила требование к
+    трансформатору с классом и интервалом счётчика, и эталон ТЗ «не проходил». Пояснение,
+    которое говорит о самом трансформаторе (ПКУ с ТТ и ТН в каталоге), остаётся."""
+
+    for index, requirement in enumerate(requirements, start=1):
+        verdict = verdicts.get(index)
+        if verdict is None or verdict.status == ComplianceStatus.NO_DATA.value:
+            continue
+        if not is_transformer_requirement(requirement):
+            continue
+        if _TRANSFORMER_RE.search(verdict.explanation or ""):
+            continue
+        verdicts[index] = RequirementVerdict(
+            number=index,
+            status=ComplianceStatus.NO_DATA.value,
+            source=verdict.source,
+            explanation=f"{verdict.explanation} [{TRANSFORMER_EXPLANATION}]".strip()[:300],
+            confidence=0.4,
+        )
+
+
+_YES_VALUES = frozenset({"да", "есть", "имеется"})
+_NO_VALUES = frozenset({"нет", "отсутствует", "не допускается"})
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def _subject_and_value(requirement: Requirement) -> tuple[str, str] | None:
+    text = requirement.normalized_text or ""
+    if ":" not in text:
+        return None
+    subject, value = text.split(":", 1)
+    return " ".join(subject.lower().split()), value.strip().lower().rstrip(".")
+
+
+def _values_conflict(first: str, second: str) -> bool:
+    """Два значения одного параметра, которые одному прибору не выполнить сразу: «да» и
+    «нет», «230 В» и «400 В», «не хуже 1,0» и «не хуже 2,0». Перечни («Ethernet» и
+    «USB») — не противоречие: интерфейсов у прибора бывает несколько."""
+
+    if {first, second} <= _YES_VALUES | _NO_VALUES:
+        return (first in _YES_VALUES) != (second in _YES_VALUES)
+    numbers = [
+        {float(item.replace(",", ".")) for item in _NUMBER_RE.findall(value)} for value in (first, second)
+    ]
+    return bool(numbers[0]) and bool(numbers[1]) and numbers[0] != numbers[1]
+
+
+LOT_VARIANT_EXPLANATION = (
+    "в закупке несколько позиций: требование «{other}» выполнено — это значение, вероятно, "
+    "для другой позиции; проверить прибор для этой"
+)
+
+
+def apply_lot_variants(
+    requirements: list[Requirement], verdicts: dict[int, RequirementVerdict]
+) -> None:
+    """Смешанный лот: «не соответствует» по значению, которое противоречит другому требованию
+    того же параметра, выполненному производителем, — «нет данных».
+
+    Закупка 32616469643 (15.10.2026): ВШУ с однофазным ПУ и ВШУ с трёхфазным ПУ
+    полукосвенного включения — в одном списке «Номинальное напряжение: 230 В» и «400 В»,
+    «сменный GSM-модуль: да» и «нет», реактивная энергия «не хуже 1,0» и «не хуже 2,0».
+    Одному прибору все не выполнить, и каждый производитель «не проходил» по одной из пар:
+    модель сравнивала требование трёхфазной позиции с однофазной моделью из карточки
+    («230 В не соответствует 400 В»). Раз другое значение того же параметра выполнено,
+    отказ — про чужую позицию, а не про производителя; проверка остаётся за человеком.
+    Правила кода (`rule`, `tz`) не трогаем — они решают по производителю, а не по модели.
+
+    С 15.10.2026 это страховка: требования с позицией спецификации сверяются только с
+    моделями своей позиции (`_evaluate_manufacturer`, раздел 61 ARCHITECTURE.md), и
+    эвристика их не касается — работает для требований без позиции (закупки, разобранные
+    до появления позиций, и пропуски модели извлечения)."""
+
+    parsed = {
+        index: _subject_and_value(requirement)
+        for index, requirement in enumerate(requirements, start=1)
+        if not position_key(requirement.position)
+    }
+    met: dict[str, list[tuple[int, str]]] = {}
+    for index, item in parsed.items():
+        verdict = verdicts.get(index)
+        if item is not None and verdict is not None and verdict.status == ComplianceStatus.MEETS.value:
+            met.setdefault(item[0], []).append((index, item[1]))
+
+    for index, item in parsed.items():
+        verdict = verdicts.get(index)
+        if item is None or verdict is None or verdict.status != ComplianceStatus.NOT_MEETS.value:
+            continue
+        if verdict.source in ("rule", "tz"):
+            continue
+        subject, value = item
+        other = next(
+            (other_index for other_index, other_value in met.get(subject, []) if _values_conflict(value, other_value)),
+            None,
+        )
+        if other is None:
+            continue
+        other_text = requirements[other - 1].normalized_text or ""
+        verdicts[index] = RequirementVerdict(
+            number=index,
+            status=ComplianceStatus.NO_DATA.value,
+            source=verdict.source,
+            explanation=(
+                f"{verdict.explanation} [{LOT_VARIANT_EXPLANATION.format(other=other_text[:80])}]"
+            ).strip()[:300],
+            confidence=0.4,
+        )
+
+
+def _wording_matches(item, requirement: Requirement) -> bool:
+    """Номер параметра с правилом кода ставит модель извлечения, и она ошибается: на закупке
+    32616469643 (15.10.2026) «Дискретные входы: 6 шт.» получили параметр 26, и Нартис —
+    эталон ТЗ — схлопотал «не соответствует: трёхпозиционное реле только у Энергомеры, Тайпит
+    и Пульсара». Правило, решающее «не проходит» за модель, срабатывает только когда и сама
+    формулировка требования узнаётся как этот параметр."""
+
+    if not item.patterns:
+        return True
+    text = f"{requirement.text or ''} {requirement.normalized_text or ''}"
+    return any(pattern.search(text) for pattern in item.patterns)
+
+
 def apply_expert_rules(
     manufacturer: Manufacturer,
     requirements: list[Requirement],
@@ -1479,6 +1812,8 @@ def apply_expert_rules(
             and made_kinds
             and current is not None
             and current.status == ComplianceStatus.NOT_MEETS.value
+            # Отказ по типу позиции решил код (`apply_position_kinds`) — снимать нечего.
+            and current.source != "rule"
         ):
             wanted = {
                 kind_group(code)
@@ -1498,6 +1833,8 @@ def apply_expert_rules(
                 )
                 continue
         item = PARAMETERS_BY_NO.get(parameter or 0)
+        if item is not None and not _wording_matches(item, requirement):
+            continue
         if item is not None and item.rule == RULE_ASTRA:
             _apply_astra_rule(manufacturer, index, verdicts)
             continue
@@ -1559,16 +1896,24 @@ def catalog_models(db: Session, manufacturer: Manufacturer) -> list[CatalogModel
 
 
 def prejudge_numeric(
-    db: Session, tender: Tender, manufacturer: Manufacturer, requirements: list[Requirement]
+    db: Session,
+    tender: Tender,
+    manufacturer: Manufacturer,
+    requirements: list[Requirement],
+    *,
+    groups: set[str] | None = None,
 ) -> dict[int, RequirementVerdict]:
     """Вердикты кодом по однозначным числовым требованиям (номер → вердикт). Только
-    «соответствует» по факту из каталога; остальное — модели (см. `compliance_numeric`)."""
+    «соответствует» по факту из каталога; остальное — модели (см. `compliance_numeric`).
+
+    `groups` — типы позиции спецификации; без них — типы всей закупки."""
 
     texts = [(index, item.normalized_text or item.text or "") for index, item in enumerate(requirements, start=1)]
     if not any(requirement_checks(text) for _, text in texts):
         return {}
     models = catalog_models(db, manufacturer)
-    groups = {kind_group(code) for code in (tender.meter_kinds or [])} or None
+    if groups is None:
+        groups = {kind_group(code) for code in (tender.meter_kinds or [])} or None
     verdicts: dict[int, RequirementVerdict] = {}
     for index, text in texts:
         found = prejudge(text, models, groups, NUMERIC_ENABLED)
@@ -1589,6 +1934,8 @@ def _ask_in_batches(
     requirements: list[Requirement],
     context: str,
     outcome: ComplianceOutcome,
+    *,
+    position: str | None = None,
 ) -> dict[int, RequirementVerdict]:
     """Спрашивает модель пачками по `REQUIREMENTS_PER_REQUEST` и склеивает вердикты,
     пересчитывая локальные номера пачки в сквозные.
@@ -1602,7 +1949,7 @@ def _ask_in_batches(
         batch = requirements[offset : offset + REQUIREMENTS_PER_REQUEST]
         # Каждой пачке — своя выборка из карточки (14.10.2026, `focus_context`).
         batch_context = focus_context(context, batch, _focus_limit(db, batch))
-        batch_verdicts = _ask_model(db, manufacturer, batch, batch_context, outcome)
+        batch_verdicts = _ask_model(db, manufacturer, batch, batch_context, outcome, position=position)
         for local_number, verdict in batch_verdicts.items():
             global_number = offset + local_number
             verdict.number = global_number
@@ -1616,6 +1963,8 @@ def _ask_model(
     requirements: list[Requirement],
     context: str,
     outcome: ComplianceOutcome,
+    *,
+    position: str | None = None,
 ) -> dict[int, RequirementVerdict]:
     # Карточка — первой, требования — после (06.10.2026): одинаковое начало запроса провайдер
     # берёт из кэша (у DeepSeek — автоматически, в разы дешевле). С 14.10.2026 карточка у
@@ -1623,7 +1972,12 @@ def _ask_model(
     # когда она короче предела и уходит целиком; зато она втрое короче.
     user_text = (
         f"КАРТОЧКА ПРОИЗВОДИТЕЛЯ «{manufacturer.brand_name or manufacturer.legal_name}»:\n{context}\n\n"
-        f"ТРЕБОВАНИЯ ЗАКУПКИ:\n{_requirements_block(requirements)}"
+        + (
+            f"ПОЗИЦИЯ СПЕЦИФИКАЦИИ: {position} — все требования ниже относятся к этому изделию.\n"
+            if position
+            else ""
+        )
+        + f"ТРЕБОВАНИЯ ЗАКУПКИ:\n{_requirements_block(requirements)}"
     )
     try:
         result = run_structured(
@@ -1712,6 +2066,19 @@ def _save_entries(
         outcome.entries_saved += 1
 
 
+def _labelled(requirement: Requirement, limit: int) -> str:
+    """Формулировка для итога производителя — с позицией спецификации, если она есть: в
+    закупке из двух приборов «Номинальное напряжение: 400 В» без позиции не объясняет,
+    какой из них не подошёл."""
+
+    text = (requirement.normalized_text or requirement.text or "")[:limit]
+    position = position_key(requirement.position)
+    if not position:
+        return text
+    label = f"поз. {position}" if position.isdigit() else (requirement.position or "")[:40]
+    return f"{label}: {text}"
+
+
 def calculate_percentage(
     requirements: list[Requirement], verdicts: dict[int, RequirementVerdict]
 ) -> tuple[Decimal, int]:
@@ -1766,7 +2133,7 @@ def _calculate_percentage(
         reason = "Оценка невозможна: по всем требованиям нет данных в каталоге"
     elif failed_critical:
         reason = "Не выполнены критичные требования: " + "; ".join(
-            (requirement.normalized_text or requirement.text)[:120] for requirement in failed_critical[:3]
+            _labelled(requirement, 120) for requirement in failed_critical[:3]
         )
     else:
         reason = f"Оценка по {scored} из {total} требований с определённым статусом"
@@ -1836,7 +2203,7 @@ def decide_verdict(
     * проходит — всё остальное."""
 
     def text_of(requirement: Requirement) -> str:
-        return (requirement.normalized_text or requirement.text or "")[:90]
+        return _labelled(requirement, 90)
 
     failed_critical: list[str] = []
     failed_other: list[str] = []

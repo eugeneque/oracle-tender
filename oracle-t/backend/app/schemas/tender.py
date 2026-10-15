@@ -126,6 +126,8 @@ class RequirementOut(BaseModel):
     category: str | None
     # Параметр файла «Параметры для ПУ» (1-39) и его название.
     parameter_no: int | None = None
+    # Позиция спецификации в закупке из нескольких позиций (раздел 61 ARCHITECTURE.md).
+    position: str | None = None
     verified_by_user: bool
     created_at: datetime
 

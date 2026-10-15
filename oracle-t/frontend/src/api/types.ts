@@ -871,6 +871,8 @@ export interface Requirement {
   /** Параметр файла «Параметры для ПУ» (1–39) и его название; null — не отнесено. */
   parameter_no: number | null;
   parameter_name: string | null;
+  /** Позиция спецификации в закупке из нескольких позиций; null — общее требование (15.10.2026). */
+  position?: string | null;
   verified_by_user: boolean;
   created_at: string;
 }
