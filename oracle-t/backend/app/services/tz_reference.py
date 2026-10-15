@@ -68,8 +68,53 @@ class TzReference:
         )
 
 
+# Обозначение модели под другим названием параметра. Сверка матрицы на сервере 15.10.2026
+# (раздел 62 ARCHITECTURE.md): «Наименование товара: счётчик МИР С-04.10-230-5(100)-GZ1B»,
+# «Модель однофазного счётчика: …», «Счётчик трёхфазный 307S.52-ZZ-3-D» — около 80
+# критичных «не соответствует: модель не та» у конкурентов, то есть «не проходит» вместо
+# «эквивалент, проверить». Обозначением считается название параметра из этого списка И код
+# модели в значении: «Тип прибора: трёхфазный прямого включения» — не модель.
+_DESIGNATION_SUBJECT_RE = re.compile(
+    r"^(?:модель|марка|обозначение|наименование|тип\s+(?:прибора|сч[её]тчика)|сч[её]тчик)",
+    re.IGNORECASE,
+)
+# «Номер в Госреестре СИ: 55522-13» называет тип средства измерений — то же, что модель
+# (32616407181: эталон РиМ «не проходил», а конкуренты получали отказ по чужому номеру).
+_REGISTRY_SUBJECT_RE = re.compile(
+    r"госреестр|регистрационн\w*\s+номер|номер\s+(?:в\s+)?(?:государственн\w+\s+)?реестр",
+    re.IGNORECASE,
+)
+_REGISTRY_NUMBER_RE = re.compile(r"\b\d{4,6}-\d{2}\b")
+_CODE_TOKEN_RE = re.compile(r"[\w.\-/()]{5,}")
+_LETTER_BEFORE_DIGIT_RE = re.compile(r"[^\W\d_][\W_]*\d")
+_DIMENSION_RE = re.compile(r"^\d+\s*[хx×]\s*\d", re.IGNORECASE)
+
+
+def _has_designation_code(text: str) -> bool:
+    """Код модели: от пяти знаков, буква перед цифрой — «CE207», «С-04.10-230», «307S.52».
+    «5(100) А», «220В», «3х230/400» и «1-фазный» кодом не считаются."""
+
+    for token in _CODE_TOKEN_RE.findall(text or ""):
+        token = token.strip(".-/()")
+        if len(token) >= 5 and not _DIMENSION_RE.match(token) and _LETTER_BEFORE_DIGIT_RE.search(token):
+            return True
+    return False
+
+
+def is_registry_requirement(requirement: Requirement) -> bool:
+    text = requirement.normalized_text or requirement.text or ""
+    subject = text.split(":", 1)[0]
+    return bool(_REGISTRY_SUBJECT_RE.search(subject)) and bool(_REGISTRY_NUMBER_RE.search(text))
+
+
 def is_model_requirement(requirement: Requirement) -> bool:
-    return (requirement.normalized_text or "").strip().lower().startswith(MODEL_REQUIREMENT_PREFIX)
+    text = (requirement.normalized_text or "").strip()
+    if text.lower().startswith(MODEL_REQUIREMENT_PREFIX) or is_registry_requirement(requirement):
+        return True
+    subject, _, value = text.partition(":")
+    if not _DESIGNATION_SUBJECT_RE.match(subject.strip()):
+        return False
+    return _has_designation_code(value or subject)
 
 
 def names_reference_model(requirement: Requirement, reference: TzReference | None) -> bool:
