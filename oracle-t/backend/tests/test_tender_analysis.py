@@ -120,6 +120,7 @@ def _requirement(**overrides) -> ExtractedRequirement:
         "parameter_no": 0,
         "vendor": "",
         "vendor_exclusive": False,
+        "position": "",
     }
     data.update(overrides)
     return ExtractedRequirement(**data)

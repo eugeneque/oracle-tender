@@ -111,12 +111,39 @@ def test_reference_keeps_catalog_contradiction():
     """«Не соответствует» по фактам каталога у эталона не затирается — противоречие ТЗ и
     прибора должен увидеть человек."""
 
+    product = Product(id=uuid.uuid4(), manufacturer_id=ENERGOMERA.id, model_name="CE207", model_code="CE207")
+    reference = TzReference(
+        manufacturer=ENERGOMERA, products=[product], designations=REFERENCE.designations, equivalent_allowed=True
+    )
     verdicts = _no_data(3)
     verdicts[3] = RequirementVerdict(
         number=3, status=ComplianceStatus.NOT_MEETS.value, source="catalog", explanation="нет модема", confidence=0.9
     )
+    apply_reference_rules(ENERGOMERA, REQUIREMENTS, verdicts, reference, [ENERGOMERA])
+
+    assert verdicts[3].status == ComplianceStatus.NOT_MEETS.value
+
+
+def test_reference_without_catalog_model_is_not_failed_by_another_model():
+    """32616469643 (15.10.2026): модели эталона (ВШУ в сборе) в каталоге нет — «не
+    соответствует» получено по другой модели производителя. Это «частично» на проверку, а не
+    «не проходит»; правило кода (фирменное ПО чужого производителя и т. п.) не смягчается."""
+
+    verdicts = _no_data(3)
+    verdicts[3] = RequirementVerdict(
+        number=3, status=ComplianceStatus.NOT_MEETS.value, source="si_type",
+        explanation="Максимальный ток трёхфазного исполнения — 100 А", confidence=0.7,
+    )
     apply_reference_rules(ENERGOMERA, REQUIREMENTS, verdicts, REFERENCE, [ENERGOMERA])
 
+    assert verdicts[3].status == ComplianceStatus.PARTIAL.value
+    assert verdicts[3].confidence < 0.6 and "100 А" in verdicts[3].explanation
+    assert decide_verdict(REQUIREMENTS, verdicts)[0] == "caveats"
+
+    verdicts[3] = RequirementVerdict(
+        number=3, status=ComplianceStatus.NOT_MEETS.value, source="rule", explanation="правило", confidence=0.9
+    )
+    apply_reference_rules(ENERGOMERA, REQUIREMENTS, verdicts, REFERENCE, [ENERGOMERA])
     assert verdicts[3].status == ComplianceStatus.NOT_MEETS.value
 
 

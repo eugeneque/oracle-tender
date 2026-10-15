@@ -3,9 +3,10 @@
 Только администратору: по расходу видно, кто и что разбирал, а решения о модели и бюджете
 принимает он. Логика — в `app/services/ai_usage_service.py`."""
 
+import urllib.parse
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_admin
@@ -87,4 +88,35 @@ def get_usage_calls(
     start, end = _period(date_from, date_to)
     return ai_usage_service.recent_calls(
         db, date_from=start, date_to=end, provider=provider or None, limit=limit, offset=offset
+    )
+
+
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@router.get("/export.xlsx")
+def export_usage_xlsx(
+    date_from: date | None = None,
+    date_to: date | None = None,
+    provider: str | None = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> Response:
+    """Вся детализация за период в Excel, лист на раздел: итог, срезы сводки и каждое
+    обращение — с токенами на входе и выходе, кэшем, временем и скоростью вывода (15.10.2026)."""
+
+    start, end = _period(date_from, date_to)
+    content, file_name, rows = ai_usage_service.build_usage_xlsx(
+        db, date_from=start, date_to=end, provider=provider or None
+    )
+    return Response(
+        content=content,
+        media_type=XLSX_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"{file_name}\"; filename*=UTF-8''{urllib.parse.quote(file_name)}"
+            ),
+            "X-Exported-Rows": str(rows),
+            "Access-Control-Expose-Headers": "Content-Disposition, X-Exported-Rows",
+        },
     )

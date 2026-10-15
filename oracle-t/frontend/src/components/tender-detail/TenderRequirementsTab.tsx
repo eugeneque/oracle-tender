@@ -24,6 +24,21 @@ export function ParameterChip({ requirement }: { requirement: Pick<Requirement, 
   );
 }
 
+/** Значок позиции спецификации (15.10.2026): в закупке из нескольких позиций требование
+ * сверяется только с приборами своей позиции, и человеку надо видеть, к какой оно относится. */
+export function PositionChip({ requirement }: { requirement: Pick<Requirement, "position"> }) {
+  if (!requirement.position) return null;
+  const short = requirement.position.match(/^\s*(?:поз[а-яё]*\.?\s*)?№?\s*(\d+)/i)?.[1];
+  return (
+    <span
+      className="max-w-[9rem] shrink-0 truncate rounded-md bg-zinc-500/10 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400"
+      title={`Позиция спецификации: ${requirement.position}`}
+    >
+      {short ? `Поз. ${short}` : requirement.position}
+    </span>
+  );
+}
+
 /** Итог последнего запуска анализа. `null` — сведений нет (ещё грузятся). */
 export type AnalysisState = {
   /** Анализ хотя бы раз выполнялся до конца. */
@@ -117,6 +132,7 @@ function RequirementRow({ requirement, index }: { requirement: Requirement; inde
     >
       <span className="w-6 shrink-0 pt-0.5 text-right text-[11px] tabular-nums text-zinc-600">{index}</span>
       <p className="min-w-0 flex-1 text-sm leading-relaxed text-zinc-200">{requirement.text}</p>
+      <PositionChip requirement={requirement} />
       <ParameterChip requirement={requirement} />
     </li>
   );

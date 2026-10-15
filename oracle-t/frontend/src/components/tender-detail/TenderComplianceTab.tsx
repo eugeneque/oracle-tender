@@ -2,7 +2,7 @@ import { Fragment, useMemo, useState } from "react";
 import { AlertTriangle, BookOpen, ChevronDown, ChevronRight } from "lucide-react";
 
 import type { ComplianceEntry, ComplianceMatrix } from "../../api/types";
-import { ParameterChip } from "./TenderRequirementsTab";
+import { ParameterChip, PositionChip } from "./TenderRequirementsTab";
 import {
   complianceLabel,
   complianceSourceLabel,
@@ -352,6 +352,7 @@ export function TenderComplianceTab({
                           }`}
                         />
                         <span className="flex-1 leading-snug text-zinc-200">{requirement.text}</span>
+                        <PositionChip requirement={requirement} />
                         <ParameterChip requirement={requirement} />
                       </div>
                     </td>

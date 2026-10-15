@@ -38,6 +38,7 @@ from app.seed.meter_parameters import PARAMETERS_BY_NO, detect_parameter, parame
 from app.services.audit import log_action
 from app.services.document_service import classify_document, reextract_stale_documents
 from app.services.ai_client import AiQuotaExceededError, chunk_text, fit_chars, run_structured
+from app.services.lot_position import position_key
 from app.services.meter_kind import METER_KINDS, fill_tender_kinds
 from app.services import okpd2_service
 
@@ -205,7 +206,19 @@ GSM, ПО верхнего уровня «Пирамида», «Энергосф
 производителя допустим. Если `vendor` пустой — false.
 14. Один и тот же параметр в одном фрагменте извлекай один раз, даже если документ \
 повторяет его в разных разделах (технические характеристики, функциональные требования, \
-спецификация): возьми самую полную формулировку.
+спецификация): возьми самую полную формулировку. Это правило — внутри одной позиции \
+спецификации: один параметр у разных позиций (правило 15) — разные требования.
+15. `position` — позиция спецификации, к которой относится требование `product`. Если \
+закупка включает несколько разных изделий (позиций спецификации, ведомости, лотов): \
+например, «1. Шкаф ВШУ с однофазным ПУ» и «2. Шкаф ВШУ с трёхфазным ПУ полукосвенного \
+включения», — у КАЖДОГО требования, сказанного об одном изделии, укажи его позицию: номер \
+и краткое наименование, как в спецификации («1. ВШУ с однофазным ПУ»). Одну позицию пиши \
+у всех её требований одинаково. Характеристики, перечисленные отдельно для каждой позиции \
+(«230 В» у однофазной и «3×230/400 В» у трёхфазной), — отдельные требования, каждое со \
+своей позицией. Пустая строка — если требование общее для всех позиций (гарантия, \
+Госреестр СИ, протокол для всех приборов), если позиция в закупке одна, а также для \
+`service`, `participant` и `supply`. Не угадывай позицию: если из текста не ясно, к \
+какому изделию относится требование, — пустая строка.
 
 Производители приборов учёта в справочнике:
 {manufacturers_list}
@@ -257,6 +270,9 @@ class ExtractedRequirement(pydantic.BaseModel):
     parameter_no: int
     vendor: str
     vendor_exclusive: bool
+    # Позиция спецификации («1. ВШУ с однофазным ПУ»); пустая строка — общее требование
+    # или позиция одна (15.10.2026, раздел 61 ARCHITECTURE.md).
+    position: str
 
 
 class RequirementsResult(pydantic.BaseModel):
@@ -303,7 +319,9 @@ GSM/GPRS, оптопорт» и «Интерфейсы связи: встрое�
 противоречие в документации должен увидеть человек;
 - общее и частное: «Интерфейсы связи: GSM/GPRS, оптопорт» и «Наличие слота для \
 SIM-карты» — разные проверки;
-- требования разного вида (к товару, к работам, к участнику, условия поставки).
+- требования разного вида (к товару, к работам, к участнику, условия поставки);
+- требования разных позиций спецификации (пометка «поз.» в квадратных скобках): «230 В» у \
+однофазной позиции и «230 В» у трёхфазной — разные приборы.
 
 Для каждой группы укажи `keep` — номер самой полной и точной формулировки, и \
 `duplicates` — номера остальных требований группы. Требования без дубликатов не \
@@ -815,7 +833,9 @@ def _drop_exact_duplicates(
     kept: dict[tuple[str, str], ExtractedRequirement] = {}
     result: list[ExtractedRequirement] = []
     for item in items:
-        key = (item.kind, _dedup_key(item.normalized_text or item.text or ""))
+        # С позицией в ключе (15.10.2026): «Номинальное напряжение: 230 В» однофазной и
+        # трёхфазной позиции — требования к разным приборам, а не повтор.
+        key = (item.kind, _dedup_key(item.normalized_text or item.text or ""), position_key(item.position))
         if not key[1]:
             result.append(item)
             continue
@@ -847,8 +867,9 @@ def _consolidate(
         return items
     head = items[:MAX_REQUIREMENTS_TO_CONSOLIDATE]
     listing = "\n".join(
-        f"{number}. [{_KIND_SHORT_LABELS.get(item.kind, item.kind)}] "
-        f"{item.normalized_text or item.text} — «{(item.text or '')[:200]}»"
+        f"{number}. [{_KIND_SHORT_LABELS.get(item.kind, item.kind)}]"
+        + (f" [поз. {item.position.strip()}]" if (item.position or "").strip() else "")
+        + f" {item.normalized_text or item.text} — «{(item.text or '')[:200]}»"
         for number, item in enumerate(head, start=1)
     )
     try:
@@ -873,6 +894,8 @@ def _consolidate(
                 continue
             if head[number - 1].kind != head[keep - 1].kind:
                 continue  # промпт запрещает, но цена ошибки — потерянное требование
+            if position_key(head[number - 1].position) != position_key(head[keep - 1].position):
+                continue  # то же для разных позиций спецификации — требования к разным приборам
             if _is_protected(head[number - 1]) and not _same_vendor(head[number - 1], head[keep - 1]):
                 # Обозначение эталонной модели и фирменное ПО производителя не поглощаются:
                 # на живом прогоне «Модель прибора: CE207 … (или эквивалент)» ушло в «Тип
@@ -905,15 +928,29 @@ def _replace_requirements(
 
     seen: set[str] = set(kept_texts)
     known_groups = set(CHARACTERISTIC_GROUPS)
+    # Одна позиция — одна подпись: фрагменты называют её по-разному («1. ВШУ с однофазным
+    # ПУ», «Позиция 1»), а матрица группирует требования по подписи. Берётся первая
+    # встреченная — обычно из спецификации, она в начале документации.
+    position_labels: dict[str, str] = {}
     for item in extracted:
         text_value = (item.text or "").strip()
         if not text_value:
             outcome.requirements_skipped += 1
             continue
 
+        # Позиция — только у требований к товару: работы и участник от прибора не зависят.
+        position = None
+        if (item.kind if item.kind in _KIND_VALUES else RequirementKind.PRODUCT.value) == RequirementKind.PRODUCT.value:
+            position_id = position_key(item.position)
+            if position_id:
+                position = position_labels.setdefault(position_id, " ".join(item.position.split())[:200])
+
         # Куски документа идут с перекрытием (см. `chunk_text`), поэтому одно и то же
-        # требование приходит из соседних кусков дважды.
+        # требование приходит из соседних кусков дважды. Одна и та же строка таблицы у двух
+        # позиций («Класс точности 1») — не повтор.
         key = _dedup_key(text_value)
+        if position is not None and key not in kept_texts:
+            key = f"{key}\x00{position_key(position)}"
         if key in seen:
             continue
         seen.add(key)
@@ -958,6 +995,7 @@ def _replace_requirements(
                 if kind == RequirementKind.PRODUCT.value and group in known_groups
                 else None,
                 parameter_no=parameter_no,
+                position=position,
             )
         )
         outcome.requirements_saved += 1

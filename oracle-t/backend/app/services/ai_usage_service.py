@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import io
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -23,6 +24,9 @@ from decimal import Decimal
 from typing import Any
 
 from loguru import logger
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from sqlalchemy import Date, case, cast, func, select
 from sqlalchemy.orm import Session
 
@@ -83,6 +87,8 @@ _SUM_FIELDS = (
     "cached_tokens",
     "failed",
     "duration_ms",
+    "success_duration_ms",
+    "success_completion_tokens",
 )
 
 
@@ -249,6 +255,14 @@ def _totals_columns():
         func.sum(AiUsageRecord.cost).label("cost"),
         func.coalesce(func.sum(case((AiUsageRecord.status != "success", 1), else_=0)), 0).label("failed"),
         func.coalesce(func.sum(AiUsageRecord.duration_ms), 0).label("duration_ms"),
+        # Время и ответ только успешных обращений — для среднего времени ответа и скорости
+        # вывода: сбой возвращается за доли секунды без единого токена и тянул бы обе вниз.
+        func.coalesce(
+            func.sum(case((AiUsageRecord.status == "success", AiUsageRecord.duration_ms), else_=0)), 0
+        ).label("success_duration_ms"),
+        func.coalesce(
+            func.sum(case((AiUsageRecord.status == "success", AiUsageRecord.completion_tokens), else_=0)), 0
+        ).label("success_completion_tokens"),
     )
 
 
@@ -267,6 +281,8 @@ def _row_totals(row) -> dict:
         "cost": float(row.cost) if row.cost is not None else None,
         "failed": int(row.failed or 0),
         "duration_ms": int(row.duration_ms or 0),
+        "success_duration_ms": int(row.success_duration_ms or 0),
+        "success_completion_tokens": int(row.success_completion_tokens or 0),
     }
 
 
@@ -616,3 +632,318 @@ def recent_calls(
 def default_period(days: int = 30) -> tuple[date, date]:
     today = datetime.now(MOSCOW_TZ).date()
     return today - timedelta(days=days - 1), today
+
+
+
+# Выгрузка «Детализации ИИ» в Excel (15.10.2026). Руководству нужен расход в таблице — сводить
+# в своих отчётах и сравнивать модели по скорости и кэшу. Сначала был один CSV с семью
+# таблицами подряд — по нему было не сориентироваться, поэтому теперь лист на раздел: шапка
+# закреплена, фильтры включены, числа — числами. Обращений за год — десятки тысяч; потолок
+# защищает сервер от огромного файла, а упершуюся выгрузку видно на листе «Итог».
+EXPORT_CALLS_LIMIT = 50_000
+EXPORT_TENDERS_LIMIT = 5_000
+
+_INT = "#,##0"
+_DEC1 = "#,##0.0"
+_DEC2 = "#,##0.00"
+_PCT = "0.0%"
+_RUB = "#,##0.00 ₽"
+_DATE = "DD.MM.YYYY"
+_DATETIME = "DD.MM.YYYY HH:MM:SS"
+
+_HEADER_FILL = PatternFill("solid", fgColor="FF1F2937")
+_HEADER_FONT = Font(bold=True, color="FFFFFFFF")
+_BOLD = Font(bold=True)
+_MUTED = Font(color="FF6B7280")
+
+# Метрики, общие для листов-срезов: (заголовок, формат, значение по строке сводки).
+_METRICS: list[tuple[str, str, Any]] = [
+    ("Обращений", _INT, lambda r: r["calls"]),
+    ("Сбоев", _INT, lambda r: r["failed"]),
+    ("Доля сбоев", _PCT, lambda r: r["failed"] / r["calls"] if r["calls"] else None),
+    ("Входящие токены", _INT, lambda r: r["prompt_tokens"]),
+    ("Исходящие токены", _INT, lambda r: r["completion_tokens"]),
+    ("Всего токенов", _INT, lambda r: r["total_tokens"]),
+    ("Из кэша", _INT, lambda r: r["cached_tokens"]),
+    ("Доля кэша", _PCT, lambda r: r["cached_tokens"] / r["prompt_tokens"] if r["prompt_tokens"] else None),
+    (
+        "Ср. время ответа, с",
+        _DEC2,
+        lambda r: (r["success_duration_ms"] / 1000 / (r["calls"] - r["failed"]))
+        if r["calls"] > r["failed"]
+        else None,
+    ),
+    ("Скорость вывода, ток/с", _DEC1, lambda r: _speed(r["success_completion_tokens"], r["success_duration_ms"])),
+    ("Стоимость", _RUB, lambda r: r["cost"]),
+]
+
+_NOTES = [
+    ("Входящие токены", "запрос к модели: промпт, документы, карточка закупки"),
+    ("Исходящие токены", "ответ модели"),
+    ("Из кэша", "входящие токены, которые провайдер взял из кэша (у Claude и DeepSeek в разы дешевле)"),
+    ("Доля кэша", "из кэша ÷ входящие"),
+    ("Ср. время ответа", "по успешным обращениям: сбой возвращается мгновенно и исказил бы среднее"),
+    ("Скорость вывода", "исходящие токены ÷ время успешных ответов; время включает чтение запроса"),
+    ("Сбоев", "ошибки сети, лимиты, ответы не по схеме — они тоже расходуют токены"),
+    ("Стоимость", "только если её вернул провайдер (шлюз RouterAI), иначе пусто"),
+]
+
+
+def _speed(completion_tokens: int, duration_ms: int) -> float | None:
+    return completion_tokens / (duration_ms / 1000) if duration_ms > 0 else None
+
+
+def _table_sheet(
+    workbook: Workbook,
+    title: str,
+    columns: list[tuple[str, str | None, int]],
+    rows: list[list[Any]],
+) -> None:
+    """Лист-таблица: шапка в первой строке, закреплены шапка и первая колонка, фильтры.
+    `columns` — (заголовок, числовой формат или None, ширина)."""
+
+    sheet = workbook.create_sheet(title)
+    sheet.append([name for name, _, _ in columns])
+    for cell in sheet[1]:
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+    sheet.row_dimensions[1].height = 32
+    for row in rows:
+        sheet.append(row)
+    for index, (_, number_format, width) in enumerate(columns, start=1):
+        letter = get_column_letter(index)
+        sheet.column_dimensions[letter].width = width
+        if number_format:
+            for (cell,) in sheet.iter_rows(min_row=2, min_col=index, max_col=index):
+                cell.number_format = number_format
+    sheet.freeze_panes = "B2"
+    if rows:
+        sheet.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{len(rows) + 1}"
+
+
+def _slice_sheet(workbook, title, head, items, extra=()) -> None:
+    """Лист среза сводки: свои колонки слева (`head` — (заголовок, ширина, значение)),
+    общие метрики, затем `extra` — (заголовок, формат, значение) только этого среза."""
+
+    columns = [(name, None, width) for name, width, _ in head]
+    columns += [(name, fmt, 14) for name, fmt, _ in _METRICS]
+    columns += [(name, fmt, 14) for name, fmt, _ in extra]
+    rows = [
+        [value(item) for _, _, value in head]
+        + [value(item) for _, _, value in _METRICS]
+        + [value(item) for _, _, value in extra]
+        for item in items
+    ]
+    _table_sheet(workbook, title, columns, rows)
+
+
+def _naive_msk(moment: datetime) -> datetime:
+    # Excel не знает часовых поясов: время пишем московским, как его видит пользователь.
+    return moment.astimezone(MOSCOW_TZ).replace(tzinfo=None)
+
+
+def build_usage_xlsx(
+    db: Session, *, date_from: date, date_to: date, provider: str | None = None
+) -> tuple[bytes, str, int]:
+    """Excel со всей детализацией за период: «Итог» (период, итоговые числа, как читать),
+    затем по листу на срез — дни, модели, шаги разбора, виды разбора, пользователи,
+    закупки — и «Обращения», по строке на каждое. У каждой строки — входящие и исходящие
+    токены, кэш, время ответа и скорость вывода. Возвращает содержимое, имя файла и число
+    обращений в файле."""
+
+    summary = usage_summary(db, date_from=date_from, date_to=date_to, provider=provider)
+    totals = summary["totals"]
+    conditions = _conditions(date_from, date_to, provider)
+
+    records = list(
+        db.scalars(
+            select(AiUsageRecord)
+            .where(*conditions)
+            .order_by(AiUsageRecord.created_at.desc())
+            .limit(EXPORT_CALLS_LIMIT)
+        )
+    )
+    # Все разобранные закупки, а не 15 самых дорогих, как на экране: в файле их можно
+    # отфильтровать и отсортировать самому.
+    tender_rows = db.execute(
+        select(
+            AiUsageRecord.tender_id,
+            *_totals_columns(),
+            func.max(AiUsageRecord.created_at).label("last_at"),
+        )
+        .where(*conditions, AiUsageRecord.tender_id.is_not(None))
+        .group_by(AiUsageRecord.tender_id)
+        .order_by(_TOTAL_TOKENS.desc())
+        .limit(EXPORT_TENDERS_LIMIT)
+    ).all()
+    tenders = _tenders(
+        db,
+        {row.tender_id for row in tender_rows} | {r.tender_id for r in records if r.tender_id},
+    )
+    user_names = _user_names(db, {record.user_id for record in records if record.user_id})
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Итог"
+    sheet.column_dimensions["A"].width = 34
+    sheet.column_dimensions["B"].width = 26
+    sheet.column_dimensions["C"].width = 80
+    sheet.append(["Детализация ИИ"])
+    sheet["A1"].font = Font(bold=True, size=14)
+    sheet.append([])
+    info: list[tuple[str, Any, str | None]] = [
+        ("Период (МСК)", f"{date_from:%d.%m.%Y} — {date_to:%d.%m.%Y}", None),
+        ("Модели", PROVIDER_LABELS.get(provider, provider) if provider else "все", None),
+        ("Сформировано", f"{datetime.now(MOSCOW_TZ):%d.%m.%Y %H:%M} МСК", None),
+        ("Закупок разобрано", totals["tenders"], _INT),
+    ]
+    info += [(name, value(totals), fmt) for name, fmt, value in _METRICS]
+    info.append(("Токены оценены по длине текста", totals["estimated_calls"], _INT))
+    info.append(
+        (
+            "Обращений на листе «Обращения»",
+            len(records),
+            _INT,
+        )
+    )
+    for name, value, fmt in info:
+        sheet.append([name, value])
+        sheet.cell(sheet.max_row, 1).font = _BOLD
+        cell = sheet.cell(sheet.max_row, 2)
+        cell.alignment = Alignment(horizontal="right")
+        if fmt:
+            cell.number_format = fmt
+    if len(records) < totals["calls"]:
+        sheet.cell(sheet.max_row, 3, f"из {totals['calls']:,} — в файл попали последние".replace(",", " "))
+    sheet.append([])
+    sheet.append(["Как читать"])
+    sheet.cell(sheet.max_row, 1).font = _BOLD
+    for name, text in _NOTES:
+        sheet.append([name, None, text])
+        sheet.cell(sheet.max_row, 1).font = _MUTED
+        sheet.cell(sheet.max_row, 3).font = _MUTED
+    sheet.append([])
+    sheet.append(["Листы: По дням · Модели · Шаги разбора · Виды разбора · Пользователи · Закупки · Обращения"])
+    sheet.cell(sheet.max_row, 1).font = _MUTED
+
+    _slice_sheet(
+        workbook,
+        "По дням",
+        [("День", 12, lambda r: date.fromisoformat(r["day"]))],
+        summary["by_day"],
+    )
+    for (cell,) in workbook["По дням"].iter_rows(min_row=2, max_col=1):
+        cell.number_format = _DATE
+    _slice_sheet(
+        workbook,
+        "Модели",
+        [("Провайдер", 14, lambda r: r["provider_label"]), ("Модель", 34, lambda r: r["model"] or "")],
+        summary["by_model"],
+        [
+            ("Символов на токен", _DEC2, lambda r: r["chars_per_token"]),
+            ("Макс. запрос, токенов", _INT, lambda r: r["max_prompt_tokens"]),
+        ],
+    )
+    _slice_sheet(
+        workbook,
+        "Шаги разбора",
+        [("Шаг", 30, lambda r: r["label"])],
+        summary["by_operation"],
+        [
+            ("Ср. запрос, токенов", _INT, lambda r: r["avg_prompt_tokens"]),
+            ("Макс. запрос, токенов", _INT, lambda r: r["max_prompt_tokens"]),
+        ],
+    )
+    _slice_sheet(
+        workbook,
+        "Виды разбора",
+        [("Вид", 38, lambda r: r["label"])],
+        summary["by_job_kind"],
+        [
+            ("Закупок", _INT, lambda r: r["tenders"]),
+            ("Токенов на закупку", _INT, lambda r: r["avg_tokens_per_tender"]),
+        ],
+    )
+    _slice_sheet(workbook, "Пользователи", [("Пользователь", 30, lambda r: r["label"])], summary["by_user"])
+
+    tender_items = []
+    for row in tender_rows:
+        tender = tenders.get(row.tender_id)
+        tender_items.append(
+            {
+                "external_id": tender.external_id if tender else "",
+                "title": tender.title if tender else "Закупка удалена",
+                "last_at": _naive_msk(row.last_at),
+                **_row_totals(row),
+            }
+        )
+    _slice_sheet(
+        workbook,
+        "Закупки",
+        [
+            ("Номер", 22, lambda r: r["external_id"]),
+            ("Закупка", 60, lambda r: r["title"]),
+            ("Последний разбор", 18, lambda r: r["last_at"]),
+        ],
+        tender_items,
+    )
+    for (cell,) in workbook["Закупки"].iter_rows(min_row=2, min_col=3, max_col=3):
+        cell.number_format = _DATETIME
+
+    call_rows = []
+    for record in records:
+        tender = tenders.get(record.tender_id) if record.tender_id else None
+        prompt = record.prompt_tokens
+        call_rows.append(
+            [
+                _naive_msk(record.created_at),
+                PROVIDER_LABELS.get(record.provider, record.provider),
+                record.model or "",
+                OPERATION_LABELS.get(record.operation, record.operation),
+                JOB_KIND_LABELS.get(record.job_kind, record.job_kind) if record.job_kind else NO_JOB_LABEL,
+                tender.external_id if tender else ("удалена" if record.tender_id else ""),
+                user_names.get(record.user_id, "Удалённый пользователь") if record.user_id else "Система",
+                STATUS_LABELS.get(record.status, record.status),
+                prompt,
+                record.completion_tokens,
+                prompt + record.completion_tokens,
+                record.cached_tokens,
+                record.cached_tokens / prompt if prompt else None,
+                record.duration_ms / 1000,
+                _speed(record.completion_tokens, record.duration_ms) if record.status == "success" else None,
+                "да" if record.tokens_estimated else "",
+                float(record.cost) if record.cost is not None else None,
+                record.error or "",
+            ]
+        )
+    _table_sheet(
+        workbook,
+        "Обращения",
+        [
+            ("Время (МСК)", _DATETIME, 19),
+            ("Провайдер", None, 12),
+            ("Модель", None, 30),
+            ("Шаг", None, 28),
+            ("Разбор", None, 26),
+            ("Закупка", None, 22),
+            ("Пользователь", None, 22),
+            ("Статус", None, 16),
+            ("Входящие токены", _INT, 12),
+            ("Исходящие токены", _INT, 12),
+            ("Всего токенов", _INT, 12),
+            ("Из кэша", _INT, 11),
+            ("Доля кэша", _PCT, 10),
+            ("Время, с", _DEC2, 10),
+            ("Скорость вывода, ток/с", _DEC1, 12),
+            ("Токены оценены", None, 10),
+            ("Стоимость", "#,##0.0000 ₽", 12),
+            ("Ошибка", None, 60),
+        ],
+        call_rows,
+    )
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    file_name = f"sova_ai_usage_{date_from:%Y-%m-%d}_{date_to:%Y-%m-%d}.xlsx"
+    return buffer.getvalue(), file_name, len(records)

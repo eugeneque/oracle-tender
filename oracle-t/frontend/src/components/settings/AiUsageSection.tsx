@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronRight, RefreshCw } from "lucide-react";
+import { ChevronRight, Download, RefreshCw } from "lucide-react";
 
-import { ApiError, api } from "../../api/client";
+import { ApiError, api, downloadFile } from "../../api/client";
 import type { AiUsageCall, AiUsageGroup, AiUsageSummary, AiUsageTotals, AiUserUsage } from "../../api/types";
 import { formatDateTime } from "../../utils/format";
 import { SettingsGroup, SettingsNotice, SettingsPanel, secondaryButtonClass } from "./ui";
@@ -14,7 +14,8 @@ import { SettingsGroup, SettingsNotice, SettingsPanel, secondaryButtonClass } fr
  * расходилась в разы, а провайдеры возвращают точный счётчик в каждом ответе.
  *
  * Только администратору (вкладка страницы «Интеграции»). Данные — `GET /ai-usage/summary`
- * и `GET /ai-usage/calls`.
+ * и `GET /ai-usage/calls`; «Excel» (15.10.2026) — `GET /ai-usage/export.xlsx` за тот же период
+ * и модель: лист на раздел сводки и каждое обращение со скоростью вывода и долей кэша.
  */
 
 const PERIODS = [
@@ -59,6 +60,7 @@ export function AiUsageSection() {
   const [callsTotal, setCallsTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ date_from: moscowDate(days - 1), date_to: moscowDate(0) });
@@ -100,6 +102,18 @@ export function AiUsageSection() {
     }
   };
 
+  const exportCsv = async () => {
+    setIsExporting(true);
+    setError(null);
+    try {
+      await downloadFile(`/ai-usage/export.xlsx?${query}`, "sova_ai_usage.xlsx");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось выгрузить детализацию");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   return (
     <SettingsPanel
       title="Детализация ИИ"
@@ -134,6 +148,15 @@ export function AiUsageSection() {
           <button onClick={() => void load()} disabled={isLoading} className={secondaryButtonClass}>
             <RefreshCw size={13} className={isLoading ? "animate-spin" : ""} />
             Обновить
+          </button>
+          <button
+            onClick={() => void exportCsv()}
+            disabled={isExporting || !summary || summary.totals.calls === 0}
+            title="Лист на раздел и каждое обращение: токены на входе и выходе, кэш, время ответа, скорость вывода"
+            className={secondaryButtonClass}
+          >
+            <Download size={13} className={isExporting ? "animate-pulse" : ""} />
+            Excel
           </button>
         </>
       }

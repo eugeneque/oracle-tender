@@ -151,6 +151,11 @@ class Requirement(Base):
     vendor_exclusive: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # Позиция спецификации, к которой относится требование («1. ВШУ с однофазным ПУ»), как
+    # её назвала модель извлечения; NULL — общее для всех позиций или позиция одна. Матрица
+    # сверяет требования позиции только с моделями её типа (15.10.2026, раздел 61
+    # ARCHITECTURE.md): иначе «400 В» трёхфазной позиции сравнивалось с однофазной моделью.
+    position: Mapped[str | None] = mapped_column(String(200), nullable=True)
     verified_by_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
