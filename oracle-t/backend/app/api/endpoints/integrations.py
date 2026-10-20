@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
+from app.models.tender import Tender
 from app.models.user import User
 from app.schemas.integration import ApiClientCreate, ApiClientCreated, ApiClientOut
 from app.schemas.integration_setting import (
@@ -14,13 +15,17 @@ from app.schemas.integration_setting import (
     AiProviderKey,
     AiProviderStatus,
     AiProviderSwitch,
+    BitrixAiPreview,
+    BitrixAiRequestOut,
+    BitrixAiSendRequest,
+    BitrixAiSettingsOut,
+    BitrixAiSettingsUpdate,
+    BitrixTenderState,
     Bitrix24CheckResult,
     Bitrix24DealPreview,
     Bitrix24PushResult,
     Bitrix24SettingsOut,
     Bitrix24SettingsUpdate,
-    GigaChatSettingsOut,
-    GigaChatSettingsUpdate,
     RouterAiSettingsOut,
     RouterAiSettingsUpdate,
     RusprofileSettingsOut,
@@ -32,6 +37,7 @@ from app.schemas.integration_setting import (
 from app.services import (
     ai_provider_service,
     api_client_service,
+    bitrix_ai_service,
     bitrix_deal_service,
     rusprofile_service,
     yandex_ai_service,
@@ -162,32 +168,6 @@ def test_routerai_connection(
     return ai_provider_service.test_routerai_connection(db, actor=admin)
 
 
-@router.get("/gigachat", response_model=GigaChatSettingsOut)
-def get_gigachat_settings(
-    db: Session = Depends(get_db), _admin: User = Depends(require_admin)
-) -> GigaChatSettingsOut:
-    return ai_provider_service.get_gigachat_settings_out(db)
-
-
-@router.patch("/gigachat", response_model=GigaChatSettingsOut)
-def update_gigachat_settings(
-    payload: GigaChatSettingsUpdate,
-    db: Session = Depends(get_db),
-    admin: User = Depends(require_admin),
-) -> GigaChatSettingsOut:
-    try:
-        return ai_provider_service.update_gigachat_settings(db, payload, actor=admin)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-
-@router.post("/gigachat/test", response_model=YandexConnectionTestResult)
-def test_gigachat_connection(
-    db: Session = Depends(get_db), admin: User = Depends(require_admin)
-) -> YandexConnectionTestResult:
-    return ai_provider_service.test_gigachat_connection(db, actor=admin)
-
-
 @router.get("/rusprofile", response_model=RusprofileSettingsOut)
 def get_rusprofile_settings(
     db: Session = Depends(get_db), _admin: User = Depends(require_admin)
@@ -305,6 +285,127 @@ def push_bitrix24_test_deal(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except BitrixError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
+@router.get("/bitrix24/ai", response_model=BitrixAiSettingsOut)
+def get_bitrix24_ai_settings(
+    db: Session = Depends(get_db), _admin: User = Depends(require_admin)
+) -> BitrixAiSettingsOut:
+    """Обработчик приложения «ИИ анализ и решения» на портале (20.10.2026): адрес receive.php,
+    признак секрета HMAC и выключатель отправки пакетов."""
+
+    return BitrixAiSettingsOut(**bitrix_ai_service.settings_out(db))
+
+
+@router.patch("/bitrix24/ai", response_model=BitrixAiSettingsOut)
+def update_bitrix24_ai_settings(
+    payload: BitrixAiSettingsUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> BitrixAiSettingsOut:
+    changes = payload.model_dump(include=payload.model_fields_set)
+    try:
+        return BitrixAiSettingsOut(**bitrix_ai_service.update_settings(db, changes, actor=admin))
+    except bitrix_ai_service.BitrixAiError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/bitrix24/ai/preview", response_model=BitrixAiPreview)
+def preview_bitrix24_ai_package(
+    tender: str,
+    full_snapshot: bool = False,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+) -> BitrixAiPreview:
+    """Пакет, который уйдёт на портал, — без отправки и без подписи."""
+
+    try:
+        found = bitrix_ai_service.resolve_tender(db, tender)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return BitrixAiPreview(**bitrix_ai_service.preview(db, found, full_snapshot=full_snapshot))
+
+
+@router.post("/bitrix24/ai/send", response_model=BitrixAiRequestOut)
+def send_bitrix24_ai_package(
+    payload: BitrixAiSendRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> BitrixAiRequestOut:
+    """Подписывает и отправляет пакет. Ответ портала (в том числе отказ) возвращается записью
+    журнала: HTTP-код и тело ответа нужны администратору Bitrix24 для разбора."""
+
+    try:
+        found = bitrix_ai_service.resolve_tender(db, payload.tender)
+        return BitrixAiRequestOut(
+            **bitrix_ai_service.send(db, found, actor=admin, full_snapshot=payload.full_snapshot)
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except bitrix_ai_service.BitrixAiPushDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except bitrix_ai_service.BitrixAiError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/bitrix24/ai/requests/{request_pk}/retry", response_model=BitrixAiRequestOut)
+def retry_bitrix24_ai_package(
+    request_pk: uuid.UUID,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> BitrixAiRequestOut:
+    """Повтор технически не принятого пакета тем же request_id и теми же байтами."""
+
+    try:
+        return BitrixAiRequestOut(**bitrix_ai_service.retry(db, request_pk, actor=admin))
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except bitrix_ai_service.BitrixAiPushDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except bitrix_ai_service.BitrixAiError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/bitrix24/tenders/{tender_id}", response_model=BitrixTenderState)
+def get_bitrix24_tender_state(
+    tender_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+) -> BitrixTenderState:
+    """Состояние кнопки «Загрузить в Битрикс»: можно ли выгрузить и куда уже выгружено."""
+
+    tender = db.get(Tender, tender_id)
+    if tender is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Тендер не найден")
+    return BitrixTenderState(**bitrix_ai_service.tender_state(db, tender))
+
+
+@router.post("/bitrix24/tenders/{tender_id}", response_model=BitrixTenderState)
+def upload_bitrix24_tender(
+    tender_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> BitrixTenderState:
+    """Выгрузка проверенной закупки с анализом в сделку Bitrix24 (20.10.2026). Доступна
+    любому пользователю: тендер в CRM передаёт тот, кто его проверил. Отказ портала не
+    ошибка эндпоинта — он виден в `last_request` с кодом и текстом ответа."""
+
+    tender = db.get(Tender, tender_id)
+    if tender is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Тендер не найден")
+    try:
+        return BitrixTenderState(**bitrix_ai_service.upload_from_card(db, tender, actor=user))
+    except bitrix_ai_service.BitrixAiPushDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except bitrix_ai_service.BitrixAiError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/bitrix24/ai/requests", response_model=list[BitrixAiRequestOut])
+def list_bitrix24_ai_requests(
+    db: Session = Depends(get_db), _admin: User = Depends(require_admin)
+) -> list[BitrixAiRequestOut]:
+    return [BitrixAiRequestOut(**item) for item in bitrix_ai_service.list_requests(db)]
 
 
 @router.get("/api-clients", response_model=list[ApiClientOut])

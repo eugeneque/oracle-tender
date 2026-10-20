@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, Clock, PlayCircle } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
-import type { AiProviderKey, GigaChatSettings, RouterAiSettings } from "../../api/types";
+import type { AiProviderKey, RouterAiSettings } from "../../api/types";
 import {
   chooseDefaultAiProvider,
   chooseMyAiProvider,
@@ -15,9 +15,9 @@ import { AI_PROVIDER_ACCENT, AI_PROVIDERS } from "../../utils/aiProviders";
 import { AiProviderIcon } from "../AiProviderIcon";
 
 /**
- * Переключатель модели ИИ и настройки Claude через RouterAI (18.09.2026).
+ * Переключатель модели ИИ и настройки моделей через RouterAI (18.09.2026).
  *
- * Выбор модели — персональный (просьба заказчика): один пользователь работает с Claude,
+ * Выбор модели — персональный (просьба заказчика): один пользователь работает с DeepSeek,
  * другой с YandexGPT, и смена у одного никого больше не касается. Тот же переключатель в
  * двух ролях (`scope`):
  * - `me` — своя модель (учётная запись, карточка тендера): все запросы этого пользователя
@@ -154,7 +154,7 @@ export function AiProviderSwitcher({ scope }: { scope: "me" | "default" }) {
  * Карточка провайдера — правая половина раздела «Модели ИИ» (редизайн 08.10.2026): шапка со
  * знаком, подписью и статусом, под ней форма ключей. Подсвечивается в цвете провайдера, когда
  * он — системная модель по умолчанию. `providers` — знаки в шапке: у RouterAI их два, один
- * ключ обслуживает и Claude, и DeepSeek.
+ * ключ обслуживает и DeepSeek, и Qwen.
  */
 export function ProviderCard({
   provider,
@@ -219,8 +219,8 @@ export function RouterAiCard() {
   const status = useAiProvider();
   const [settings, setSettings] = useState<RouterAiSettings | null>(null);
   const [apiKeyInput, setApiKeyInput] = useState("");
-  const [modelInput, setModelInput] = useState("");
   const [deepseekModelInput, setDeepseekModelInput] = useState("");
+  const [qwenModelInput, setQwenModelInput] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -234,8 +234,8 @@ export function RouterAiCard() {
       .get<RouterAiSettings>("/integrations/routerai")
       .then((data) => {
         setSettings(data);
-        setModelInput(data.model);
         setDeepseekModelInput(data.deepseek_model);
+        setQwenModelInput(data.qwen_model);
       })
       .catch((err) =>
         setError(
@@ -252,9 +252,9 @@ export function RouterAiCard() {
     setIsSaving(true);
     try {
       // Ключ уходит только если введён заново — PATCH-семантика, как у Yandex.
-      const payload: { model: string; deepseek_model: string; api_key?: string } = {
-        model: modelInput,
+      const payload: { deepseek_model: string; qwen_model: string; api_key?: string } = {
         deepseek_model: deepseekModelInput,
+        qwen_model: qwenModelInput,
       };
       if (apiKeyInput !== "") payload.api_key = apiKeyInput;
       const data = await api.patch<RouterAiSettings>(
@@ -262,8 +262,8 @@ export function RouterAiCard() {
         payload,
       );
       setSettings(data);
-      setModelInput(data.model);
       setDeepseekModelInput(data.deepseek_model);
+      setQwenModelInput(data.qwen_model);
       setApiKeyInput("");
       // Подпись модели и список настроенных провайдеров в переключателях — из свежего статуса.
       void refreshAiProvider();
@@ -299,18 +299,18 @@ export function RouterAiCard() {
     }
   };
 
-  // Один ключ RouterAI обслуживает две модели — Claude и DeepSeek (28.09.2026). Карточка
-  // подсвечивается цветом той из них, что выбрана по умолчанию.
+  // Один ключ RouterAI обслуживает две модели — DeepSeek и Qwen (20.10.2026, вместо Claude).
+  // Карточка подсвечивается цветом той из них, что выбрана по умолчанию.
   const defaultRouterAi =
-    status?.default_provider === "claude" || status?.default_provider === "deepseek"
+    status?.default_provider === "deepseek" || status?.default_provider === "qwen"
       ? status.default_provider
       : null;
 
   return (
     <ProviderCard
-      provider={defaultRouterAi ?? "claude"}
-      providers={["claude", "deepseek"]}
-      title="RouterAI · Claude и DeepSeek"
+      provider={defaultRouterAi ?? "deepseek"}
+      providers={["deepseek", "qwen"]}
+      title="RouterAI · DeepSeek и Qwen"
       subtitle="Один ключ RouterAI обслуживает обе модели"
       isActive={defaultRouterAi !== null}
       isConfigured={settings?.is_configured ?? false}
@@ -329,20 +329,10 @@ export function RouterAiCard() {
             onChange={(e) => setApiKeyInput(e.target.value)}
             placeholder={settings?.api_key_masked ?? "sk-…"}
             autoComplete="off"
-            className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-orange-400/50 focus:outline-none"
+            className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-blue-400/50 focus:outline-none"
           />
         </label>
         <label className="block text-xs text-zinc-400">
-          Модель Claude
-          <input
-            type="text"
-            value={modelInput}
-            onChange={(e) => setModelInput(e.target.value)}
-            placeholder="anthropic/claude-opus-5"
-            className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-orange-400/50 focus:outline-none"
-          />
-        </label>
-        <label className="block text-xs text-zinc-400 sm:col-start-2">
           Модель DeepSeek
           <input
             type="text"
@@ -352,6 +342,16 @@ export function RouterAiCard() {
             className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-blue-400/50 focus:outline-none"
           />
         </label>
+        <label className="block text-xs text-zinc-400 sm:col-start-2">
+          Модель Qwen
+          <input
+            type="text"
+            value={qwenModelInput}
+            onChange={(e) => setQwenModelInput(e.target.value)}
+            placeholder="qwen/qwen3.8-27b"
+            className="mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-400/50 focus:outline-none"
+          />
+        </label>
       </div>
       <p className="mt-2 text-xs text-zinc-500">
         {settings?.updated_at
@@ -363,179 +363,13 @@ export function RouterAiCard() {
         <button
           onClick={() => void handleSave()}
           disabled={isSaving}
-          className="rounded-lg bg-orange-500 px-3.5 py-2 text-xs font-medium text-snow hover:bg-orange-400 disabled:opacity-50"
+          className="rounded-lg bg-blue-500 px-3.5 py-2 text-xs font-medium text-snow hover:bg-blue-400 disabled:opacity-50"
         >
           {isSaving ? "Сохраняю…" : "Сохранить"}
         </button>
         <button
           onClick={() => void handleTest()}
           disabled={isTesting}
-          className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3.5 py-2 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-        >
-          <PlayCircle size={13} />
-          {isTesting ? "Проверяю…" : "Проверить подключение"}
-        </button>
-      </div>
-
-      {testResult && (
-        <div
-          className={`mt-4 rounded-lg border px-4 py-2.5 text-sm ${
-            testResult.success
-              ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
-              : "border-red-500/20 bg-red-500/10 text-red-400"
-          }`}
-        >
-          <p className="whitespace-pre-line">{testResult.message}</p>
-        </div>
-      )}
-    </ProviderCard>
-  );
-}
-
-/** Версии API GigaChat — по договору со Сбером (физлицо, юрлицо по предоплате, по постоплате). */
-const GIGACHAT_SCOPES: { value: string; label: string }[] = [
-  { value: "GIGACHAT_API_B2B", label: "Юрлицо, предоплата (B2B)" },
-  { value: "GIGACHAT_API_CORP", label: "Юрлицо, постоплата (CORP)" },
-  { value: "GIGACHAT_API_PERS", label: "Физлицо (PERS)" },
-];
-
-/**
- * GigaChat (Сбер, 08.10.2026) — задел: ключ у заказчика ещё оформляется. Карточка уже здесь,
- * чтобы после получения ключа осталось вписать его и нажать «Проверить подключение».
- * Ключ авторизации — из личного кабинета Сбера (Base64 от Client ID:Client Secret).
- */
-export function GigaChatCard() {
-  const status = useAiProvider();
-  const [settings, setSettings] = useState<GigaChatSettings | null>(null);
-  const [authKeyInput, setAuthKeyInput] = useState("");
-  const [scopeInput, setScopeInput] = useState("GIGACHAT_API_B2B");
-  const [modelInput, setModelInput] = useState("");
-  const [isSaving, setIsSaving] = useState(false);
-  const [isTesting, setIsTesting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
-
-  const apply = (data: GigaChatSettings) => {
-    setSettings(data);
-    setScopeInput(data.scope);
-    setModelInput(data.model);
-  };
-
-  useEffect(() => {
-    api
-      .get<GigaChatSettings>("/integrations/gigachat")
-      .then(apply)
-      .catch((err) =>
-        setError(err instanceof ApiError ? err.message : "Не удалось загрузить настройки GigaChat"),
-      );
-  }, []);
-
-  const handleSave = async () => {
-    setError(null);
-    setTestResult(null);
-    setIsSaving(true);
-    try {
-      // Ключ уходит только если введён заново — PATCH-семантика, как у RouterAI.
-      const payload: { scope: string; model: string; auth_key?: string } = {
-        scope: scopeInput,
-        model: modelInput,
-      };
-      if (authKeyInput !== "") payload.auth_key = authKeyInput;
-      apply(await api.patch<GigaChatSettings>("/integrations/gigachat", payload));
-      setAuthKeyInput("");
-      void refreshAiProvider();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Не удалось сохранить настройки");
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleTest = async () => {
-    setError(null);
-    setTestResult(null);
-    setIsTesting(true);
-    try {
-      setTestResult(
-        await api.post<{ success: boolean; message: string }>("/integrations/gigachat/test"),
-      );
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Не удалось выполнить проверку подключения");
-    } finally {
-      setIsTesting(false);
-    }
-  };
-
-  const inputClass =
-    "mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/50 focus:outline-none";
-
-  return (
-    <ProviderCard
-      provider="gigachat"
-      title="GigaChat · Сбер"
-      subtitle="Ключ авторизации из личного кабинета Сбера"
-      isActive={status?.default_provider === "gigachat"}
-      isConfigured={settings?.is_configured ?? false}
-    >
-      {error && (
-        <div className="mt-3 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
-          {error}
-        </div>
-      )}
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">
-        <label className="block text-xs text-zinc-400">
-          Ключ авторизации
-          <input
-            type="password"
-            value={authKeyInput}
-            onChange={(e) => setAuthKeyInput(e.target.value)}
-            placeholder={settings?.auth_key_masked ?? "Base64 из личного кабинета"}
-            autoComplete="off"
-            className={inputClass}
-          />
-        </label>
-        <label className="block text-xs text-zinc-400">
-          Версия API
-          <select
-            value={scopeInput}
-            onChange={(e) => setScopeInput(e.target.value)}
-            className={inputClass}
-          >
-            {GIGACHAT_SCOPES.map((item) => (
-              <option key={item.value} value={item.value}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="block text-xs text-zinc-400 sm:col-start-2">
-          Модель
-          <input
-            type="text"
-            value={modelInput}
-            onChange={(e) => setModelInput(e.target.value)}
-            placeholder="GigaChat-2-Max"
-            className={inputClass}
-          />
-        </label>
-      </div>
-      <p className="mt-2 text-xs text-zinc-500">
-        {settings?.updated_at
-          ? `Изменено ${formatDateTime(settings.updated_at)}${settings.updated_by ? `, ${settings.updated_by}` : ""}`
-          : ""}
-      </p>
-
-      <div className="mt-4 flex items-center gap-3">
-        <button
-          onClick={() => void handleSave()}
-          disabled={isSaving}
-          className="rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-medium text-snow hover:bg-emerald-500 disabled:opacity-50"
-        >
-          {isSaving ? "Сохраняю…" : "Сохранить"}
-        </button>
-        <button
-          onClick={() => void handleTest()}
-          disabled={isTesting || !settings?.is_configured}
           className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3.5 py-2 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
         >
           <PlayCircle size={13} />
@@ -566,7 +400,7 @@ export function GigaChatCard() {
  * включения каждый вернётся к своей модели.
  *
  * С 08.10.2026 это ещё и навигация раздела «Модели ИИ»: строка выбирает, чьи ключи показать
- * справа (Claude и DeepSeek открывают общую карточку RouterAI), переключатель в строке —
+ * справа (DeepSeek и Qwen открывают общую карточку RouterAI), переключатель в строке —
  * доступность. Раньше доступность была отдельным блоком, а все карточки стояли друг под
  * другом, и страница росла вниз с каждым новым провайдером.
  */

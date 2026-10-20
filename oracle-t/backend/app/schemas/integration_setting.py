@@ -32,7 +32,8 @@ class YandexConnectionTestResult(BaseModel):
 
 # --- переключатель ИИ-провайдера и Claude через RouterAI (18.09.2026) --------------------
 
-AiProviderKey = Literal["yandex", "claude", "deepseek", "gigachat"]
+# Claude и GigaChat убраны 20.10.2026, добавлен Qwen.
+AiProviderKey = Literal["yandex", "deepseek", "qwen"]
 
 
 class AiProviderStatus(BaseModel):
@@ -100,9 +101,9 @@ class RouterAiSettingsOut(BaseModel):
 
     is_configured: bool
     api_key_masked: str | None
-    model: str
-    # Модель DeepSeek (28.09.2026) — через тот же ключ и шлюз.
     deepseek_model: str
+    # Модель Qwen (20.10.2026) — через тот же ключ и шлюз.
+    qwen_model: str
     base_url: str
     updated_at: datetime | None
     updated_by: str | None
@@ -113,31 +114,10 @@ class RouterAiSettingsUpdate(BaseModel):
     пустая строка — сброс к значению по умолчанию (для модели и адреса) или очистка (для ключа)."""
 
     api_key: str | None = None
-    model: str | None = None
     deepseek_model: str | None = None
+    qwen_model: str | None = None
     base_url: str | None = None
 
-
-class GigaChatSettingsOut(BaseModel):
-    """GigaChat (Сбер, 08.10.2026). Ключ авторизации наружу не отдаётся — только хвост."""
-
-    is_configured: bool
-    auth_key_masked: str | None
-    scope: str
-    model: str
-    base_url: str
-    updated_at: datetime | None
-    updated_by: str | None
-
-
-class GigaChatSettingsUpdate(BaseModel):
-    """PATCH-семантика, как у `RouterAiSettingsUpdate`: пустая строка — сброс к значению по
-    умолчанию (scope, модель, адрес) или очистка (ключ)."""
-
-    auth_key: str | None = None
-    scope: str | None = None
-    model: str | None = None
-    base_url: str | None = None
 
 
 # --- rusprofile.ru (18.09.2026) ----------------------------------------------------------------
@@ -253,3 +233,70 @@ class Bitrix24PushResult(BaseModel):
     created: bool
     url: str
     message: str
+
+
+# --- Bitrix24: пакеты ИИ-анализа в receive.php (20.10.2026) ------------------------------------
+
+
+class BitrixAiSettingsOut(BaseModel):
+    """Секрет HMAC не отдаётся — только признак и последние четыре знака для сверки."""
+
+    receiver_url: str | None
+    secret_set: bool
+    secret_hint: str | None
+    push_enabled: bool
+
+
+class BitrixAiSettingsUpdate(BaseModel):
+    """PATCH: пустой адрес или секрет — удаление (отправка при этом выключается)."""
+
+    receiver_url: str | None = None
+    secret: str | None = None
+    push_enabled: bool | None = None
+
+
+class BitrixAiSendRequest(BaseModel):
+    # id тендера или номер закупки, как в списке.
+    tender: str
+    full_snapshot: bool = False
+
+
+class BitrixAiPreview(BaseModel):
+    tender_id: str
+    payload: dict
+    items_count: int
+    size_bytes: int
+
+
+class BitrixAiRequestOut(BaseModel):
+    id: str
+    tender_id: str
+    tender_number: str | None
+    tender_title: str | None
+    request_id: str
+    analysis_id: str
+    deal_id_sent: int
+    full_snapshot: bool
+    items_count: int
+    http_status: int | None
+    response_body: str | None
+    accepted: bool
+    duplicate: bool
+    deal_id: int | None
+    deal_created: bool | None
+    deal_url: str | None
+    error: str | None
+    attempts: int
+    retryable: bool
+    sent_at: datetime | None
+
+
+class BitrixTenderState(BaseModel):
+    """Кнопка «Загрузить в Битрикс» на странице тендера (20.10.2026)."""
+
+    can_upload: bool
+    # Почему нельзя — показывается подсказкой у кнопки.
+    reason: str | None
+    deal_id: int | None
+    deal_url: str | None
+    last_request: BitrixAiRequestOut | None

@@ -1,9 +1,9 @@
 """Единая точка входа ИИ-модуля: `run_structured` уходит к активному провайдеру.
 
 До 18.09.2026 вызывающие сервисы импортировали `run_structured` прямо из `yandex_ai_client`.
-Теперь провайдеров три (YandexGPT, а через RouterAI — Claude и с 28.09.2026 DeepSeek; у двух
-последних один клиент, разница только в модели; с 08.10.2026 заложен GigaChat — свой клиент
-`gigachat_client`), и какой из них активен, решает
+Теперь провайдеров три (YandexGPT, а через RouterAI — DeepSeek и с 20.10.2026 Qwen вместо
+Claude; у двух последних один клиент, разница только в модели; GigaChat убран 20.10.2026),
+и какой из них активен, решает
 администратор на странице «Интеграции» (блок «Искусственный интеллект»). Сервисы-потребители (извлечение требований,
 оценка по профилю, сводка аналитики и т.д.) об этом не знают: контракт `run_structured`
 одинаков у обоих клиентов, а выбор делается здесь на каждый вызов — переключение вступает
@@ -24,13 +24,12 @@ from typing import TypeVar
 import pydantic
 from sqlalchemy.orm import Session
 
-from app.services import gigachat_client, routerai_client, yandex_ai_client
+from app.services import routerai_client, yandex_ai_client
 from app.models.log import LogLevel
 from app.models.user import User
 from app.services.ai_log_service import log_ai_event
 from app.services.ai_context import JobCancelled, current_user_id, job_started_at
 from app.services.ai_provider_service import (
-    PROVIDER_GIGACHAT,
     PROVIDER_LABELS,
     PROVIDER_YANDEX,
     ROUTERAI_PROVIDERS,
@@ -40,7 +39,6 @@ from app.services.ai_provider_service import (
     AiUnavailableError,
     disabled_since,
     get_active_provider,
-    get_gigachat_credentials,
     get_routerai_credentials,
     input_budget_chars as _input_budget_chars,
     is_provider_configured,
@@ -135,31 +133,21 @@ def _run_structured(
             "не включат на странице «Интеграции»."
         )
     called_at = datetime.now(timezone.utc)
-    if provider in ROUTERAI_PROVIDERS or provider == PROVIDER_GIGACHAT:
+    if provider in ROUTERAI_PROVIDERS:
         try:
-            if provider == PROVIDER_GIGACHAT:
-                result = gigachat_client.run_structured(
-                    db,
-                    system_prompt=system_prompt,
-                    user_text=user_text,
-                    response_model=response_model,
-                    temperature=temperature,
-                )
-            else:
-                result = routerai_client.run_structured(
-                    db,
-                    system_prompt=system_prompt,
-                    user_text=user_text,
-                    response_model=response_model,
-                    temperature=temperature,
-                    provider=provider,
-                )
+            result = routerai_client.run_structured(
+                db,
+                system_prompt=system_prompt,
+                user_text=user_text,
+                response_model=response_model,
+                temperature=temperature,
+                provider=provider,
+            )
         except AiQuotaExceededError as exc:
             # Лимит расходов ключа RouterAI исчерпан (28.09.2026: DeepSeek — системная модель,
             # и всё фоновое без автора — автозаполнение каталога, ИИ-отбор новых закупок,
             # ночная достройка — падало сотнями вызовов). Деньги сами не вернутся, повтор
-            # бессмыслен; если YandexGPT подключён и не выключен, запрос уходит в него. То же
-            # для GigaChat (08.10.2026), когда закончился пакет токенов.
+            # бессмыслен; если YandexGPT подключён и не выключен, запрос уходит в него.
             if not is_provider_configured(db, PROVIDER_YANDEX) or not is_provider_enabled(
                 db, PROVIDER_YANDEX
             ):
@@ -254,17 +242,12 @@ def _warn_quota_fallback(db: Session, provider: str, exc: Exception) -> None:
 
 
 def active_model(db: Session) -> tuple[str, str | None]:
-    """Провайдер и модель, которые обслужат текущее обращение: `("claude",
-    "anthropic/claude-opus-5")`. Пишется рядом с результатом (AI-оценка, 25.09.2026), чтобы
-    расхождение двух расчётов можно было отнести к смене модели. Модель `None` — у Claude не
+    """Провайдер и модель, которые обслужат текущее обращение: `("qwen",
+    "qwen/qwen3.8-27b")`. Пишется рядом с результатом (AI-оценка, 25.09.2026), чтобы
+    расхождение двух расчётов можно было отнести к смене модели. Модель `None` — у RouterAI не
     заполнен ключ: сам вызов тогда всё равно упадёт с понятной ошибкой."""
 
     provider = get_active_provider(db)
-    if provider == PROVIDER_GIGACHAT:
-        try:
-            return provider, get_gigachat_credentials(db)[2]
-        except AiNotConfiguredError:
-            return provider, None
     if provider in ROUTERAI_PROVIDERS:
         try:
             return provider, get_routerai_credentials(db, provider)[1]

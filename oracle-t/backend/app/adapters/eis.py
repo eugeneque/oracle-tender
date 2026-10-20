@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime
 from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
 
 import httpx
 from bs4 import BeautifulSoup
@@ -34,6 +35,8 @@ from app.adapters.base import (
 )
 from app.adapters.http_utils import DEFAULT_USER_AGENT, fetch_with_retry, resolve_verify
 from app.adapters.parsing_utils import element_text, parse_price, parse_ru_date
+
+_MSK = ZoneInfo("Europe/Moscow")
 
 BASE_URL = "https://zakupki.gov.ru"
 SEARCH_PATH = "/epz/order/extendedsearch/results.html"
@@ -178,8 +181,16 @@ class EisAdapter(SourceAdapter):
                     application_end_text = element_text(value)
                     break
             application_end_date = parse_ru_date(application_end_text)
+            # В выдаче только дата — полночь по Москве явно, а не naive (иначе смысл значения
+            # зависел бы от пояса сессии БД). Точное время ставит карточка закупки
+            # (`eis_card_dates.refine_deadlines`, 20.10.2026).
             application_end = (
-                datetime(application_end_date.year, application_end_date.month, application_end_date.day)
+                datetime(
+                    application_end_date.year,
+                    application_end_date.month,
+                    application_end_date.day,
+                    tzinfo=_MSK,
+                )
                 if application_end_date
                 else None
             )

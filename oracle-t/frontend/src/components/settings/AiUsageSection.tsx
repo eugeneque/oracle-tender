@@ -28,9 +28,8 @@ const PERIODS = [
 const PROVIDERS = [
   { key: "", label: "Все модели" },
   { key: "yandex", label: "YandexGPT" },
-  { key: "claude", label: "Claude" },
   { key: "deepseek", label: "DeepSeek" },
-  { key: "gigachat", label: "GigaChat" },
+  { key: "qwen", label: "Qwen" },
 ];
 
 const CALLS_PAGE = 50;

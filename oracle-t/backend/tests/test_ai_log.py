@@ -46,7 +46,7 @@ def test_failed_attempts_go_to_ai_log_with_model_step_and_tender(db_session, rou
     first, second = _ai_logs(db_session, tender.external_id)
     assert first.level == LogLevel.WARNING and first.result == "error"
     assert first.action == "Сбой запроса к модели"
-    assert "anthropic/claude-opus-5" in first.details
+    assert "deepseek/deepseek-v4-pro-0813" in first.details
     assert "Попытка: 1 из 3" in first.details
     assert "нет связи" in first.details
     assert second.result == "invalid" and "Попытка: 2 из 3" in second.details

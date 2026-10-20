@@ -32,8 +32,8 @@ class YandexAiStudioSettings(Base):
 
 
 class AiProviderSettings(Base):
-    """Какая модель обслуживает ИИ-модуль и учётные данные второго провайдера — Claude через
-    RouterAI (OpenAI-совместимый шлюз). Появилось 18.09.2026 по просьбе заказчика: до этого
+    """Какая модель обслуживает ИИ-модуль и учётные данные RouterAI (OpenAI-совместимый шлюз,
+    через него — DeepSeek и Qwen; до 20.10.2026 ещё Claude). Появилось 18.09.2026 по просьбе заказчика: до этого
     единственным провайдером был YandexGPT, и переключаться было не на что.
 
     `active_provider` — переключатель. Активен ровно один провайдер: все запросы генерации
@@ -49,21 +49,16 @@ class AiProviderSettings(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    # "yandex" | "claude" | "deepseek" | "gigachat" — см. PROVIDER_LABELS в app/services/ai_provider_service.py.
+    # "yandex" | "deepseek" | "qwen" — см. PROVIDER_LABELS в app/services/ai_provider_service.py.
     active_provider: Mapped[str] = mapped_column(String(20), nullable=False, default="yandex")
     routerai_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Путь до модели в терминах RouterAI («anthropic/claude-opus-5»). Настраивается, чтобы
-    # смена поколения Claude не требовала правки кода — как и `DEFAULT_MODEL` у Yandex.
-    routerai_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    # То же для DeepSeek (28.09.2026): ключ и адрес шлюза общие с Claude, модель своя.
+    # Путь до модели в терминах RouterAI («deepseek/deepseek-v4-pro-0813»). Настраивается,
+    # чтобы смена версии не требовала правки кода — как и `DEFAULT_MODEL` у Yandex. Ключ и
+    # адрес шлюза у моделей общие.
     deepseek_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Qwen (20.10.2026, вместо Claude).
+    qwen_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     routerai_base_url: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    # GigaChat (Сбер, 08.10.2026) — напрямую, не через RouterAI: ключ авторизации меняется на
-    # токен на 30 минут, версия API (scope) — по договору. Ключ зашифрован (`app/core/crypto.py`).
-    gigachat_auth_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
-    gigachat_scope: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    gigachat_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    gigachat_base_url: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Модели, выключенные администратором намертво (29.09.2026): `{"deepseek": {"at": ISO,
     # "by": "ФИО"}}`. В выключенную модель не уходит ни один запрос, а задачи, начатые до
     # выключения, останавливаются на следующем обращении (см. `app/services/ai_client.py`).
@@ -144,6 +139,14 @@ class Bitrix24Settings(Base):
         String(50), nullable=False, default="C5:PARSING", server_default="C5:PARSING"
     )
     push_enabled: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
+    # Обработчик приложения «ИИ анализ и решения» (20.10.2026, миграция 0078): пакет анализа
+    # во вкладку сделки, подпись HMAC SHA-256 общим секретом — см. `bitrix_ai_service`.
+    # Секрет зашифрован, наружу не отдаётся; отправка выключена, пока её не включили.
+    ai_receiver_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_push_enabled: Mapped[bool] = mapped_column(
         nullable=False, default=False, server_default="false"
     )
     last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

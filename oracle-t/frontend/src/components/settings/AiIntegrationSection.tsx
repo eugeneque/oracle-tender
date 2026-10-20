@@ -5,11 +5,11 @@ import { ApiError, api } from "../../api/client";
 import type { AiModelLimits, AiProviderKey, YandexAiStudioSettings } from "../../api/types";
 import { refreshAiProvider, useAiProvider } from "../../hooks/useAiProvider";
 import { formatDateTime } from "../../utils/format";
-import { AiModelList, AiProviderSwitcher, GigaChatCard, ProviderCard, RouterAiCard } from "./AiProviderControls";
+import { AiModelList, AiProviderSwitcher, ProviderCard, RouterAiCard } from "./AiProviderControls";
 
 /**
  * Вкладка «Модели ИИ» страницы «Интеграции»: модель по умолчанию, доступность моделей и
- * учётные данные провайдеров — Yandex AI Studio, RouterAI (Claude и DeepSeek), GigaChat.
+ * учётные данные провайдеров — Yandex AI Studio и RouterAI (DeepSeek и Qwen).
  *
  * До 18.09.2026 жил внутри `/settings`; с 08.10.2026 — раскладка «список — карточка»: слева
  * все модели с состоянием и выключателем, справа ключи выбранной. Раньше три карточки
@@ -31,8 +31,7 @@ export function AiIntegrationSection() {
         <AiModelList selected={selected} onSelect={setPicked} />
         <div className="min-w-0 space-y-6">
           {selected === "yandex" && <YandexCard />}
-          {(selected === "claude" || selected === "deepseek") && <RouterAiCard />}
-          {selected === "gigachat" && <GigaChatCard />}
+          {(selected === "deepseek" || selected === "qwen") && <RouterAiCard />}
           <ModelLimitsCard key={selected} provider={selected} />
         </div>
       </div>

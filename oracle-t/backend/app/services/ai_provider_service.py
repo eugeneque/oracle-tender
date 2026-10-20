@@ -1,4 +1,4 @@
-"""Выбор ИИ-провайдера (18.09.2026) и настройки Claude через RouterAI.
+"""Выбор ИИ-провайдера (18.09.2026) и настройки моделей через RouterAI.
 
 ИИ-модуль (раздел 5.4 ТЗ) изначально работал только через YandexGPT. По просьбе заказчика
 добавлен второй провайдер — Claude, подключённый через RouterAI (OpenAI-совместимый шлюз).
@@ -11,10 +11,12 @@
 (`ai_provider_settings.active_provider`), которую задаёт администратор на странице
 «Интеграции». Всё читается из БД на каждый запрос — переключение действует сразу.
 
-С 08.10.2026 заложен четвёртый провайдер — GigaChat (Сбер), напрямую через его API, без
-RouterAI (`app/services/gigachat_client.py`). Ключ у заказчика ещё оформляется: модель уже есть
-в переключателях и на странице «Интеграции», но пока ключ не введён, она «не настроена» и
-выбрать её нельзя — как любую модель без учётных данных.
+С 08.10.2026 был заложен GigaChat (Сбер), напрямую через его API; ключ так и не оформили.
+
+С 20.10.2026 набор моделей — YandexGPT, DeepSeek и Qwen3.8 27B (обе через RouterAI): Claude и
+GigaChat убраны по решению заказчика (миграция `0079_qwen_provider` переводит их выбравших на
+модель по умолчанию). В учёте токенов и журнале старые записи этих моделей подписываются по
+`HISTORICAL_PROVIDER_LABELS`.
 
 Учётные данные, как и у Yandex, хранятся в БД (`ai_provider_settings`, синглтон), а не в
 `.env` — по той же причине: заказчик не хочет заходить на сервер, чтобы поменять ключ.
@@ -31,14 +33,11 @@ from sqlalchemy.orm import Session
 
 from loguru import logger
 
-from app.core.crypto import decrypt_secret, encrypt_secret
 from app.models.integration_setting import AiProviderSettings, YandexAiStudioSettings
 from app.models.log import LogLevel
 from app.models.user import User
 from app.schemas.integration_setting import (
     AiProviderStatus,
-    GigaChatSettingsOut,
-    GigaChatSettingsUpdate,
     RouterAiSettingsOut,
     RouterAiSettingsUpdate,
     YandexConnectionTestResult,
@@ -51,35 +50,37 @@ from app.services.yandex_ai_service import mask_api_key
 _SINGLETON_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
 PROVIDER_YANDEX = "yandex"
-PROVIDER_CLAUDE = "claude"
 PROVIDER_DEEPSEEK = "deepseek"
-PROVIDER_GIGACHAT = "gigachat"
+PROVIDER_QWEN = "qwen"
 PROVIDER_LABELS = {
     PROVIDER_YANDEX: "YandexGPT",
-    PROVIDER_CLAUDE: "Claude",
     PROVIDER_DEEPSEEK: "DeepSeek",
-    PROVIDER_GIGACHAT: "GigaChat",
+    PROVIDER_QWEN: "Qwen",
 }
-# Провайдеры, которые ходят через RouterAI (28.09.2026: к Claude добавился DeepSeek). Ключ
-# и адрес шлюза у них общие, отличается только модель.
-ROUTERAI_PROVIDERS = (PROVIDER_CLAUDE, PROVIDER_DEEPSEEK)
+# Подписи для истории (20.10.2026): записи учёта токенов, AI-оценки и журнала, сделанные
+# Claude и GigaChat до их удаления, должны и дальше называться по-человечески, а не ключом.
+HISTORICAL_PROVIDER_LABELS = {**PROVIDER_LABELS, "claude": "Claude", "gigachat": "GigaChat"}
+# Провайдеры, которые ходят через RouterAI. Ключ и адрес шлюза у них общие, отличается
+# только модель.
+ROUTERAI_PROVIDERS = (PROVIDER_DEEPSEEK, PROVIDER_QWEN)
+
+
+def provider_label(provider: str | None) -> str | None:
+    """Подпись модели, в том числе удалённой (для старых записей); неизвестный ключ — как есть."""
+
+    if not provider:
+        return None
+    return HISTORICAL_PROVIDER_LABELS.get(provider, provider)
 
 # Значения по умолчанию для RouterAI. Модель — путь в терминах шлюза («провайдер/модель»),
 # адрес — его OpenAI-совместимый API; и то и другое можно переопределить в настройках.
-DEFAULT_ROUTERAI_MODEL = "anthropic/claude-opus-5"
 # Конкретная версия, а не алиас `~deepseek/deepseek-v4-pro-latest`: смена модели под тем же
 # именем незаметно поменяла бы результаты AI-оценки, а рядом с ней пишется имя модели.
 DEFAULT_DEEPSEEK_MODEL = "deepseek/deepseek-v4-pro-0813"
+# Qwen3.8 27B (20.10.2026, https://routerai.ru/models/qwen/qwen3.8-27b): дешевле DeepSeek в
+# разы (вход от 2,15 ₽ за 1 млн токенов), поддерживает structured output.
+DEFAULT_QWEN_MODEL = "qwen/qwen3.8-27b"
 DEFAULT_ROUTERAI_BASE_URL = "https://routerai.ru/api/v1"
-
-# GigaChat (08.10.2026). Версия API (scope) задаётся договором: `GIGACHAT_API_PERS` — физлицо,
-# `GIGACHAT_API_B2B` — юрлицо по предоплате, `GIGACHAT_API_CORP` — по постоплате. По умолчанию
-# B2B: МИРТЕК — юрлицо, а предоплата — самый частый вариант. Модель — старшая из линейки;
-# как и у остальных, всё переопределяется в настройках без правки кода.
-GIGACHAT_SCOPES = ("GIGACHAT_API_PERS", "GIGACHAT_API_B2B", "GIGACHAT_API_CORP")
-DEFAULT_GIGACHAT_SCOPE = "GIGACHAT_API_B2B"
-DEFAULT_GIGACHAT_MODEL = "GigaChat-2-Max"
-DEFAULT_GIGACHAT_BASE_URL = "https://gigachat.devices.sberbank.ru/api/v1"
 
 
 @dataclass(frozen=True)
@@ -97,14 +98,15 @@ class ModelLimits:
 # (`input_budget_chars`).
 # - YandexGPT: окно 32 768 («number of input tokens must be no more than 32768», 25.09.2026);
 #   8000 — потолок ответа моделей YandexGPT: без него длинный JSON обрывался посреди строки.
-# - Claude через RouterAI: окно 1 млн по данным RouterAI; ответ 16 тыс. покрывает самые
-#   длинные списки требований, обрыв ловится по `finish_reason` и лечится повтором.
-# - DeepSeek, GigaChat: 128 тыс. — СВЕРИТЬ по тарифу; ответ — как у Claude.
+# - DeepSeek: 128 тыс. — СВЕРИТЬ по тарифу; ответ 16 тыс. покрывает самые длинные списки
+#   требований, обрыв ловится по `finish_reason` и лечится повтором.
+# - Qwen3.8 27B: у RouterAI заявлено окно 1 млн, но у большинства из 21 провайдера модели —
+#   262 тыс., а провайдер подбирается автоматически; берётся меньшее, чтобы запрос не
+#   отклонил тот, к кому попал.
 DEFAULT_MODEL_LIMITS: dict[str, ModelLimits] = {
     PROVIDER_YANDEX: ModelLimits(context_tokens=32_768, max_output_tokens=8_000),
-    PROVIDER_CLAUDE: ModelLimits(context_tokens=1_000_000, max_output_tokens=16_000),
     PROVIDER_DEEPSEEK: ModelLimits(context_tokens=128_000, max_output_tokens=16_000),
-    PROVIDER_GIGACHAT: ModelLimits(context_tokens=128_000, max_output_tokens=16_000),
+    PROVIDER_QWEN: ModelLimits(context_tokens=262_144, max_output_tokens=16_000),
 }
 MIN_CONTEXT_TOKENS = 4_096
 MAX_CONTEXT_TOKENS = 2_000_000
@@ -203,7 +205,7 @@ def disabled_since(db: Session, provider: str) -> datetime | None:
 
 def requested_provider(db: Session, user: User | None) -> tuple[str, str]:
     """Какую модель пользователь хочет — без учёта выключенных администратором:
-    `("claude", "user")` — личный выбор, `("yandex", "default")` — системный. Личный выбор,
+    `("deepseek", "user")` — личный выбор, `("yandex", "default")` — системный. Личный выбор,
     у которого пропали учётные данные (администратор очистил ключ уже после выбора), не
     роняет пользователя: он молча получает модель по умолчанию, а в лог уходит
     предупреждение — в интерфейсе это же видно по статусу «не настроено»."""
@@ -249,15 +251,15 @@ def get_active_provider(db: Session) -> str:
 
 
 def _routerai_model(settings: AiProviderSettings | None, provider: str) -> str:
-    if provider == PROVIDER_DEEPSEEK:
-        return (settings.deepseek_model if settings else None) or DEFAULT_DEEPSEEK_MODEL
-    return (settings.routerai_model if settings else None) or DEFAULT_ROUTERAI_MODEL
+    if provider == PROVIDER_QWEN:
+        return (settings.qwen_model if settings else None) or DEFAULT_QWEN_MODEL
+    return (settings.deepseek_model if settings else None) or DEFAULT_DEEPSEEK_MODEL
 
 
 def get_routerai_credentials(
-    db: Session, provider: str = PROVIDER_CLAUDE
+    db: Session, provider: str = PROVIDER_DEEPSEEK
 ) -> tuple[str, str, str]:
-    """Ключ, модель и адрес API RouterAI для Claude или DeepSeek. Без ключа —
+    """Ключ, модель и адрес API RouterAI для DeepSeek или Qwen. Без ключа —
     `AiNotConfiguredError`: по аналогии с `get_credentials` у Yandex, текст ошибки уходит
     пользователю как есть."""
 
@@ -274,31 +276,10 @@ def get_routerai_credentials(
     )
 
 
-def get_gigachat_credentials(db: Session) -> tuple[str, str, str, str]:
-    """Ключ авторизации (расшифрованный), scope, модель и адрес API GigaChat. Без ключа —
-    `AiNotConfiguredError` с текстом для пользователя, как у остальных провайдеров."""
-
-    settings = db.get(AiProviderSettings, _SINGLETON_ID)
-    if settings is None or not settings.gigachat_auth_key_encrypted:
-        raise AiNotConfiguredError(
-            "Подключение к GigaChat не настроено: заполните ключ авторизации в разделе "
-            "«Интеграции → Искусственный интеллект»."
-        )
-    return (
-        decrypt_secret(settings.gigachat_auth_key_encrypted),
-        settings.gigachat_scope or DEFAULT_GIGACHAT_SCOPE,
-        settings.gigachat_model or DEFAULT_GIGACHAT_MODEL,
-        settings.gigachat_base_url or DEFAULT_GIGACHAT_BASE_URL,
-    )
-
-
 def _is_configured(db: Session, provider: str) -> bool:
     if provider in ROUTERAI_PROVIDERS:
         settings = db.get(AiProviderSettings, _SINGLETON_ID)
         return bool(settings and settings.routerai_api_key)
-    if provider == PROVIDER_GIGACHAT:
-        settings = db.get(AiProviderSettings, _SINGLETON_ID)
-        return bool(settings and settings.gigachat_auth_key_encrypted)
     yandex = db.get(YandexAiStudioSettings, _YANDEX_SINGLETON_ID)
     return bool(yandex and yandex.api_key and yandex.folder_id)
 
@@ -430,9 +411,6 @@ def update_model_limits(
 
 
 def _model_name(db: Session, provider: str) -> str | None:
-    if provider == PROVIDER_GIGACHAT:
-        settings = db.get(AiProviderSettings, _SINGLETON_ID)
-        return (settings.gigachat_model if settings else None) or DEFAULT_GIGACHAT_MODEL
     if provider not in ROUTERAI_PROVIDERS:
         return None
     return _routerai_model(db.get(AiProviderSettings, _SINGLETON_ID), provider)
@@ -578,8 +556,8 @@ def to_routerai_out(db: Session, settings: AiProviderSettings) -> RouterAiSettin
     return RouterAiSettingsOut(
         is_configured=bool(settings.routerai_api_key),
         api_key_masked=mask_api_key(settings.routerai_api_key) if settings.routerai_api_key else None,
-        model=_routerai_model(settings, PROVIDER_CLAUDE),
         deepseek_model=_routerai_model(settings, PROVIDER_DEEPSEEK),
+        qwen_model=_routerai_model(settings, PROVIDER_QWEN),
         base_url=settings.routerai_base_url or DEFAULT_ROUTERAI_BASE_URL,
         updated_at=settings.updated_at if settings.routerai_api_key else None,
         updated_by=updated_by_user.full_name if updated_by_user else None,
@@ -593,7 +571,7 @@ def get_routerai_settings_out(db: Session) -> RouterAiSettingsOut:
 def update_routerai_settings(
     db: Session, payload: RouterAiSettingsUpdate, *, actor: User
 ) -> RouterAiSettingsOut:
-    """PATCH-семантика: см. `yandex_ai_service.update_settings`. Пустая строка в `model` или
+    """PATCH-семантика: см. `yandex_ai_service.update_settings`. Пустая строка в модели или
     `base_url` — возврат к значению по умолчанию (в БД пишется NULL), в `api_key` — очистка."""
 
     settings = _get_or_create(db)
@@ -601,10 +579,10 @@ def update_routerai_settings(
 
     if "api_key" in fields_set:
         settings.routerai_api_key = (payload.api_key or "").strip() or None
-    if "model" in fields_set:
-        settings.routerai_model = (payload.model or "").strip() or None
     if "deepseek_model" in fields_set:
         settings.deepseek_model = (payload.deepseek_model or "").strip() or None
+    if "qwen_model" in fields_set:
+        settings.qwen_model = (payload.qwen_model or "").strip() or None
     if "base_url" in fields_set:
         settings.routerai_base_url = (payload.base_url or "").strip().rstrip("/") or None
     settings.updated_by_id = actor.id
@@ -668,108 +646,3 @@ def test_routerai_connection(db: Session, *, actor: User) -> YandexConnectionTes
     db.commit()
     return result
 
-
-# --- GigaChat (Сбер, 08.10.2026) ----------------------------------------------------------
-
-
-def to_gigachat_out(db: Session, settings: AiProviderSettings) -> GigaChatSettingsOut:
-    updated_by_user = db.get(User, settings.updated_by_id) if settings.updated_by_id else None
-    masked = None
-    if settings.gigachat_auth_key_encrypted:
-        try:
-            masked = mask_api_key(decrypt_secret(settings.gigachat_auth_key_encrypted))
-        except Exception:  # noqa: BLE001 - утрачен ключ шифрования: показываем, что ключ есть
-            masked = "••••"
-    return GigaChatSettingsOut(
-        is_configured=bool(settings.gigachat_auth_key_encrypted),
-        auth_key_masked=masked,
-        scope=settings.gigachat_scope or DEFAULT_GIGACHAT_SCOPE,
-        model=settings.gigachat_model or DEFAULT_GIGACHAT_MODEL,
-        base_url=settings.gigachat_base_url or DEFAULT_GIGACHAT_BASE_URL,
-        updated_at=settings.updated_at if settings.gigachat_auth_key_encrypted else None,
-        updated_by=updated_by_user.full_name if updated_by_user else None,
-    )
-
-
-def get_gigachat_settings_out(db: Session) -> GigaChatSettingsOut:
-    return to_gigachat_out(db, _get_or_create(db))
-
-
-def update_gigachat_settings(
-    db: Session, payload: GigaChatSettingsUpdate, *, actor: User
-) -> GigaChatSettingsOut:
-    """PATCH-семантика, как у `update_routerai_settings`. Неизвестный scope — ошибка сразу,
-    а не «401» от Сбера при первом разборе."""
-
-    settings = _get_or_create(db)
-    fields_set = payload.model_fields_set
-
-    if "scope" in fields_set:
-        scope = (payload.scope or "").strip().upper() or None
-        if scope is not None and scope not in GIGACHAT_SCOPES:
-            raise ValueError(
-                f"Неизвестная версия API GigaChat: {scope}. Допустимо: {', '.join(GIGACHAT_SCOPES)}."
-            )
-        settings.gigachat_scope = scope
-    if "auth_key" in fields_set:
-        auth_key = (payload.auth_key or "").strip()
-        settings.gigachat_auth_key_encrypted = encrypt_secret(auth_key) if auth_key else None
-    if "model" in fields_set:
-        settings.gigachat_model = (payload.model or "").strip() or None
-    if "base_url" in fields_set:
-        settings.gigachat_base_url = (payload.base_url or "").strip().rstrip("/") or None
-    settings.updated_by_id = actor.id
-
-    log_action(
-        db,
-        component="integrations",
-        action="update_gigachat_settings",
-        result="success",
-        level=LogLevel.INFO,
-        details=f"Изменены поля: {', '.join(sorted(fields_set)) or '(нет изменений)'}",
-        user_id=actor.id,
-    )
-    db.commit()
-    db.refresh(settings)
-    # Новый ключ или scope — старый токен доступа больше не годится.
-    from app.services.gigachat_client import reset_token_cache
-
-    reset_token_cache()
-    return to_gigachat_out(db, settings)
-
-
-def test_gigachat_connection(db: Session, *, actor: User) -> YandexConnectionTestResult:
-    """Получение токена и короткий запрос к модели — проверяет и ключ, и scope, и модель."""
-
-    from app.services.gigachat_client import ping
-
-    try:
-        auth_key, scope, model, base_url = get_gigachat_credentials(db)
-        answered_model = ping(auth_key=auth_key, scope=scope, model=model, base_url=base_url)
-    except AiNotConfiguredError as exc:
-        result = YandexConnectionTestResult(success=False, message=str(exc))
-    except Exception as exc:  # noqa: BLE001 - любая ошибка подключения - исход теста
-        result = YandexConnectionTestResult(
-            success=False, message=f"GigaChat: не удалось подключиться — {exc}"
-        )
-    else:
-        result = YandexConnectionTestResult(
-            success=True, message=f"GigaChat: работает, отвечает {answered_model}."
-        )
-
-    log_action(
-        db,
-        component="integrations",
-        action="test_gigachat_connection",
-        result="success" if result.success else "error",
-        level=LogLevel.INFO if result.success else LogLevel.WARNING,
-        details=result.message,
-        user_id=actor.id,
-    )
-    if not result.success:
-        # Отказ проверки — тоже ошибка обращения к модели: в журнал ИИ (14.10.2026).
-        from app.services.ai_log_service import log_ai_event
-
-        log_ai_event(db, action="Проверка подключения не прошла", error=result.message)
-    db.commit()
-    return result

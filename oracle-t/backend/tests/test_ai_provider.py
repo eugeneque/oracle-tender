@@ -1,4 +1,4 @@
-"""Переключатель ИИ-провайдера (18.09.2026): YandexGPT ↔ Claude / DeepSeek через RouterAI.
+"""Переключатель ИИ-провайдера (18.09.2026): YandexGPT ↔ DeepSeek / Qwen через RouterAI.
 
 Живой шлюз в тестах не зовём — проверяется логика вокруг: кто вправе переключать, что
 нельзя включить ненастроенного провайдера, что ключ не утекает наружу, и что диспетчер
@@ -32,8 +32,7 @@ def _create_regular_user_token(client, admin_token) -> str:
 def _reset(client, headers) -> None:
     # Обе таблицы — синглтоны, тестовая БД между запусками не пересоздаётся.
     client.patch("/integrations/yandex-ai-studio", json={"api_key": "", "folder_id": ""}, headers=headers)
-    client.patch("/integrations/routerai", json={"api_key": "", "model": "", "deepseek_model": "", "base_url": ""}, headers=headers)
-    client.patch("/integrations/gigachat", json={"auth_key": "", "scope": "", "model": "", "base_url": ""}, headers=headers)
+    client.patch("/integrations/routerai", json={"api_key": "", "deepseek_model": "", "qwen_model": "", "base_url": ""}, headers=headers)
 
 
 def test_status_visible_to_any_user_but_switch_is_admin_only(client, admin_token):
@@ -43,11 +42,11 @@ def test_status_visible_to_any_user_but_switch_is_admin_only(client, admin_token
     assert client.get("/integrations/ai-provider").status_code == 401
     status = client.get("/integrations/ai-provider", headers=user_headers)
     assert status.status_code == 200, status.text
-    assert status.json()["active_provider"] in {"yandex", "claude", "deepseek", "gigachat"}
+    assert status.json()["active_provider"] in {"yandex", "deepseek", "qwen"}
     assert "api_key" not in status.text
 
     assert (
-        client.put("/integrations/ai-provider", json={"active_provider": "claude"}, headers=user_headers)
+        client.put("/integrations/ai-provider", json={"active_provider": "qwen"}, headers=user_headers)
         .status_code
         == 403
     )
@@ -59,9 +58,9 @@ def test_cannot_switch_to_unconfigured_provider(client, admin_token):
     headers = _auth_headers(admin_token)
     _reset(client, headers)
 
-    resp = client.put("/integrations/ai-provider", json={"active_provider": "claude"}, headers=headers)
+    resp = client.put("/integrations/ai-provider", json={"active_provider": "qwen"}, headers=headers)
     assert resp.status_code == 400, resp.text
-    assert "Claude" in resp.json()["detail"]
+    assert "Qwen" in resp.json()["detail"]
 
     resp = client.put("/integrations/ai-provider", json={"active_provider": "gpt"}, headers=headers)
     assert resp.status_code == 422
@@ -73,7 +72,7 @@ def test_switch_and_routerai_settings_roundtrip(client, admin_token):
 
     saved = client.patch(
         "/integrations/routerai",
-        json={"api_key": "sk-secretkey-abcd", "model": "anthropic/claude-opus-5"},
+        json={"api_key": "sk-secretkey-abcd", "qwen_model": "qwen/qwen3.8-27b-test"},
         headers=headers,
     )
     assert saved.status_code == 200, saved.text
@@ -81,27 +80,27 @@ def test_switch_and_routerai_settings_roundtrip(client, admin_token):
     assert body["is_configured"] is True
     assert body["api_key_masked"] == "••••••••abcd"
     assert "secret" not in saved.text
-    assert body["model"] == "anthropic/claude-opus-5"
+    assert body["qwen_model"] == "qwen/qwen3.8-27b-test"
     assert body["base_url"] == ai_provider_service.DEFAULT_ROUTERAI_BASE_URL
 
     # PATCH только модели не трогает ключ; пустая строка возвращает значение по умолчанию.
-    again = client.patch("/integrations/routerai", json={"model": ""}, headers=headers).json()
+    again = client.patch("/integrations/routerai", json={"qwen_model": ""}, headers=headers).json()
     assert again["api_key_masked"] == "••••••••abcd"
-    assert again["model"] == ai_provider_service.DEFAULT_ROUTERAI_MODEL
+    assert again["qwen_model"] == ai_provider_service.DEFAULT_QWEN_MODEL
 
     switched = client.put(
-        "/integrations/ai-provider", json={"active_provider": "claude"}, headers=headers
+        "/integrations/ai-provider", json={"active_provider": "qwen"}, headers=headers
     )
     assert switched.status_code == 200, switched.text
     body = switched.json()
-    assert body["active_provider"] == "claude"
-    assert body["label"] == "Claude"
-    assert body["model"] == ai_provider_service.DEFAULT_ROUTERAI_MODEL
+    assert body["active_provider"] == "qwen"
+    assert body["label"] == "Qwen"
+    assert body["model"] == ai_provider_service.DEFAULT_QWEN_MODEL
     assert body["is_configured"] is True
     assert body["source"] == "default"
-    assert body["default_provider"] == "claude"
+    assert body["default_provider"] == "qwen"
     # Ключ RouterAI открывает сразу обе модели шлюза.
-    assert body["configured_providers"] == ["claude", "deepseek"]
+    assert body["configured_providers"] == ["deepseek", "qwen"]
 
     # Обратно на Yandex — только когда его данные заполнены.
     back = client.put("/integrations/ai-provider", json={"active_provider": "yandex"}, headers=headers)
@@ -131,7 +130,7 @@ class _Answer(pydantic.BaseModel):
 
 
 def test_personal_choice_overrides_default_only_for_that_user(client, admin_token):
-    """Один пользователь работает с Claude, другой — с моделью по умолчанию (Yandex)."""
+    """Один пользователь работает с Qwen, другой — с моделью по умолчанию (Yandex)."""
 
     headers = _auth_headers(admin_token)
     _reset(client, headers)
@@ -142,10 +141,10 @@ def test_personal_choice_overrides_default_only_for_that_user(client, admin_toke
 
     user_headers = _auth_headers(_create_regular_user_token(client, admin_token))
 
-    # Пользователь выбирает Claude — у него меняется, у администратора нет.
-    mine = client.put("/auth/me/ai-provider", json={"ai_provider": "claude"}, headers=user_headers)
+    # Пользователь выбирает Qwen — у него меняется, у администратора нет.
+    mine = client.put("/auth/me/ai-provider", json={"ai_provider": "qwen"}, headers=user_headers)
     assert mine.status_code == 200, mine.text
-    assert mine.json()["active_provider"] == "claude"
+    assert mine.json()["active_provider"] == "qwen"
     assert mine.json()["source"] == "user"
     assert mine.json()["default_provider"] == "yandex"
 
@@ -154,7 +153,7 @@ def test_personal_choice_overrides_default_only_for_that_user(client, admin_toke
     assert admin_view["source"] == "default"
 
     # Смена модели по умолчанию личный выбор не трогает.
-    client.put("/integrations/ai-provider", json={"active_provider": "claude"}, headers=headers)
+    client.put("/integrations/ai-provider", json={"active_provider": "qwen"}, headers=headers)
     client.put("/integrations/ai-provider", json={"active_provider": "yandex"}, headers=headers)
     assert client.get("/integrations/ai-provider", headers=user_headers).json()["source"] == "user"
 
@@ -166,7 +165,7 @@ def test_personal_choice_overrides_default_only_for_that_user(client, admin_toke
 
     # На ненастроенную модель — нельзя.
     client.patch("/integrations/routerai", json={"api_key": ""}, headers=headers)
-    denied = client.put("/auth/me/ai-provider", json={"ai_provider": "claude"}, headers=user_headers)
+    denied = client.put("/auth/me/ai-provider", json={"ai_provider": "qwen"}, headers=user_headers)
     assert denied.status_code == 400
 
 
@@ -192,13 +191,13 @@ def test_request_context_carries_the_user_into_the_dispatcher(client, admin_toke
     monkeypatch.setattr(analytics_service, "run_structured", fake_run_structured)
 
     user_headers = _auth_headers(_create_regular_user_token(client, admin_token))
-    client.put("/auth/me/ai-provider", json={"ai_provider": "claude"}, headers=user_headers)
+    client.put("/auth/me/ai-provider", json={"ai_provider": "qwen"}, headers=user_headers)
 
     for hdrs in (user_headers, headers):
         resp = client.post("/analytics/ai-summary", json={}, headers=hdrs)
         assert resp.status_code != 401, resp.text
 
-    assert seen == ["claude", "yandex"]
+    assert seen == ["qwen", "yandex"]
 
 
 def test_job_context_uses_the_authors_choice(db_session):
@@ -207,7 +206,7 @@ def test_job_context_uses_the_authors_choice(db_session):
     ai_provider_service._get_or_create(db_session).active_provider = "yandex"
     db_session.flush()
     author = db_session.query(User).first()
-    author.ai_provider = "claude"
+    author.ai_provider = "qwen"
     db_session.flush()
     # Ключа RouterAI в этой сессии может не быть — тогда личный выбор откатывается к
     # умолчанию; фиксируем ключ, чтобы проверять именно контекст.
@@ -216,7 +215,7 @@ def test_job_context_uses_the_authors_choice(db_session):
 
     assert ai_provider_service.get_active_provider(db_session) == "yandex"
     with acting_as(author.id):
-        assert ai_provider_service.get_active_provider(db_session) == "claude"
+        assert ai_provider_service.get_active_provider(db_session) == "qwen"
     assert ai_provider_service.get_active_provider(db_session) == "yandex"
     db_session.rollback()
 
@@ -228,21 +227,21 @@ def test_dispatcher_calls_only_the_active_client(db_session, monkeypatch):
         calls.append("yandex")
         return _Answer(text="yandex")
 
-    def fake_claude(db, **kwargs):
-        calls.append("claude")
-        return _Answer(text="claude")
+    def fake_qwen(db, **kwargs):
+        calls.append("qwen")
+        return _Answer(text="qwen")
 
     monkeypatch.setattr(ai_client.yandex_ai_client, "run_structured", fake_yandex)
-    monkeypatch.setattr(ai_client.routerai_client, "run_structured", fake_claude)
+    monkeypatch.setattr(ai_client.routerai_client, "run_structured", fake_qwen)
 
-    for provider in ("claude", "yandex", "claude"):
+    for provider in ("qwen", "yandex", "qwen"):
         monkeypatch.setattr(ai_client, "get_active_provider", lambda db, p=provider: p)
         answer = ai_client.run_structured(
             db_session, system_prompt="s", user_text="u", response_model=_Answer
         )
         assert answer.text == provider
 
-    assert calls == ["claude", "yandex", "claude"]
+    assert calls == ["qwen", "yandex", "qwen"]
 
 
 def test_strict_schema_closes_objects_and_drops_titles():
@@ -265,7 +264,7 @@ def test_strict_schema_closes_objects_and_drops_titles():
 
 
 def test_coerce_shape_unwraps_bare_list_and_stringified_field():
-    """Claude через RouterAI на схеме с единственным полем-списком отдаёт то голый массив,
+    """Модель через RouterAI на схеме с единственным полем-списком отдаёт то голый массив,
     то JSON-строку в поле (18.09.2026). Обе формы приводятся к схеме; на схемах с несколькими
     полями ничего не трогается."""
 
@@ -311,7 +310,7 @@ def test_spending_limit_is_not_retried_and_says_what_to_do(monkeypatch):
         )
 
     monkeypatch.setattr(routerai_client.httpx, "post", fake_post)
-    monkeypatch.setattr(routerai_client, "get_routerai_credentials", lambda db, provider="claude": ("k", "m", "https://x"))
+    monkeypatch.setattr(routerai_client, "get_routerai_credentials", lambda db, provider="qwen": ("k", "m", "https://x"))
     monkeypatch.setattr(routerai_client.time, "sleep", lambda seconds: None)
 
     class Answer(pydantic.BaseModel):
@@ -343,7 +342,7 @@ def test_plain_rate_limit_is_still_retried(monkeypatch):
         return httpx.Response(429, json={"error": {"message": "Too many requests"}})
 
     monkeypatch.setattr(routerai_client.httpx, "post", fake_post)
-    monkeypatch.setattr(routerai_client, "get_routerai_credentials", lambda db, provider="claude": ("k", "m", "https://x"))
+    monkeypatch.setattr(routerai_client, "get_routerai_credentials", lambda db, provider="qwen": ("k", "m", "https://x"))
     monkeypatch.setattr(routerai_client.time, "sleep", lambda seconds: None)
 
     class Answer(pydantic.BaseModel):
@@ -374,7 +373,7 @@ def test_rejected_key_is_not_retried_and_stops_extraction(monkeypatch):
         return httpx.Response(401, json={"message": "401 Unauthorized", "code": 401})
 
     monkeypatch.setattr(routerai_client.httpx, "post", fake_post)
-    monkeypatch.setattr(routerai_client, "get_routerai_credentials", lambda db, provider="claude": ("k", "m", "https://x"))
+    monkeypatch.setattr(routerai_client, "get_routerai_credentials", lambda db, provider="qwen": ("k", "m", "https://x"))
     monkeypatch.setattr(routerai_client.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(
         characteristic_extraction,
@@ -393,7 +392,7 @@ def test_rejected_key_is_not_retried_and_stops_extraction(monkeypatch):
 
 
 def test_deepseek_shares_routerai_key_but_has_own_model(client, admin_token, db_session, monkeypatch):
-    """DeepSeek (28.09.2026) ходит через тот же RouterAI: ключ общий с Claude, модель своя и
+    """DeepSeek (28.09.2026) ходит через тот же RouterAI: ключ общий с Qwen, модель своя и
     настраивается отдельно; диспетчер отдаёт его тому же клиенту с другой моделью."""
 
     headers = _auth_headers(admin_token)
@@ -403,7 +402,7 @@ def test_deepseek_shares_routerai_key_but_has_own_model(client, admin_token, db_
         "/integrations/routerai", json={"deepseek_model": "deepseek/other"}, headers=headers
     ).json()
     assert settings["deepseek_model"] == "deepseek/other"
-    assert settings["model"] == ai_provider_service.DEFAULT_ROUTERAI_MODEL
+    assert settings["qwen_model"] == ai_provider_service.DEFAULT_QWEN_MODEL
     reset = client.patch("/integrations/routerai", json={"deepseek_model": ""}, headers=headers).json()
     assert reset["deepseek_model"] == ai_provider_service.DEFAULT_DEEPSEEK_MODEL
 

@@ -13,8 +13,9 @@ import {
 } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
-import type { Source, SourcePollResult } from "../../api/types";
+import type { Source, SourceCredential, SourcePollResult } from "../../api/types";
 import { CATALOG_SOURCE_TYPES, MANUAL_SOURCE_TYPE, isExternalFeedSource } from "../../api/types";
+import { SourceAccessBlock } from "./SourceAccessBlock";
 import {
   SettingCard,
   SettingsGroup,
@@ -114,11 +115,16 @@ function SourceCard({
   isAdmin,
   isPolling,
   onPoll,
+  credentials,
+  onCredentialsChanged,
 }: {
   source: Source;
   isAdmin: boolean;
   isPolling: boolean;
   onPoll: (source: Source) => void;
+  /** `null` — доступы не загружены (не админ): блок входа не показываем. */
+  credentials: SourceCredential[] | null;
+  onCredentialsChanged: () => Promise<void>;
 }) {
   const isCatalog = CATALOG_SOURCE_TYPES.includes(source.type);
   const canPoll = isAdmin && !isCatalog && source.adapter_status === "implemented";
@@ -172,7 +178,15 @@ function SourceCard({
           )}
         </div>
       }
-    />
+    >
+      {isAdmin && !isCatalog && credentials !== null && (
+        <SourceAccessBlock
+          source={source}
+          credentials={credentials}
+          onChanged={onCredentialsChanged}
+        />
+      )}
+    </SettingCard>
   );
 }
 
@@ -184,6 +198,22 @@ export function SourcesSection({ isAdmin, active }: { isAdmin: boolean; active: 
   const [pollingKey, setPollingKey] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<SourcePollResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Логины и пароли площадок — только администратору (сервер отвечает остальным 403).
+  const [credentials, setCredentials] = useState<SourceCredential[] | null>(null);
+
+  const reloadCredentials = async () => {
+    if (!isAdmin) return;
+    try {
+      setCredentials(await api.get<SourceCredential[]>("/source-credentials"));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось загрузить доступы к площадкам");
+    }
+  };
+
+  useEffect(() => {
+    void reloadCredentials();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin]);
 
   const handlePoll = async (source: Source) => {
     setError(null);
@@ -215,6 +245,10 @@ export function SourcesSection({ isAdmin, active }: { isAdmin: boolean; active: 
         isAdmin={isAdmin}
         isPolling={pollingKey === source.key}
         onPoll={(s) => void handlePoll(s)}
+        credentials={
+          credentials === null ? null : credentials.filter((c) => c.source_id === source.id)
+        }
+        onCredentialsChanged={reloadCredentials}
       />
     ));
 
