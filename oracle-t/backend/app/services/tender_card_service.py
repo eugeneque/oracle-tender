@@ -33,7 +33,7 @@ from app.models.tender import Tender
 from app.models.tender_card import TenderCard
 from app.models.tender_history import HistoryKind, TenderHistoryEntry
 from app.models.user import User
-from app.services import region_resolver
+from app.services import eis_card_dates, region_resolver
 from app.services.audit import log_action
 
 # Названия полей карточки, из которых берутся значения для самого тендера. Список нарочно
@@ -140,7 +140,14 @@ def _all_text(payload: dict) -> str:
     return "\n".join(parts)
 
 
-def fill_gaps_from_card(db: Session, tender: Tender, payload: dict, *, actor: User | None = None) -> list[str]:
+def fill_gaps_from_card(
+    db: Session,
+    tender: Tender,
+    payload: dict,
+    *,
+    actor: User | None = None,
+    fresh_card: bool = False,
+) -> list[str]:
     """Заполняет пустые поля тендера данными карточки. Возвращает описания того, что заполнено.
 
     Заполняются только пустые поля: значение, введённое или исправленное человеком, всегда
@@ -175,6 +182,11 @@ def fill_gaps_from_card(db: Session, tender: Tender, payload: dict, *, actor: Us
         was = tender.okpd2_code
         tender.okpd2_code = okpd2
         filled.append(f"ОКПД2 — {okpd2}" + (f" (было {was})" if was else ""))
+
+    # Сроки подачи — тоже поверх имеющихся: выдача ЕИС даёт окончание только датой, Госплан —
+    # местным временем заказчика без пояса, а в карточке время точное и с поясом (20.10.2026,
+    # 32616389457: 12:00 МСК в списке при «09:00 (МСК+4)» в извещении).
+    filled += eis_card_dates.refine_deadlines(db, tender, payload, fresh=fresh_card)
 
     if not tender.region_organizer_code:
         address = _find_field(payload, ("заказчик",), _ADDRESS_LABELS)
@@ -251,7 +263,7 @@ def sync_card(
     record.fetched_at = datetime.now(timezone.utc)
     db.add(record)
 
-    filled = fill_gaps_from_card(db, tender, payload, actor=actor)
+    filled = fill_gaps_from_card(db, tender, payload, actor=actor, fresh_card=True)
 
     log_action(
         db,

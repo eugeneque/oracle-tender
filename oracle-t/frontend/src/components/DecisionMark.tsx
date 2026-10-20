@@ -11,6 +11,7 @@ import { decisionTitle } from "../utils/decision";
  * подробности — в карточке закупки, блок «AI-оценка по профилю».
  */
 const SIZE_CLASSES = {
+  xs: { ring: "h-4 w-4", icon: 10 },
   sm: { ring: "h-5 w-5", icon: 12 },
   md: { ring: "h-7 w-7", icon: 15 },
   lg: { ring: "h-10 w-10", icon: 22 },

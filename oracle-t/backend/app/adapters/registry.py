@@ -17,7 +17,13 @@ from app.adapters.etprf import EtprfAdapter
 from app.adapters.fabrikant import FabrikantAdapter
 from app.adapters.gosplan import GosplanAdapter
 from app.adapters.lot_online import LotOnlineAdapter
-from app.adapters.roseltorg import RoseltorgAdapter
+from app.adapters.roseltorg import (
+    RoseltorgAdapter,
+    RoseltorgInterraoAdapter,
+    RoseltorgRossetiAdapter,
+    RoseltorgRostelecomAdapter,
+    RoseltorgRushydroAdapter,
+)
 from app.adapters.sberbank_ast import SberbankAstAdapter
 from app.adapters.tektorg import TektorgAdapter
 from app.adapters.tenderplan import TenderplanAdapter
@@ -27,6 +33,10 @@ _ADAPTERS: dict[str, type[SourceAdapter]] = {
     "eis": EisAdapter,
     "zakazrf": ZakazrfAdapter,
     "roseltorg": RoseltorgAdapter,
+    "roseltorg_rosseti": RoseltorgRossetiAdapter,
+    "roseltorg_rushydro": RoseltorgRushydroAdapter,
+    "roseltorg_rt": RoseltorgRostelecomAdapter,
+    "roseltorg_interrao": RoseltorgInterraoAdapter,
     "etprf": EtprfAdapter,
     "etpgpb": EtpgpbAdapter,
     "sberbank_ast": SberbankAstAdapter,

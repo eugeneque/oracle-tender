@@ -1601,7 +1601,7 @@ def serialize(db: Session, score: AiProfileScore) -> dict:
     """
 
     from app.models.ai_profile import SEVERITY_LABELS
-    from app.services.ai_provider_service import PROVIDER_LABELS
+    from app.services.ai_provider_service import provider_label
 
     weak_points = [
         {
@@ -1643,7 +1643,7 @@ def serialize(db: Session, score: AiProfileScore) -> dict:
         "task_checklist": score.task_checklist,
         "competencies_checklist": score.competencies_checklist,
         "ai_provider": score.ai_provider,
-        "ai_provider_label": PROVIDER_LABELS.get(score.ai_provider or ""),
+        "ai_provider_label": provider_label(score.ai_provider),
         "ai_model": score.ai_model,
         "overall_score": score.overall_score,
         "summary": score.summary,

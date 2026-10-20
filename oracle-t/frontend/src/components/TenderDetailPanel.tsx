@@ -53,11 +53,11 @@ import { TenderHistoryTab } from "./tender-detail/TenderHistoryTab";
 import { TenderOverviewTab } from "./tender-detail/TenderOverviewTab";
 import { TenderRequirementsTab } from "./tender-detail/TenderRequirementsTab";
 import { TagChip } from "./tags/TagChip";
+import { BitrixUploadButton } from "./tender-detail/BitrixUploadButton";
 import { TagPicker } from "./tags/TagPicker";
 import { queueText } from "../utils/jobQueue";
 import {
   percentValue,
-  scoreBadgeClass,
   stageHint,
 } from "../utils/format";
 
@@ -827,6 +827,9 @@ export function TenderDetailPanel({
   const activeMoreTab = moreTabs.find((tab) => tab.key === activeTab);
 
   const overall = percentValue(tender.ai_score);
+  // Цвет оценки текстом, без плашки: те же пороги, что у scoreBadgeClass.
+  const scoreTextClass = (percent: number) =>
+    percent >= 80 ? "text-emerald-300" : percent >= 50 ? "text-amber-300" : "text-red-300";
   const iconButton =
     "flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-white/5 hover:text-zinc-200";
 
@@ -860,46 +863,43 @@ export function TenderDetailPanel({
           </div>
 
           <div className="flex shrink-0 items-center gap-0.5">
-            {/* Релевантность — сегментом из двух иконок: состояние видно по подсветке, и
-                отдельный бейдж «Не проверен» в заголовке больше не нужен. */}
-            <div className="mr-1 flex items-center rounded-lg border border-white/[0.08] p-0.5">
-              <button
-                onClick={() => void setRelevance("confirmed")}
-                disabled={tender.relevance_status === "confirmed"}
-                title={
-                  tender.relevance_status === "confirmed"
-                    ? "Отмечена как релевантная"
-                    : "Отметить как релевантную"
-                }
-                aria-pressed={tender.relevance_status === "confirmed"}
-                className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs transition-colors ${
-                  tender.relevance_status === "confirmed"
-                    ? "bg-emerald-500/15 text-emerald-300"
-                    : "text-zinc-500 hover:bg-white/5 hover:text-emerald-300"
-                }`}
-              >
-                <BadgeCheck size={14} />
-                {tender.relevance_status === "confirmed" && "Релевантна"}
-              </button>
-              <button
-                onClick={() => void setRelevance("rejected")}
-                disabled={tender.relevance_status === "rejected"}
-                title={
-                  tender.relevance_status === "rejected"
-                    ? "Отмечена как неактуальная"
-                    : "Отметить как неактуальную"
-                }
-                aria-pressed={tender.relevance_status === "rejected"}
-                className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs transition-colors ${
-                  tender.relevance_status === "rejected"
-                    ? "bg-red-500/15 text-red-300"
-                    : "text-zinc-500 hover:bg-white/5 hover:text-red-300"
-                }`}
-              >
-                <Ban size={14} />
-                {tender.relevance_status === "rejected" && "Неактуальна"}
-              </button>
-            </div>
+            {/* Релевантность — двумя иконками без рамки и подписи (редизайн 20.10.2026):
+                выбранная подсвечена цветом, а словами состояние названо в строке свойств под
+                заголовком — в ряду действий надпись «Неактуальна» дублировала этап. */}
+            <button
+              onClick={() => void setRelevance("confirmed")}
+              disabled={tender.relevance_status === "confirmed"}
+              title={
+                tender.relevance_status === "confirmed"
+                  ? "Отмечена как релевантная"
+                  : "Отметить как релевантную"
+              }
+              aria-pressed={tender.relevance_status === "confirmed"}
+              className={
+                tender.relevance_status === "confirmed"
+                  ? "flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-300"
+                  : `${iconButton} hover:!text-emerald-300`
+              }
+            >
+              <BadgeCheck size={15} />
+            </button>
+            <button
+              onClick={() => void setRelevance("rejected")}
+              disabled={tender.relevance_status === "rejected"}
+              title={
+                tender.relevance_status === "rejected"
+                  ? "Отмечена как неактуальная"
+                  : "Отметить как неактуальную"
+              }
+              aria-pressed={tender.relevance_status === "rejected"}
+              className={
+                tender.relevance_status === "rejected"
+                  ? "flex h-8 w-8 items-center justify-center rounded-lg bg-red-500/15 text-red-300"
+                  : `${iconButton} hover:!text-red-300`
+              }
+            >
+              <Ban size={15} />
+            </button>
             {/* «Комментарии» — ответы специалистов на заключение ИИ (28.09.2026): не основной
                 блок, поэтому за иконкой; число — сколько ответов уже есть. */}
             <button
@@ -930,6 +930,12 @@ export function TenderDetailPanel({
             >
               <Star size={16} fill={tender.is_bookmarked ? "currentColor" : "none"} />
             </button>
+            {/* «Загрузить в Битрикс» иконкой (20.10.2026): раньше выгрузка была только на
+                отдельной странице, и её не находили. Там кнопка в шапке страницы, здесь не
+                дублируется. */}
+            {expandable && <BitrixUploadButton tenderId={tender.id} stage={tender.stage} compact />}
+            {/* Черта отделяет действия над закупкой от управления самой панелью. */}
+            <span className="mx-1 h-4 w-px bg-white/[0.08]" />
             {expandable && (
               <Link
                 to={`/tenders/${tender.id}`}
@@ -982,28 +988,37 @@ export function TenderDetailPanel({
           </div>
         </div>
 
-        <div className="flex items-start gap-2.5">
-          <DecisionMark decision={tender.ai_decision} size="md" className="mt-0.5" />
-          <h2 className="text-lg font-semibold leading-snug tracking-tight text-white">
-            {tender.title}
-          </h2>
-        </div>
+        {/* Заголовок — без знака решения ИИ слева (редизайн 20.10.2026): крупный цветной
+            круг перетягивал внимание с названия, решение теперь — в строке свойств. */}
+        <h2 className="text-[17px] font-semibold leading-snug tracking-tight text-white">
+          {tender.title}
+        </h2>
 
-        {/* Строка свойств: оценка, этап и теги — то, что меняется по ходу работы. Этап —
-            выпадающим списком без подписи: список сам по себе читается как «этап», а что
-            значит выбранный — в подсказке. */}
-        <div className="relative mt-3 flex flex-wrap items-center gap-1.5">
+        {/* Строка свойств: решение и оценка ИИ, этап, отметка человека и теги — то, что
+            меняется по ходу работы. Без рамок у каждого элемента (редизайн 20.10.2026): пять
+            «кнопок» подряд читались как панель управления; теперь это строка текста через
+            точки, а интерактивность видна по наведению. Этап — выпадающим списком без
+            подписи, что значит выбранный — в подсказке. */}
+        <div className="relative mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
           <span
-            className={`rounded-md border px-2 py-1 text-[11px] font-medium tabular-nums ${scoreBadgeClass(overall)}`}
-            title="Итоговая AI-оценка по профилю"
+            className="inline-flex items-center gap-1.5"
+            title="Решение ИИ и итоговая AI-оценка по профилю"
           >
-            {overall === null ? "AI-оценка —" : `AI ${overall}%`}
+            <DecisionMark decision={tender.ai_decision} size="xs" />
+            <span
+              className={`font-medium tabular-nums ${
+                overall === null ? "text-zinc-500" : scoreTextClass(overall)
+              }`}
+            >
+              {overall === null ? "AI-оценки нет" : `AI ${overall}%`}
+            </span>
           </span>
+          <span className="text-zinc-700">·</span>
           <select
             value={tender.stage}
             onChange={(e) => void changeStage(e.target.value as TenderStage)}
             title={stageHint(tender.stage) ?? "Этап работы с закупкой"}
-            className="cursor-pointer rounded-md border border-white/[0.08] bg-transparent py-1 pl-2 pr-6 text-[11px] text-zinc-300 outline-none hover:border-white/20 focus:border-indigo-500"
+            className="-ml-1 cursor-pointer rounded-md bg-transparent py-0.5 pl-1 pr-5 text-xs text-zinc-300 outline-none hover:bg-white/5 focus:ring-1 focus:ring-indigo-500"
           >
             {STAGE_ORDER.map((stage) => (
               <option key={stage} value={stage} className="bg-zinc-900">
@@ -1011,6 +1026,19 @@ export function TenderDetailPanel({
               </option>
             ))}
           </select>
+          {tender.relevance_status === "confirmed" && (
+            <>
+              <span className="text-zinc-700">·</span>
+              <span className="text-emerald-300">Релевантна</span>
+            </>
+          )}
+          {tender.relevance_status === "rejected" && (
+            <>
+              <span className="text-zinc-700">·</span>
+              <span className="text-red-300">Неактуальна</span>
+            </>
+          )}
+          {tender.tags.length > 0 && <span className="text-zinc-700">·</span>}
           {tender.tags.map((tag) => (
             <TagChip
               key={tag.id}

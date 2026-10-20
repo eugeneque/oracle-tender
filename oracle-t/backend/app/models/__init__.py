@@ -39,7 +39,7 @@ from app.models.catalog_queue import (
 from app.models.company_profile import CompanyProfile
 from app.models.market import NicheSource, NicheStatistics, SimilarTender, TenderEmbedding
 from app.models.api_client import ApiClient
-from app.models.bitrix_deal import BitrixDealLink
+from app.models.bitrix_deal import BitrixAiRequest, BitrixDealLink
 from app.models.integration_setting import (
     AiProviderSettings,
     Bitrix24Settings,

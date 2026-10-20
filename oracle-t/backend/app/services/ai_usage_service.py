@@ -4,7 +4,7 @@
 с локальной моделью. Ответить «на глаз» нельзя: расход зависит от числа закупок, доли с
 документацией, числа требований и производителей. Зато каждый провайдер возвращает точный
 счётчик токенов в ответе — клиенты моделей (`routerai_client`, `yandex_ai_client`,
-`gigachat_client`) передают его сюда после каждой попытки, а «Интеграции → Детализация ИИ»
+до 20.10.2026 ещё `gigachat_client`) передают его сюда после каждой попытки, а «Интеграции → Детализация ИИ»
 сводит записи по дням, моделям, шагам разбора и закупкам.
 
 Запись идёт **отдельной сессией** на том же подключении, что и у вызывающего кода
@@ -38,7 +38,7 @@ from app.models.tender import Tender
 from app.models.user import User
 from app.services.ai_context import current_job_id, current_user_id
 from app.services.ai_log_service import STATUS_ACTIONS, log_ai_event
-from app.services.ai_provider_service import CHARS_PER_TOKEN, PROVIDER_LABELS
+from app.services.ai_provider_service import CHARS_PER_TOKEN, provider_label
 
 # Шаг разбора по схеме ответа. Неизвестная схема показывается своим именем — новый вызов
 # модели не пропадёт из детализации, просто будет подписан по-английски, пока его не внесут.
@@ -344,7 +344,7 @@ def usage_summary(
         by_model.append(
             {
                 "provider": row.provider,
-                "provider_label": PROVIDER_LABELS.get(row.provider, row.provider),
+                "provider_label": provider_label(row.provider),
                 "model": row.model,
                 "chars_per_token": (
                     round(int(row.measured_chars or 0) / measured_tokens, 2) if measured_tokens else None
@@ -606,7 +606,7 @@ def recent_calls(
                 "id": str(record.id),
                 "created_at": record.created_at.isoformat(),
                 "provider": record.provider,
-                "provider_label": PROVIDER_LABELS.get(record.provider, record.provider),
+                "provider_label": provider_label(record.provider),
                 "model": record.model,
                 "operation": record.operation,
                 "operation_label": OPERATION_LABELS.get(record.operation, record.operation),
@@ -680,7 +680,7 @@ _METRICS: list[tuple[str, str, Any]] = [
 _NOTES = [
     ("Входящие токены", "запрос к модели: промпт, документы, карточка закупки"),
     ("Исходящие токены", "ответ модели"),
-    ("Из кэша", "входящие токены, которые провайдер взял из кэша (у Claude и DeepSeek в разы дешевле)"),
+    ("Из кэша", "входящие токены, которые провайдер взял из кэша (у DeepSeek и Qwen в разы дешевле)"),
     ("Доля кэша", "из кэша ÷ входящие"),
     ("Ср. время ответа", "по успешным обращениям: сбой возвращается мгновенно и исказил бы среднее"),
     ("Скорость вывода", "исходящие токены ÷ время успешных ответов; время включает чтение запроса"),
@@ -794,7 +794,7 @@ def build_usage_xlsx(
     sheet.append([])
     info: list[tuple[str, Any, str | None]] = [
         ("Период (МСК)", f"{date_from:%d.%m.%Y} — {date_to:%d.%m.%Y}", None),
-        ("Модели", PROVIDER_LABELS.get(provider, provider) if provider else "все", None),
+        ("Модели", provider_label(provider) if provider else "все", None),
         ("Сформировано", f"{datetime.now(MOSCOW_TZ):%d.%m.%Y %H:%M} МСК", None),
         ("Закупок разобрано", totals["tenders"], _INT),
     ]
@@ -898,7 +898,7 @@ def build_usage_xlsx(
         call_rows.append(
             [
                 _naive_msk(record.created_at),
-                PROVIDER_LABELS.get(record.provider, record.provider),
+                provider_label(record.provider),
                 record.model or "",
                 OPERATION_LABELS.get(record.operation, record.operation),
                 JOB_KIND_LABELS.get(record.job_kind, record.job_kind) if record.job_kind else NO_JOB_LABEL,

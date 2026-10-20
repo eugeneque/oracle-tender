@@ -24,7 +24,8 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -87,19 +88,22 @@ _PURCHASE_TYPES = {
     "purchaseNoticeZP": "Запрос предложений",
 }
 
+_MSK = ZoneInfo("Europe/Moscow")
+
 _EIS_SEARCH_URL = "https://zakupki.gov.ru/epz/order/extendedsearch/results.html?searchString={number}"
 _EIS_223_URL = "https://zakupki.gov.ru/epz/order/notice/notice223/common-info.html?regNumber={number}"
 
 
-def _parse_datetime(value: str | None) -> datetime | None:
+def _parse_datetime(value: str | None, *, naive_tz: tzinfo = timezone.utc) -> datetime | None:
     if not value:
         return None
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
-    # Госплан отдаёт время без зоны, в UTC.
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    # Госплан отдаёт время без зоны: по 44-ФЗ — в UTC, а срок подачи по 223-ФЗ
+    # (`submission_close_at`) — местным временем заказчика (см. `_summary`).
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=naive_tz)
 
 
 def _parse_price(value) -> Decimal | None:
@@ -197,7 +201,14 @@ class GosplanAdapter(SourceAdapter):
             status=_STAGE_TO_STATUS.get(item.get("stage")),
             price=_parse_price(item.get("max_price")),
             currency=item.get("currency_code") or "RUB",
-            application_end=_parse_datetime(item.get(deadline_key)),
+            # `submission_close_at` (223-ФЗ) — «настенное» время заказчика без пояса, а не UTC,
+            # как считалось до 20.10.2026: 32616389457 «09:00 (МСК+4)» лежала как 12:00 МСК.
+            # Пояса заказчика в ответе нет — берём Москву (точно для большинства заказчиков,
+            # для прочих — ошибка на сдвиг пояса вместо сдвига плюс три часа); точное время
+            # ставит карточка ЕИС (`eis_card_dates.refine_deadlines`).
+            application_end=_parse_datetime(
+                item.get(deadline_key), naive_tz=_MSK if is_223 else timezone.utc
+            ),
             publish_date=published_at.date() if published_at else None,
             okpd2_code=okpd2_service.pick_relevant(okpd2),
             region_code=_region_code(item.get("region")),

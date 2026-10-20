@@ -3,14 +3,13 @@ import type { AiProviderKey } from "../api/types";
 /** Провайдеры ИИ-модуля в порядке показа в переключателях. */
 export const AI_PROVIDERS: { key: AiProviderKey; label: string; hint: string }[] = [
   { key: "yandex", label: "YandexGPT", hint: "Yandex AI Studio" },
-  { key: "claude", label: "Claude", hint: "через RouterAI" },
   { key: "deepseek", label: "DeepSeek", hint: "через RouterAI" },
-  { key: "gigachat", label: "GigaChat", hint: "Сбер" },
+  { key: "qwen", label: "Qwen", hint: "Qwen3.8 27B · через RouterAI" },
 ];
 
 /**
- * Акцент провайдера в интерфейсе: индиго — YandexGPT, оранжевый — Claude, синий — DeepSeek
- * (цвет его знака), зелёный — GigaChat (цвет Сбера). По цвету пользователь видит, какая модель писала разбор, поэтому классы
+ * Акцент провайдера в интерфейсе: индиго — YandexGPT, синий — DeepSeek (цвет его знака),
+ * фиолетовый — Qwen (цвет его знака, 20.10.2026). По цвету пользователь видит, какая модель писала разбор, поэтому классы
  * собраны в одном месте, а не угадываются в каждом компоненте.
  */
 export const AI_PROVIDER_ACCENT: Record<
@@ -42,16 +41,6 @@ export const AI_PROVIDER_ACCENT: Record<
     button: "border-white/15 bg-white/5 hover:bg-white/10",
     text: "text-indigo-300",
   },
-  claude: {
-    segment: "bg-orange-500/20 text-orange-100 shadow-[inset_0_0_0_1px_rgba(251,146,60,0.45)]",
-    card: "border-orange-400/30 bg-orange-500/[0.04]",
-    pill: "bg-orange-500/15 text-orange-200",
-    badge: "border-orange-400/30 bg-orange-500/10 text-orange-200 hover:bg-orange-500/20",
-    panel: "border-orange-400/25",
-    wave: "ai-wave--claude border-orange-400/15",
-    button: "border-orange-400/30 bg-orange-500/10 hover:bg-orange-500/20",
-    text: "text-orange-300",
-  },
   deepseek: {
     segment: "bg-blue-500/20 text-blue-100 shadow-[inset_0_0_0_1px_rgba(96,165,250,0.45)]",
     card: "border-blue-400/30 bg-blue-500/[0.04]",
@@ -62,14 +51,14 @@ export const AI_PROVIDER_ACCENT: Record<
     button: "border-blue-400/30 bg-blue-500/10 hover:bg-blue-500/20",
     text: "text-blue-300",
   },
-  gigachat: {
-    segment: "bg-emerald-500/20 text-emerald-100 shadow-[inset_0_0_0_1px_rgba(52,211,153,0.45)]",
-    card: "border-emerald-400/30 bg-emerald-500/[0.04]",
-    pill: "bg-emerald-500/15 text-emerald-200",
-    badge: "border-emerald-400/30 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20",
-    panel: "border-emerald-400/25",
-    wave: "ai-wave--gigachat border-emerald-400/15",
-    button: "border-emerald-400/30 bg-emerald-500/10 hover:bg-emerald-500/20",
-    text: "text-emerald-300",
+  qwen: {
+    segment: "bg-violet-500/20 text-violet-100 shadow-[inset_0_0_0_1px_rgba(167,139,250,0.45)]",
+    card: "border-violet-400/30 bg-violet-500/[0.04]",
+    pill: "bg-violet-500/15 text-violet-200",
+    badge: "border-violet-400/30 bg-violet-500/10 text-violet-200 hover:bg-violet-500/20",
+    panel: "border-violet-400/25",
+    wave: "ai-wave--qwen border-violet-400/15",
+    button: "border-violet-400/30 bg-violet-500/10 hover:bg-violet-500/20",
+    text: "text-violet-300",
   },
 };

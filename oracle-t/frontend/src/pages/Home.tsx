@@ -28,7 +28,7 @@ const NEWS_AREAS = [
   "ai-usage hero hero analyzed-only",
   "model-sources model-sources top-search schedule",
   "requirements-view requirements-view registries catalog-lean",
-  "bitrix gigachat integrations-tabs integrations-tabs",
+  "bitrix qwen integrations-tabs integrations-tabs",
   "tz-reference tz-reference marked-lists marked-lists",
   "selection selection profiles profiles",
   "okpd2-tree tenders-header minutes feeds",

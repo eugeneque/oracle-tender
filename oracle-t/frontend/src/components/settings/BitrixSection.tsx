@@ -11,6 +11,7 @@ import {
 
 import { ApiError, api, downloadFile } from "../../api/client";
 import type { ApiClient, ApiClientCreated } from "../../api/types";
+import { BitrixAiBlock } from "./BitrixAiBlock";
 import { BitrixDealsBlock } from "./BitrixDealsBlock";
 
 function formatDateTime(value: string | null): string {
@@ -153,6 +154,7 @@ export function BitrixSection({
             </div>
           )}
 
+          {isAdmin && <BitrixAiBlock />}
           {isAdmin && <BitrixDealsBlock />}
 
           <div className="mb-5">

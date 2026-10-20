@@ -26,9 +26,9 @@ from loguru import logger
 from sqlalchemy.orm import Session
 
 from app.services.ai_provider_service import (
-    PROVIDER_CLAUDE,
     PROVIDER_DEEPSEEK,
     PROVIDER_LABELS,
+    PROVIDER_QWEN,
     AiQuotaExceededError,
     AiUnavailableError,
     get_model_limits,
@@ -54,6 +54,8 @@ _QUOTA_MARKERS = ("spending limit", "limit exceeded", "insufficient", "balance",
 # `enabled: false`. Извлечение по схеме рассуждений не требует.
 _PROVIDER_EXTRA_BODY: dict[str, dict[str, Any]] = {
     PROVIDER_DEEPSEEK: {"reasoning": {"enabled": False}},
+    # Qwen3.8 27B (20.10.2026) тоже умеет «гибкое мышление» — по той же причине выключено.
+    PROVIDER_QWEN: {"reasoning": {"enabled": False}},
 }
 # Ответ дольше этого пишется в журнал — чтобы «долго идёт разбор» было видно без замеров.
 SLOW_CALL_SECONDS = 60.0
@@ -199,11 +201,11 @@ def run_structured(
     user_text: str,
     response_model: type[ResponseT],
     temperature: float = 0.0,
-    provider: str = PROVIDER_CLAUDE,
+    provider: str = PROVIDER_DEEPSEEK,
 ) -> ResponseT:
     """Запрос к модели через RouterAI со structured output — контракт тот же, что у
     `yandex_ai_client.run_structured`: те же аргументы, тот же тип результата, те же повторы.
-    `provider` выбирает модель (Claude или DeepSeek, 28.09.2026) — ключ и шлюз у них общие."""
+    `provider` выбирает модель (DeepSeek или Qwen, 20.10.2026) — ключ и шлюз у них общие."""
 
     api_key, model, base_url = get_routerai_credentials(db, provider)
     name = f"{PROVIDER_LABELS.get(provider, provider)} (RouterAI)"

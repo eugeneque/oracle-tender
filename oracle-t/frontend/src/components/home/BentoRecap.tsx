@@ -413,12 +413,12 @@ const VISUALS: Record<string, () => ReactNode> = {
       </div>
     </div>
   ),
-  gigachat: () => (
-    <div className="grid grid-cols-2 gap-1.5 text-[10.5px]">
-      {(["yandex", "claude", "deepseek", "gigachat"] as const).map((provider) => (
+  qwen: () => (
+    <div className="grid grid-cols-3 gap-1.5 text-[10.5px]">
+      {(["yandex", "deepseek", "qwen"] as const).map((provider) => (
         <span
           key={provider}
-          className={`flex items-center justify-center rounded-xl p-2 ${provider === "gigachat" ? "bg-emerald-500/15 ring-1 ring-emerald-400/40" : "bg-white/[0.05] opacity-60"}`}
+          className={`flex items-center justify-center rounded-xl p-2 ${provider === "qwen" ? "bg-violet-500/15 ring-1 ring-violet-400/40" : "bg-white/[0.05] opacity-60"}`}
         >
           <AiProviderIcon provider={provider} size={20} />
         </span>

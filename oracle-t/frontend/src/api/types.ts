@@ -556,10 +556,10 @@ export interface YandexConnectionTestResult {
   message: string;
 }
 
-/** Провайдер ИИ-модуля (18.09.2026): YandexGPT, Claude или DeepSeek (28.09.2026) через RouterAI,
- * GigaChat (08.10.2026, задел — ждёт ключа). Выбор — у каждого пользователя свой; без него
+/** Провайдер ИИ-модуля (18.09.2026): YandexGPT, DeepSeek или Qwen (20.10.2026) через RouterAI.
+ * Claude и GigaChat убраны 20.10.2026. Выбор — у каждого пользователя свой; без него
  * действует системная модель по умолчанию. */
-export type AiProviderKey = "yandex" | "claude" | "deepseek" | "gigachat";
+export type AiProviderKey = "yandex" | "deepseek" | "qwen";
 
 /** Какая модель обслуживает запросы текущего пользователя. `source` — откуда она взялась:
  * личный выбор (`user`) или системная по умолчанию (`default`). */
@@ -678,19 +678,8 @@ export interface AiUsageCall {
 export interface RouterAiSettings {
   is_configured: boolean;
   api_key_masked: string | null;
-  model: string;
   deepseek_model: string;
-  base_url: string;
-  updated_at: string | null;
-  updated_by: string | null;
-}
-
-/** GigaChat (Сбер, 08.10.2026): ключ авторизации наружу не отдаётся — только хвост. */
-export interface GigaChatSettings {
-  is_configured: boolean;
-  auth_key_masked: string | null;
-  scope: string;
-  model: string;
+  qwen_model: string;
   base_url: string;
   updated_at: string | null;
   updated_by: string | null;
@@ -2017,6 +2006,53 @@ export interface Bitrix24PushResult {
   created: boolean;
   url: string;
   message: string;
+}
+
+/** Обработчик приложения «ИИ анализ и решения» на портале (20.10.2026). Секрет не отдаётся. */
+export interface BitrixAiSettings {
+  receiver_url: string | null;
+  secret_set: boolean;
+  secret_hint: string | null;
+  push_enabled: boolean;
+}
+
+export interface BitrixAiPreview {
+  tender_id: string;
+  payload: Record<string, unknown> & { sections: Record<string, unknown[]> };
+  items_count: number;
+  size_bytes: number;
+}
+
+/** Кнопка «Загрузить в Битрикс» на странице тендера (20.10.2026). */
+export interface BitrixTenderState {
+  can_upload: boolean;
+  reason: string | null;
+  deal_id: number | null;
+  deal_url: string | null;
+  last_request: BitrixAiRequest | null;
+}
+
+export interface BitrixAiRequest {
+  id: string;
+  tender_id: string;
+  tender_number: string | null;
+  tender_title: string | null;
+  request_id: string;
+  analysis_id: string;
+  deal_id_sent: number;
+  full_snapshot: boolean;
+  items_count: number;
+  http_status: number | null;
+  response_body: string | null;
+  accepted: boolean;
+  duplicate: boolean;
+  deal_id: number | null;
+  deal_created: boolean | null;
+  deal_url: string | null;
+  error: string | null;
+  attempts: number;
+  retryable: boolean;
+  sent_at: string | null;
 }
 
 /** Строка центра уведомлений в шапке (14.10.2026): `mine` — запуск пользователя,

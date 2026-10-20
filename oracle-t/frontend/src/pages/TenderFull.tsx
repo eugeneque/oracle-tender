@@ -6,6 +6,7 @@ import { ApiError, api } from "../api/client";
 import type { Tender } from "../api/types";
 import { AppShell } from "../components/AppShell";
 import { TenderDetailPanel } from "../components/TenderDetailPanel";
+import { BitrixUploadButton } from "../components/tender-detail/BitrixUploadButton";
 
 /**
  * Закупка на отдельной странице (замечание 17.09.2026): та же карточка, что справа в
@@ -58,12 +59,15 @@ export function TenderFullPage() {
               {tender ? `№ ${tender.external_id}` : "Закупка"}
             </span>
           </div>
-          <Link
-            to="/tenders"
-            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/5"
-          >
-            <ArrowLeft size={13} />К списку
-          </Link>
+          <div className="flex shrink-0 items-center gap-2">
+            {tender && <BitrixUploadButton tenderId={tender.id} stage={tender.stage} />}
+            <Link
+              to="/tenders"
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/5"
+            >
+              <ArrowLeft size={13} />К списку
+            </Link>
+          </div>
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.02]">
@@ -72,7 +76,13 @@ export function TenderFullPage() {
               {error}
             </div>
           ) : tender ? (
-            <TenderDetailPanel key={tender.id} tender={tender} expandable={false} />
+            <TenderDetailPanel
+              key={tender.id}
+              tender={tender}
+              expandable={false}
+              // Этап меняют в карточке — кнопке выгрузки он нужен, чтобы стать доступной.
+              onChanged={setTender}
+            />
           ) : (
             <div className="flex h-full items-center justify-center gap-2 text-sm text-zinc-600">
               <Loader2 size={16} className="animate-spin" />

@@ -62,9 +62,9 @@ def operation_label(operation: str | None) -> str | None:
 def _provider_label(provider: str | None) -> str | None:
     if not provider:
         return None
-    from app.services.ai_provider_service import PROVIDER_LABELS
+    from app.services.ai_provider_service import provider_label
 
-    return PROVIDER_LABELS.get(provider, provider)
+    return provider_label(provider)
 
 
 def log_ai_event(

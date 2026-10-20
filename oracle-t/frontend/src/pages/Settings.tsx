@@ -111,7 +111,7 @@ const SEARCH_INDEX: SearchEntry[] = [
   { tab: "feedback", title: "Ответы специалистов", hint: "Замечания специалистов к заключениям ИИ", keywords: "заключение ии несогласия согласия замечания обратная связь" },
   { tab: "interface", anchor: "interface-dark-theme", title: "Тёмная тема", hint: "Оформление приложения", keywords: "тема светлая тёмная темная оформление цвет" },
   { tab: "interface", anchor: "interface-nav", title: "Вид меню", hint: "Боковое меню или меню в шапке", keywords: "меню сайдбар шапка навигация" },
-  { to: "/integrations", page: "Интеграции", title: "Модели ИИ", hint: "Claude, DeepSeek, YandexGPT, GigaChat — ключи и выбор модели", keywords: "ии ai модель нейросеть ключ routerai deepseek claude yandex gigachat гигачат сбер провайдер", adminOnly: true },
+  { to: "/integrations", page: "Интеграции", title: "Модели ИИ", hint: "YandexGPT, DeepSeek, Qwen — ключи и выбор модели", keywords: "ии ai модель нейросеть ключ routerai deepseek qwen квен yandex провайдер", adminOnly: true },
   { to: "/integrations?tab=rusprofile", page: "Интеграции", title: "Rusprofile", hint: "Учётная запись для заполнения компании", keywords: "rusprofile русрофиль компания", adminOnly: true },
   { to: "/integrations?tab=mail", page: "Интеграции", title: "Почта и уведомления", hint: "Ящик, рассылка, журнал отправок", keywords: "почта email уведомления рассылка письма" },
   { to: "/integrations?tab=bitrix", page: "Интеграции", title: "Bitrix24", hint: "Выгрузка лидов и ключи API", keywords: "битрикс bitrix crm лиды" },

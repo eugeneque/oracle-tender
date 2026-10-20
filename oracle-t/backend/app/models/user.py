@@ -37,7 +37,7 @@ class User(Base):
     avatar_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    # Персональный выбор модели ИИ (18.09.2026): "yandex" | "claude" — см.
+    # Персональный выбор модели ИИ (18.09.2026): "yandex" | "deepseek" | "qwen" — см.
     # app/services/ai_provider_service.py. `NULL` — пользователь не выбирал, действует
     # системная модель по умолчанию из `ai_provider_settings`.
     ai_provider: Mapped[str | None] = mapped_column(String(20), nullable=True)

@@ -481,3 +481,57 @@ TENDERPLAN_SOURCE: tuple[str, str, str, str, str | None, str, str, str | None] =
     "API tenderplan.ru: поиск по всей базе сервиса (44-ФЗ, 223-ФЗ, коммерческие площадки)."
     " Нужен персональный токен из личного кабинета — в «Настройки → Тендерплан».",
 )
+
+
+# Корпоративные секции Росэлторга (20.10.2026) — отдельные площадки поверх общей витрины
+# `roseltorg`: закупки Россетей, РусГидро, Ростелекома и Интер РАО нужно видеть своим
+# источником. Собираются публичным поиском roseltorg.ru с фильтром секции, учётная запись
+# не нужна (см. `app/adapters/roseltorg.py`). Сидируются миграцией 0080.
+#
+# (key, name, url, type, adapter_key, adapter_status, polling_schedule, note)
+ROSELTORG_SECTION_SOURCES: list[tuple[str, str, str, str, str | None, str, str, str | None]] = [
+    (
+        "roseltorg_rosseti",
+        "Росэлторг — ПАО «Россети»",
+        "https://rosseti.roseltorg.ru/",
+        "etp_corporate",
+        "roseltorg_rosseti",
+        "implemented",
+        "twice_daily",
+        "Корпоративная секция ПАО «Россети». Сбор — публичным поиском roseltorg.ru по секции;"
+        " в самой секции список процедур виден только после входа.",
+    ),
+    (
+        "roseltorg_rushydro",
+        "Росэлторг — Группа «РусГидро»",
+        "https://rushydro.roseltorg.ru/",
+        "etp_corporate",
+        "roseltorg_rushydro",
+        "implemented",
+        "twice_daily",
+        "Корпоративная секция Группы «РусГидро». Сбор — публичным поиском roseltorg.ru по"
+        " секции; в самой секции список процедур виден только после входа.",
+    ),
+    (
+        "roseltorg_rt",
+        "Росэлторг — ПАО «Ростелеком»",
+        "https://rt.roseltorg.ru/",
+        "etp_corporate",
+        "roseltorg_rt",
+        "implemented",
+        "twice_daily",
+        "Корпоративная секция ПАО «Ростелеком» и подведомственных организаций.",
+    ),
+    (
+        "roseltorg_interrao",
+        "Росэлторг — ПАО «Интер РАО»",
+        "https://interrao.roseltorg.ru/",
+        "etp_corporate",
+        "roseltorg_interrao",
+        "implemented",
+        "twice_daily",
+        "Закупки ПАО «Интер РАО» и его корпоративный интернет-магазин. В саму секцию вход"
+        " только через «Росэлторг.ID» (lk.roseltorg.ru, с капчей) — сбор идёт публичным"
+        " поиском roseltorg.ru.",
+    ),
+]

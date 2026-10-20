@@ -29,7 +29,7 @@ def _ok_response(text: str = '{"text": "ok"}', **usage) -> httpx.Response:
     return httpx.Response(
         200,
         json={
-            "model": "anthropic/claude-opus-5",
+            "model": "deepseek/deepseek-v4-pro-0813",
             "choices": [{"message": {"content": text}, "finish_reason": "stop"}],
             "usage": usage,
         },
@@ -53,7 +53,7 @@ def routerai(monkeypatch):
     monkeypatch.setattr(
         routerai_client,
         "get_routerai_credentials",
-        lambda db, provider="claude": ("k", "anthropic/claude-opus-5", "https://x"),
+        lambda db, provider="deepseek": ("k", "deepseek/deepseek-v4-pro-0813", "https://x"),
     )
     monkeypatch.setattr(routerai_client.time, "sleep", lambda seconds: None)
     return state
@@ -102,7 +102,7 @@ def test_call_is_recorded_with_provider_counts_and_job_tender(db_session, router
 
     assert answer.text == "ok"
     (record,) = _records(db_session, job.id)
-    assert record.provider == "claude"
+    assert record.provider == "deepseek"
     assert record.operation == "Answer"
     assert (record.prompt_tokens, record.completion_tokens, record.cached_tokens) == (1200, 80, 1000)
     assert record.tokens_estimated is False
@@ -139,13 +139,30 @@ def test_output_ceiling_comes_from_model_limits(db_session, admin_user, routerai
     """Потолок ответа — из настроек модели: на окне 32 тыс. ответ в 16 тыс. не помещается."""
 
     ai_provider_service.update_model_limits(
-        db_session, "claude", context_tokens=32_768, max_output_tokens=4_000, actor=admin_user
+        db_session, "deepseek", context_tokens=32_768, max_output_tokens=4_000, actor=admin_user
     )
     routerai["responses"] = [_ok_response(prompt_tokens=10, completion_tokens=2)]
 
     routerai_client.run_structured(db_session, system_prompt="s", user_text="u", response_model=Answer)
 
     assert routerai["bodies"][0]["max_tokens"] == 4_000
+
+
+def test_qwen_goes_through_routerai_without_reasoning(db_session, routerai):
+    """Qwen3.8 27B (20.10.2026) — через тот же шлюз, с «мышлением», выключенным как у
+    DeepSeek, и с окном 262 тыс. по умолчанию; запись учёта — под провайдером qwen."""
+
+    job, _tender = _job_with_tender(db_session)
+    routerai["responses"] = [_ok_response(prompt_tokens=10, completion_tokens=2)]
+    with running_job(datetime.now(timezone.utc), job.id):
+        routerai_client.run_structured(
+            db_session, system_prompt="s", user_text="u", response_model=Answer, provider="qwen"
+        )
+
+    assert routerai["bodies"][0]["reasoning"] == {"enabled": False}
+    assert ai_provider_service.get_model_limits(db_session, "qwen").context_tokens == 262_144
+    (record,) = _records(db_session, job.id)
+    assert record.provider == "qwen"
 
 
 def test_model_limits_validation_budget_and_reset(db_session, admin_user):
@@ -275,7 +292,7 @@ def test_usage_endpoints_are_admin_only_and_check_period(client, admin_token):
     assert client.get("/ai-usage/summary").status_code == 401
 
     limits = client.get("/integrations/ai-limits", headers=headers)
-    assert {row["provider"] for row in limits.json()} == {"yandex", "claude", "deepseek", "gigachat"}
+    assert {row["provider"] for row in limits.json()} == {"yandex", "deepseek", "qwen"}
 
 
 def test_user_usage_lists_steps_and_tenders_with_links(db_session, admin_user, client, admin_token):

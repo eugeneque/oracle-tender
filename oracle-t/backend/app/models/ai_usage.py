@@ -28,7 +28,7 @@ class AiUsageRecord(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.clock_timestamp(), nullable=False, index=True
     )
-    # "yandex" | "claude" | "deepseek" | "gigachat" — кто обслужил запрос (после подмены
+    # "yandex" | "deepseek" | "qwen" (до 20.10.2026 ещё "claude", "gigachat") — кто обслужил запрос (после подмены
     # при исчерпанном лимите — фактический, а не запрошенный).
     provider: Mapped[str] = mapped_column(String(20), nullable=False)
     model: Mapped[str | None] = mapped_column(String(120), nullable=True)

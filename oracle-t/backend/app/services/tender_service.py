@@ -40,7 +40,7 @@ from app.models.source import (
 )
 from app.models.tender import RelevanceStatus, Tender, TenderStatus
 from app.services import notification_service
-from app.services import ai_relevance_service, relevance_service
+from app.services import ai_relevance_service, eis_card_dates, relevance_service
 from app.services.audit import log_action
 
 _UPDATABLE_FIELDS = (
@@ -107,6 +107,32 @@ def _fill_missing(existing: Tender, summary: TenderSummary) -> bool:
     return changed
 
 
+# Общая витрина Росэлторга и его корпоративные секции (источники `roseltorg_*`, 20.10.2026)
+# видят одни и те же процедуры под одним номером площадки. Номера вида `ROSSETI…`/`RH…`/`RT…`
+# — не реестровые номера ЕИС, и обычная дедупликация по `registry_number` их не склеивает.
+ROSELTORG_KEY = "roseltorg"
+
+
+def _is_roseltorg_family(source_key: str | None) -> bool:
+    return source_key == ROSELTORG_KEY or (source_key or "").startswith(f"{ROSELTORG_KEY}_")
+
+
+def _roseltorg_twin(db: Session, source: Source, external_id: str) -> Tender | None:
+    """Та же процедура, собранная другим источником семейства Росэлторга."""
+
+    if not _is_roseltorg_family(source.key):
+        return None
+    return db.scalar(
+        select(Tender)
+        .join(Source, Source.id == Tender.source_id)
+        .where(
+            Tender.external_id == external_id,
+            Tender.source_id != source.id,
+            or_(Source.key == ROSELTORG_KEY, Source.key.like(f"{ROSELTORG_KEY}\\_%")),
+        )
+    )
+
+
 def _same_feed_condition(source: Source):
     if source.type in SEPARATE_FEED_SOURCE_TYPES:
         return Source.type == source.type
@@ -155,6 +181,18 @@ def _upsert_tender(
     registry_number = _registry_number(summary)
 
     if existing is None:
+        # Секция Росэлторга точнее общей витрины: закупку, которую раньше принёс общий
+        # «Росэлторг», секция забирает себе — иначе она не нашлась бы фильтром по площадке
+        # «Росэлторг — Россети». Обратное (витрина нашла закупку секции) — просто не дубль.
+        family_twin = _roseltorg_twin(db, source, summary.external_id)
+        if family_twin is not None:
+            if source.key != ROSELTORG_KEY and family_twin.source.key == ROSELTORG_KEY:
+                family_twin.source_id = source.id
+                db.add(family_twin)
+            elif _fill_missing(family_twin, summary):
+                db.add(family_twin)
+            return False
+
         # Вторая ступень дедупликации: та же закупка могла прийти с другой площадки под
         # своим идентификатором. Пустой `registry_number` под условие не подставляем — иначе
         # все записи без номера схлопнулись бы в одну.
@@ -223,6 +261,10 @@ def _upsert_tender(
     for field_name in _UPDATABLE_FIELDS:
         new_value = getattr(summary, field_name)
         if new_value is not None and getattr(existing, field_name) != new_value:
+            # Точный срок из карточки ЕИС не затирается грубым значением площадки за тот же
+            # день (дата без времени, местное время без пояса); перенос на другой день — да.
+            if eis_card_dates.keep_card_deadline(db, existing, field_name, new_value):
+                continue
             setattr(existing, field_name, new_value)
             changed = True
     if changed:
