@@ -352,7 +352,7 @@ export function TenderComplianceTab({
                           }`}
                         />
                         <span className="flex-1 leading-snug text-zinc-200">{requirement.text}</span>
-                        <PositionChip requirement={requirement} />
+                        <PositionChip requirement={requirement} compact />
                         <ParameterChip requirement={requirement} />
                       </div>
                     </td>

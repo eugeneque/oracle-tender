@@ -24,18 +24,61 @@ export function ParameterChip({ requirement }: { requirement: Pick<Requirement, 
   );
 }
 
+const POSITION_NUMBER = /^\s*(?:поз[а-яё]*\.?\s*)?№?\s*(\d+)[.)]?\s*/i;
+
+/** Позиция спецификации по частям: номер («2») и наименование («Трёхфазный ПУ»). */
+function splitPosition(position: string): { number: string | null; name: string } {
+  const match = position.match(POSITION_NUMBER);
+  if (!match) return { number: null, name: position.trim() };
+  return { number: match[1], name: position.slice(match[0].length).trim() };
+}
+
 /** Значок позиции спецификации (15.10.2026): в закупке из нескольких позиций требование
- * сверяется только с приборами своей позиции, и человеку надо видеть, к какой оно относится. */
-export function PositionChip({ requirement }: { requirement: Pick<Requirement, "position"> }) {
+ * сверяется только с приборами своей позиции, и человеку надо видеть, к какой оно относится.
+ * С наименованием позиции (замечание 22.10.2026): «Поз. 2» без него не объясняло, к какому
+ * прибору относится «Класс точности: 0.5S». */
+export function PositionChip({
+  requirement,
+  compact = false,
+}: {
+  requirement: Pick<Requirement, "position">;
+  /** Узкая колонка матрицы — наименование обрезается раньше, полностью оно в подсказке. */
+  compact?: boolean;
+}) {
   if (!requirement.position) return null;
-  const short = requirement.position.match(/^\s*(?:поз[а-яё]*\.?\s*)?№?\s*(\d+)/i)?.[1];
+  const { number, name } = splitPosition(requirement.position);
   return (
     <span
-      className="max-w-[9rem] shrink-0 truncate rounded-md bg-zinc-500/10 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400"
-      title={`Позиция спецификации: ${requirement.position}`}
+      className={`${compact ? "max-w-[10rem]" : "max-w-[16rem]"} shrink-0 truncate rounded-md bg-zinc-500/10 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400`}
+      title={`Требование относится к позиции спецификации: ${requirement.position}`}
     >
-      {short ? `Поз. ${short}` : requirement.position}
+      {number ? `Поз. ${number}${name ? ` · ${name}` : ""}` : name}
     </span>
+  );
+}
+
+/** Перечень позиций над требованиями — только когда их несколько: читатель видит, что
+ * требование без значка общее для всех позиций, а со значком — только для своей. */
+function PositionsLegend({ requirements }: { requirements: Requirement[] }) {
+  const positions = [...new Set(requirements.map((item) => item.position).filter((item): item is string => !!item))];
+  if (positions.length < 2) return null;
+  return (
+    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-xs text-zinc-400">
+      <div className="mb-1 font-medium text-zinc-300">Позиции спецификации</div>
+      <ul className="space-y-0.5">
+        {positions.map((position) => {
+          const { number, name } = splitPosition(position);
+          return (
+            <li key={position}>
+              {number ? <span className="tabular-nums text-zinc-300">Поз. {number}</span> : null}
+              {number && name ? " — " : null}
+              {name}
+            </li>
+          );
+        })}
+      </ul>
+      <div className="mt-1 text-zinc-500">Требование без значка позиции относится ко всем позициям.</div>
+    </div>
   );
 }
 
@@ -180,6 +223,8 @@ export function TenderRequirementsTab({
           ))}
         </span>
       </div>
+
+      <PositionsLegend requirements={requirements} />
 
       {sections.map((section) => (
         <section key={section.kind}>

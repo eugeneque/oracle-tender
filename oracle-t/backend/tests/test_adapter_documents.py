@@ -198,6 +198,77 @@ def test_sberbank_ast_without_documents_table():
     assert _parse_card_documents("<html><body>Закупка без документов</body></html>") == []
 
 
+_SBER_XML = (
+    "<Purchase><PurchaseDocumentationInfo><PurchaseDocumentationDocsInfo><DocFiles>"
+    "<document><filename>Закупочная документация.rar</filename>"
+    "<url>https://utp.sberbank-ast.ru/Trade/File/DownloadFile?fid=2ec218ec</url></document>"
+    "<document><filename>Извещение ЗК МСП.doc</filename>"
+    "<url>https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid=BC6C</url></document>"
+    "</DocFiles></PurchaseDocumentationDocsInfo></PurchaseDocumentationInfo>"
+    "<PurchaseInfoTotal><MainCustomerInfo><maincustomername>ОАО \"КОММУНЭНЕРГО\"</maincustomername>"
+    "<maincustomerinn>4346011123</maincustomerinn></MainCustomerInfo>"
+    "<ApplSubmissionInfo><ApplSubmissionStopDate>06.08.2026 10:00</ApplSubmissionStopDate></ApplSubmissionInfo>"
+    "<PurchaseInfo><PurchaseCode>SBR003-260026413800036</PurchaseCode>"
+    "<PurchaseIntegratorCode>32616247862</PurchaseIntegratorCode></PurchaseInfo></PurchaseInfoTotal>"
+    "<Events><Event><EventDate>21.10.2026 09:41</EventDate>"
+    "<EventDescription>Подача запроса на разъяснение документации</EventDescription></Event>"
+    "<Event><EventDate>21.10.2026 10:10</EventDate>"
+    "<EventDescription>Ответ на запрос разъяснений документации № 271739</EventDescription></Event></Events>"
+    "</Purchase>"
+)
+
+
+def _sber_card_html() -> str:
+    from html import escape
+
+    return f'<html><form><input type="hidden" id="xmlData" value="{escape(_SBER_XML)}" /></form></html>'
+
+
+def test_sberbank_ast_card_reads_events_documents_and_eis_number():
+    """Замечание 22.10.2026: журнал событий площадки (запросы разъяснений) не показывался,
+    а файлы брались со страницы браузером. Всё это есть в XML карточки."""
+
+    from app.adapters.sberbank_ast import card_from_xml, documents_from_xml, eis_number, purchase_xml
+
+    root = purchase_xml(_sber_card_html())
+    card = card_from_xml(root, "https://utp.sberbank-ast.ru/Trade/NBT/PurchaseView/22/0/0/1")
+
+    assert card.tables["events"].rows == [
+        ["21.10.2026 09:41", "Подача запроса на разъяснение документации"],
+        ["21.10.2026 10:10", "Ответ на запрос разъяснений документации № 271739"],
+    ]
+    customer = next(section for section in card.sections if section.title == "Заказчик")
+    assert ("Наименование организации", 'ОАО "КОММУНЭНЕРГО"') in customer.fields
+    assert [doc.file_name for doc in documents_from_xml(root)] == ["Закупочная документация.rar", "Извещение ЗК МСП.doc"]
+    assert eis_number(root) == "32616247862"
+
+
+def test_sberbank_ast_login_only_files_are_taken_from_eis(monkeypatch):
+    """Файлы площадки без входа не отдаются — у процедуры с номером ЕИС они берутся оттуда."""
+
+    from app.adapters import sberbank_ast
+    from app.adapters.base import DocumentRef
+
+    monkeypatch.setattr(sberbank_ast, "fetch_purchase_xml", lambda url: sberbank_ast.purchase_xml(_sber_card_html()))
+    eis_doc = DocumentRef(file_name="Документация.docx", url="https://zakupki.gov.ru/223/filestore/x")
+    monkeypatch.setattr(sberbank_ast, "fetch_eis_documents", lambda number: [eis_doc] if number == "32616247862" else [])
+
+    documents = sberbank_ast.SberbankAstAdapter().download_documents(
+        "SBR003-260026413800036.1", "https://utp.sberbank-ast.ru/Trade/NBT/PurchaseView/22/0/0/1"
+    )
+
+    assert [doc.file_name for doc in documents] == ["Извещение ЗК МСП.doc", "Документация.docx"]
+
+
+def test_login_page_is_not_saved_as_document():
+    from app.services.document_service import is_html_stub
+
+    page = b"\r\n<html><head><title>Object moved</title></head><body>AccessDenied</body></html>"
+    assert is_html_stub(page, ".rar")
+    assert not is_html_stub(b"Rar!\x1a\x07\x00", ".rar")
+    assert not is_html_stub(page, ".html")
+
+
 class TestEisFallbackNumbers:
     """Запасной путь через ЕИС применим только к закупкам с реестровым номером.
 

@@ -1,4 +1,5 @@
-"""Поиск без различия Е/Ё и раздел «Разобранные» (замечание 14.10.2026)."""
+"""Поиск без различия Е/Ё и организационно-правовой формы, раздел «Разобранные»
+(замечания 14.10.2026 и 22.10.2026)."""
 
 from __future__ import annotations
 
@@ -46,6 +47,19 @@ def test_search_ignores_yo(db_session):
     assert both <= _found(db_session, f"счетчиков {marker}")
     assert both <= _found(db_session, f"СЧЁТЧИКОВ {marker}")
     assert customer.id in _found(db_session, "объединенные сети")
+
+
+def test_search_by_customer_ignores_legal_form_and_quotes(db_session):
+    """Замечание 22.10.2026: «АКЦИОНЕРНОЕ ОБЩЕСТВО "ЭНЕРГОСБЫТ ПЛЮС"» не находил заказчика,
+    записанного как «АО «ЭнергосбыТ Плюс»». Форма и кавычки не важны; номер ищется тоже."""
+
+    marker = uuid.uuid4().hex[:6]
+    tender = _tender(db_session, "Поставка приборов учёта", customer=f"АО «ЭнергосбыТ Плюс {marker}»")
+
+    assert tender.id in _found(db_session, f'АКЦИОНЕРНОЕ ОБЩЕСТВО "ЭНЕРГОСБЫТ ПЛЮС {marker}"')
+    assert tender.id in _found(db_session, f"энергосбыт {marker}")
+    assert tender.id in _found(db_session, tender.external_id)
+    assert tender.id not in _found(db_session, f"энергосбыт {marker} тюмень")
 
 
 def test_analyzed_filter_counts_only_tenders_with_requirements(db_session):

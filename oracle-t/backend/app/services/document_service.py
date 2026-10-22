@@ -108,12 +108,35 @@ def _download_bytes(url: str) -> bytes:
     raise last_error if last_error else RuntimeError("Файл не скачан")
 
 
+_HTML_START = (b"<!doctype html", b"<html", b"<head")
+
+LOGIN_PAGE_ERROR = (
+    "Вместо файла площадка вернула веб-страницу — обычно это требование войти в личный "
+    "кабинет. Скачайте файл на площадке вручную и приложите кнопкой «Добавить файл»."
+)
+
+
+def is_html_stub(content: bytes, file_type: str | None) -> bool:
+    """Скачалась веб-страница, а не документ (замечание 22.10.2026): Сбербанк-АСТ без входа
+    отдаёт вместо файла страницу «Для скачивания файла требуется войти в систему», и она
+    сохранялась под именем «Закупочная документация.rar» — «битый архив» в карточке."""
+
+    if (file_type or "").lower() in {".html", ".htm"}:
+        return False
+    head = content[:512].lstrip(b"\xef\xbb\xbf \t\r\n").lower()
+    return head.startswith(_HTML_START)
+
+
 def _process_document(doc: TenderDocument, tender_dir: Path) -> None:
     try:
         content = _download_bytes(doc.source_url)
     except Exception as exc:  # noqa: BLE001 - ошибка одного документа не должна прервать остальные
         doc.parse_status = ParseStatus.ERROR.value
         doc.parse_error = f"Не удалось скачать: {exc}"
+        return
+    if is_html_stub(content, doc.file_type or _guess_extension(doc.file_name, doc.source_url)):
+        doc.parse_status = ParseStatus.ERROR.value
+        doc.parse_error = LOGIN_PAGE_ERROR
         return
 
     # Тип определяем по имени/ссылке, а если там ничего не сказано — по содержимому файла:
@@ -224,6 +247,32 @@ def list_tender_documents(db: Session, tender_id: uuid.UUID) -> list[TenderDocum
     )
 
 
+def _drop_login_stubs(db: Session, documents: list[TenderDocument]) -> list[TenderDocument]:
+    """Убирает документы, скачанные до 22.10.2026 со ссылок Сбербанк-АСТ «только после входа»:
+    в них лежит веб-страница, а не файл. Если в комплекте не осталось ничего, документы
+    запрашиваются заново — теперь из ЕИС (`SberbankAstAdapter.download_documents`)."""
+
+    from app.adapters.sberbank_ast import LOGIN_ONLY_FILE
+
+    stubs = [
+        doc
+        for doc in documents
+        if doc.parse_status == ParseStatus.ERROR.value
+        and not doc.extracted_text
+        # Уже распознанная заглушка — не перекачивать при каждом открытии карточки.
+        and doc.parse_error != LOGIN_PAGE_ERROR
+        and LOGIN_ONLY_FILE.search(doc.source_url or "")
+    ]
+    if not stubs or len(stubs) < len(documents):
+        return documents
+    for doc in stubs:
+        if doc.storage_path:
+            (get_storage_root() / doc.storage_path).unlink(missing_ok=True)
+        db.delete(doc)
+    db.flush()
+    return []
+
+
 def sync_tender_documents(db: Session, tender: Tender) -> list[TenderDocument]:
     """Скачивает документы тендера при первом обращении; при повторном — просто возвращает уже
     сохранённые записи (не перекачивает заново). Источник без реализованного адаптера — не
@@ -246,6 +295,7 @@ def sync_tender_documents_with_status(
     «требований не найдено» и идёт искать в закупке ТЗ, которого система не видела."""
 
     existing = list_tender_documents(db, tender.id)
+    existing = _drop_login_stubs(db, existing)
     if existing:
         return existing, None
 

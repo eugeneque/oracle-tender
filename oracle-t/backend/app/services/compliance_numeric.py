@@ -230,15 +230,18 @@ def _current_check(value: str, *, maximum: bool) -> list[Check] | None:
         return None
     first = _number(match.group(1))
     extra = match.group(2) or match.group(3)
+    # В пояснении — с оговоркой «не менее», как в ТЗ: «требуется 100 А» при 80 А читается
+    # как ошибка сравнения.
+    shown = value.strip()
     if maximum:
         if extra:
             return None
-        return [_current_rule("max_current", first, mode, text)]
-    checks = [_current_rule("nominal_current", first, mode, text)]
+        return [_current_rule("max_current", first, mode, shown)]
+    checks = [_current_rule("nominal_current", first, mode, shown)]
     if extra:
         if mode != "exact":
             return None
-        checks.append(_current_rule("max_current", _number(extra), "exact", text))
+        checks.append(_current_rule("max_current", _number(extra), "exact", shown))
     return checks
 
 
@@ -392,7 +395,7 @@ def _tariffs_check(value: str) -> Check | None:
             return None
         return [max(numbers) >= wanted]
 
-    return Check("tariffs", ("Количество тарифов",), judge, value.strip())
+    return Check("tariffs", ("Количество тарифов",), judge, f"тарифов {value.strip()}")
 
 
 # --------------------------------------------------------------------------- температура
@@ -461,22 +464,46 @@ _CLAUSES: tuple[tuple[str, re.Pattern[str], Callable[[str], Check | list[Check] 
      lambda v: _minimum_check("service_life", ("Срок службы",), v, r"лет|года|год|мес\w*", _years)),
     ("mpi", re.compile(r"^межповерочн\w+\s+интервал\w*(?:\s+счетчика|\s+счётчика)?$", re.IGNORECASE),
      lambda v: _minimum_check("mpi", ("Межповерочный интервал",), v, r"лет|года|год|мес\w*", _months)),
-    ("tariffs", re.compile(r"^количеств\w+\s+тариф\w*$", re.IGNORECASE), _tariffs_check),
+    ("tariffs", re.compile(r"^(?:количеств\w+|числ\w+)\s+тариф\w*$|^тарифност\w*$|^многотарифн\w+\s+учет\w*$", re.IGNORECASE), _tariffs_check),
     ("temperature", re.compile(r"^(?:рабоч\w+\s+)?(?:температурн\w+\s+)?диапазон\w*(?:\s+рабоч\w+)?(?:\s+температур\w*)?$|^рабоч\w+\s+температур\w+$", re.IGNORECASE), _temperature_check),
     ("ip", re.compile(r"^степен\w+\s+защиты(?:\s+корпуса)?(?:\s+\(ip\))?$", re.IGNORECASE), _ip_check),
 )
 _CLAUSE_SPLIT = re.compile(r"[;,]\s*(?=[^:;,]{3,60}:)")
+
+# «Базовый / максимальный ток: не более 5А / не менее 100А» (32616482191, замечание
+# 22.10.2026) — два условия в одной строке. Раньше такая строка не разбиралась, а сокращённая
+# моделью формулировка «Базовый ток: 5 А» подтверждалась кодом у D17 с максимальным 80 А.
+_PAIRED = re.compile(
+    r"^(?P<first>[^:/]+?)\s*/\s*(?P<second>[^:/]+?)\s+(?P<noun>\w+)\s*:\s*"
+    r"(?P<one>[^/]+?)\s*/\s*(?P<two>[^/]+)$"
+)
+# Заголовок через тире вместо двоеточия: «Базовый / максимальный ток – не более 5А».
+_DASH_HEADING = re.compile(r"^([^:–—]{3,60}?)\s+[–—-]\s+")
+
+
+def _expand_paired(text: str) -> str:
+    if ":" not in text:
+        text = _DASH_HEADING.sub(r"\1: ", text, count=1)
+    match = _PAIRED.match(text)
+    if not match:
+        return text
+    noun = match.group("noun")
+    return (
+        f"{match.group('first')} {noun}: {match.group('one')}; "
+        f"{match.group('second')} {noun}: {match.group('two')}"
+    )
 
 
 def requirement_checks(text: str) -> list[Check] | None:
     """Условия требования, если оно целиком однозначно; иначе None (решает модель)."""
 
     text = (text or "").strip().rstrip(".")
+    if re.match(r"^класс\w*\s+точност", text, re.IGNORECASE):
+        check = _accuracy_check(text) if ":" in text else None
+        return [check] if check else None
+    text = _expand_paired(text)
     if not text or ":" not in text:
         return None
-    if re.match(r"^класс\w*\s+точност", text, re.IGNORECASE):
-        check = _accuracy_check(text)
-        return [check] if check else None
     if _TRANSFORMER_RE.search(text):
         return None
     checks: list[Check] = []
@@ -492,6 +519,44 @@ def requirement_checks(text: str) -> list[Check] | None:
             return None
         checks.extend(parsed if isinstance(parsed, list) else [parsed])
     return checks or None
+
+
+# --------------------------------------------------------------------------- формулировка
+
+# Ссылки на документы и годы — не значения требования: «Класс точности: 1» без «по ГОСТ
+# 31819.21-2012» ничего не потерял.
+_REFERENCE_RE = re.compile(
+    r"(?:гост|ту|сто|iec|мэк|en|постановлени\w*|пп|№)\s*(?:р\s*)?[\d.\-–/ ]*\d", re.IGNORECASE
+)
+_VALUE_NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def _value_numbers(text: str) -> set[str]:
+    cleaned = _REFERENCE_RE.sub(" ", text or "")
+    return {
+        number.replace(",", ".")
+        for number in _VALUE_NUMBER.findall(cleaned)
+        if not re.fullmatch(r"(?:19|20)\d\d", number)
+    }
+
+
+def lost_numbers(text: str | None, normalized: str | None) -> set[str]:
+    """Числа формулировки ТЗ, которых нет в сокращённой (`normalized_text`): модель при
+    разборе выбросила часть требования — «Базовый / максимальный ток – не более 5А / не
+    менее 100А» превратилось в «Базовый ток: 5 А» (32616482191)."""
+
+    if not text or not normalized:
+        return set()
+    return _value_numbers(text) - _value_numbers(normalized)
+
+
+def wording_for_code(text: str | None, normalized: str | None) -> str:
+    """Что сверять кодом: сокращённую формулировку, если она ничего не потеряла; иначе —
+    формулировку ТЗ (если и она не разбирается, требование уходит модели)."""
+
+    if lost_numbers(text, normalized):
+        return text or ""
+    return normalized or text or ""
 
 
 # --------------------------------------------------------------------------- вердикт
@@ -518,9 +583,17 @@ ENABLED = frozenset(
 KIND_BOUND = frozenset({"accuracy", "voltage", "nominal_current", "max_current"})
 
 
+# Параметры, по которым код ставит «не соответствует» — только для своего каталога
+# (`decisive`, МИРТЕК): ток и число тарифов (замечание 22.10.2026: «требуют максимальный ток
+# не менее 100 А, у прибора 80 А», «требуют 8 тарифов, у прибора 4» — и прибор
+# предлагался). Каталог МИРТЕК — вся линейка с сайта производителя, «ни одна модель не
+# подходит» в нём значит «у нас такого нет»; у конкурентов каталог неполон (см. `prejudge`).
+DECISIVE_KEYS = frozenset({"nominal_current", "max_current", "tariffs"})
+
+
 @dataclass
 class NumericVerdict:
-    status: str  # пока только "meets"
+    status: str  # "meets" или "not_meets" (только `decisive`)
     explanation: str
     key: str
 
@@ -559,11 +632,16 @@ def prejudge(
     models: list[CatalogModel],
     wanted_groups: set[str] | None,
     enabled: frozenset[str],
+    *,
+    decisive: bool = False,
 ) -> NumericVerdict | None:
     """Вердикт кодом по требованию `text` для производителя с моделями `models`.
 
     `wanted_groups` — группы типов приборов закупки (фазность × включение): сравниваются
-    только модели этих групп (CRITERIA.md, п. 3.6). Не определены — все модели."""
+    только модели этих групп (CRITERIA.md, п. 3.6). Не определены — все модели.
+
+    `decisive` — каталог производителя полон (свой, МИРТЕК): по `DECISIVE_KEYS` код ставит и
+    «не соответствует», если у каждой модели нужного типа значение разобрано и не подходит."""
 
     checks = requirement_checks(text)
     if not checks or any(check.key not in enabled for check in checks):
@@ -576,6 +654,7 @@ def prejudge(
         return None
     candidates = [m for m in models if not wanted_groups or (m.groups & wanted_groups)]
     wanted = "; ".join(check.wanted for check in checks)
+    failed: list[str] = []
     for model in candidates:
         fits, shown = _model_fits(checks, model)
         if fits:
@@ -584,6 +663,19 @@ def prejudge(
                 f"{model.name}: {', '.join(shown)} (требуется {wanted}) [сверено кодом]"[:300],
                 checks[0].key,
             )
+        if fits is False:
+            failed.append(f"{model.name}: {', '.join(shown)}")
+    if (
+        decisive
+        and candidates
+        and len(failed) == len(candidates)
+        and all(check.key in DECISIVE_KEYS for check in checks)
+    ):
+        return NumericVerdict(
+            "not_meets",
+            f"Требуется {wanted}; ни одна модель не подходит — {'; '.join(failed)} [сверено кодом]"[:300],
+            checks[0].key,
+        )
     # «Не соответствует» код не ставит: сверка 14.10.2026 показала, что каталог моделей
     # неполон (у Милура в нём только 5(10) А, а приборы на 100 А модель нашла в описании
     # типа), и «ни одна модель каталога не подходит» ≠ «производитель такого не делает»

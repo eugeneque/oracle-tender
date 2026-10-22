@@ -16,11 +16,14 @@ from datetime import datetime
 import re
 from urllib.parse import urljoin
 
+import httpx
 from bs4 import BeautifulSoup
 from loguru import logger
+from lxml import etree
 from playwright.sync_api import sync_playwright
 
-from app.adapters.eis_documents import fetch_eis_documents
+from app.adapters.eis_card import CardSection, CardTable, TenderCard
+from app.adapters.eis_documents import EisUnavailableError, fetch_eis_documents, normalize_eis_number
 from app.adapters.base import (
     DocumentRef,
     PollError,
@@ -29,7 +32,7 @@ from app.adapters.base import (
     TenderDetails,
     TenderSummary,
 )
-from app.adapters.http_utils import DEFAULT_USER_AGENT
+from app.adapters.http_utils import DEFAULT_USER_AGENT, resolve_verify
 from app.adapters.parsing_utils import element_text, parse_price, parse_ru_date
 
 BASE_URL = "https://www.sberbank-ast.ru"
@@ -125,6 +128,164 @@ def _pick_file_name(cells: list[str]) -> str | None:
     # Расширения в имени нет (встречается у документов, выложенных без него) — берём самую
     # содержательную ячейку: формат потом определится по сигнатуре файла.
     return max(candidates, key=len)
+
+
+# --------------------------------------------------------------------- карточка процедуры
+#
+# Карточка процедуры (`utp.sberbank-ast.ru/…/PurchaseView/…`) — шаблон, который скрипт
+# заполняет из XML в скрытом поле `input#xmlData` (замечание 22.10.2026). В этом XML вся
+# процедура: заказчик, сроки, файлы документации с прямыми ссылками, журнал событий
+# площадки («Подача запроса на разъяснение документации», «Ответ на запрос разъяснений
+# № 271739»), протоколы и изменения. Он есть в исходном HTML, браузер для него не нужен.
+#
+# Файлы коммерческих процедур лежат на самой площадке (`/File/DownloadFile?fid=…`) и без
+# входа в личный кабинет не отдаются: вместо файла приходит страница «Для скачивания файла
+# требуется войти в систему», и она сохранялась под именем «Закупочная документация.rar» —
+# «документация скачивается в ломаном виде». У процедур, опубликованных и в ЕИС, те же файлы
+# берутся оттуда.
+
+# Ссылки площадки, требующие входа в личный кабинет.
+LOGIN_ONLY_FILE = re.compile(r"sberbank-ast\.ru/.*/DownloadFile", re.IGNORECASE)
+
+# Поля карточки: группа XML → заголовок раздела и подписи полей. Заголовок «Заказчик» и
+# подпись «Наименование организации» — те же, что у ЕИС: по ним `tender_card_service`
+# заполняет пустого заказчика и регион (по ИНН).
+_CARD_SECTIONS: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
+    ("PurchaseInfo", "Общие сведения о закупке", (
+        ("PurchaseCode", "Номер процедуры"),
+        ("PurchaseName", "Наименование"),
+        ("PurchaseIntegratorCode", "Номер в ЕИС"),
+        ("PurchaseStatusName", "Статус"),
+        ("PurchasePublicDate", "Дата публикации"),
+    )),
+    ("PurchaseOrderInfo", "Порядок проведения", (
+        ("PurchasePurchaseTypeCustomName", "Способ закупки"),
+        ("PurchaseEISCompetitiveName", "Конкурентность"),
+        ("PurchaseAccessLevelName", "Доступ"),
+    )),
+    ("MainCustomerInfo", "Заказчик", (
+        ("maincustomername", "Наименование организации"),
+        ("maincustomerinn", "ИНН"),
+        ("maincustomerkpp", "КПП"),
+        ("maincustomerogrn", "ОГРН"),
+    )),
+    ("OrganizatorInfo", "Организатор", (
+        ("orgname", "Наименование организации"),
+        ("orginn", "ИНН"),
+        ("orgregionokatoname", "Регион"),
+    )),
+    # Подписи сроков — как у ЕИС: по ним `eis_card_dates` ставит точное время окончания
+    # подачи (в выдаче площадки — только дата). Время площадки — московское.
+    ("ApplSubmissionInfo", "Подача заявок", (
+        ("ApplSubmissionStartDate", "Дата начала срока подачи заявок"),
+        ("ApplSubmissionStopDate", "Дата и время окончания срока подачи заявок (МСК)"),
+        ("ApplSubmissionOrder", "Порядок подачи заявок"),
+    )),
+    ("SummingupInfo", "Подведение итогов", (
+        ("SummingupDate", "Дата подведения итогов"),
+    )),
+    ("ContactInfo", "Контактная информация", (
+        ("ContactPerson", "Контактное лицо"),
+        ("ContactEmail", "Электронная почта"),
+        ("ContactPhone", "Телефон"),
+    )),
+)
+
+
+def purchase_xml(html: str) -> etree._Element | None:
+    """XML процедуры из скрытого поля карточки; None — поля нет или XML не разобрался."""
+
+    field = BeautifulSoup(html, "lxml").select_one("input#xmlData")
+    value = (field.get("value") or "").strip() if field is not None else ""
+    if not value.startswith("<"):
+        return None
+    try:
+        return etree.fromstring(value.encode("utf-8"), parser=etree.XMLParser(recover=True, huge_tree=True))
+    except etree.XMLSyntaxError:
+        return None
+
+
+def _text(node, path: str) -> str:
+    return re.sub(r"\s+", " ", (node.findtext(path) or "") if node is not None else "").strip()
+
+
+def eis_number(root) -> str | None:
+    """Реестровый номер ЕИС процедуры, если она опубликована и там."""
+
+    return normalize_eis_number(_text(root, ".//PurchaseInfo/PurchaseIntegratorCode") or None)
+
+
+def documents_from_xml(root) -> list[DocumentRef]:
+    documents: list[DocumentRef] = []
+    seen: set[str] = set()
+    for node in root.iter("document"):
+        url = _text(node, "url")
+        name = _text(node, "filename") or _text(node, "description")
+        if not url or not name or url in seen:
+            continue
+        seen.add(url)
+        documents.append(DocumentRef(file_name=name, url=urljoin(BASE_URL, url)))
+    return documents
+
+
+def card_from_xml(root, card_url: str) -> TenderCard:
+    card = TenderCard()
+    for group, title, fields in _CARD_SECTIONS:
+        node = root.find(f".//{group}")
+        if node is None:
+            continue
+        section = CardSection(title=title)
+        for tag, label in fields:
+            value = _text(node, tag)
+            if value:
+                section.fields.append((label, value))
+        if section.fields:
+            card.sections.append(section)
+    card.tab_urls["common"] = card_url
+
+    events = [
+        [_text(event, "EventDate"), _text(event, "EventDescription")]
+        for event in root.iter("Event")
+        if _text(event, "EventDescription")
+    ]
+    if events:
+        card.tables["events"] = CardTable("Журнал событий площадки", ["Дата и время (МСК)", "Событие"], events)
+        card.tab_urls["events"] = card_url
+    protocols = [
+        [_text(item, "ProtocolDate"), _text(item, "ProtocolName"), _text(item, "ProtocolStatus")]
+        for item in root.iter("Protocol")
+        if _text(item, "ProtocolName")
+    ]
+    if protocols:
+        card.tables["protocols"] = CardTable("Протоколы", ["Дата", "Протокол", "Статус"], protocols)
+        card.tab_urls["protocols"] = card_url
+    changes = [
+        [_text(item, "ChangeDate"), _text(item, "ChangeDocId")]
+        for item in root.iter("Change")
+        if _text(item, "ChangeDate")
+    ]
+    if changes:
+        card.tables["changes"] = CardTable("Изменения извещения", ["Дата и время (МСК)", "Номер документа"], changes)
+        card.tab_urls["changes"] = card_url
+    return card
+
+
+def fetch_purchase_xml(card_url: str):
+    """XML процедуры по адресу карточки — обычным запросом, без браузера."""
+
+    with httpx.Client(
+        headers={"User-Agent": DEFAULT_USER_AGENT},
+        timeout=40.0,
+        verify=resolve_verify(card_url),
+        follow_redirects=True,
+    ) as client:
+        response = client.get(card_url)
+        response.raise_for_status()
+        return purchase_xml(response.text)
+
+
+def is_platform_card(url: str | None) -> bool:
+    return bool(url) and "sberbank-ast.ru" in url and "PurchaseView" in url
 
 
 class SberbankAstAdapter(SourceAdapter):
@@ -290,12 +451,35 @@ class SberbankAstAdapter(SourceAdapter):
 
         card_url = source_url or self.get_tender_details(external_id).source_url
         documents: list[DocumentRef] = []
-        try:
-            documents = self._fetch_card_documents(card_url)
-        except Exception as exc:  # noqa: BLE001 - карточка не открылась: остаётся путь через ЕИС
-            logger.warning(
-                f"Документы закупки {external_id} не получены с карточки Сбербанк-АСТ: {exc}"
-            )
+        number: str | None = None
+        if is_platform_card(card_url):
+            try:
+                root = fetch_purchase_xml(card_url)
+            except Exception as exc:  # noqa: BLE001 - не ответила карточка: пробуем браузером
+                logger.warning(f"Карточка {external_id} Сбербанк-АСТ не получена: {exc}")
+                root = None
+            if root is not None:
+                documents = documents_from_xml(root)
+                number = eis_number(root)
+        if not documents:
+            try:
+                documents = self._fetch_card_documents(card_url)
+            except Exception as exc:  # noqa: BLE001 - карточка не открылась: остаётся путь через ЕИС
+                logger.warning(
+                    f"Документы закупки {external_id} не получены с карточки Сбербанк-АСТ: {exc}"
+                )
+
+        # Файлы «только после входа» — из ЕИС, если процедура там опубликована.
+        if number and (not documents or any(LOGIN_ONLY_FILE.search(doc.url) for doc in documents)):
+            try:
+                from_eis = fetch_eis_documents(number)
+            except EisUnavailableError as exc:
+                logger.warning(f"Документы закупки {external_id} не получены из ЕИС: {exc}")
+                from_eis = []
+            if from_eis:
+                documents = [doc for doc in documents if not LOGIN_ONLY_FILE.search(doc.url)]
+                known = {doc.url for doc in documents}
+                documents += [doc for doc in from_eis if doc.url not in known]
 
         return documents or fetch_eis_documents(external_id)
 

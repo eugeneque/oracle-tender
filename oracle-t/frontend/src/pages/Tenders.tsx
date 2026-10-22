@@ -2033,6 +2033,28 @@ export function TendersPage() {
             ) : tenders.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-zinc-600">
                 Нет тендеров по текущим фильтрам
+                {/* Поиск по заказчику или номеру (замечание 22.10.2026): закупка могла быть
+                    скрыта профилями, сроком подачи или моделью — искать по всей базе. */}
+                {filters.search.trim() && (
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateFilters({
+                          ...DEFAULT_FILTERS,
+                          feed,
+                          search: filters.search,
+                          hideExpired: false,
+                          hideAiRejected: false,
+                          relevanceProfileIds: [],
+                        })
+                      }
+                      className="rounded-full border border-white/10 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/5"
+                    >
+                      Искать «{filters.search.trim()}» во всех закупках
+                    </button>
+                  </div>
+                )}
               </div>
             ) : activeView === "split" ? (
               <TenderSplitView

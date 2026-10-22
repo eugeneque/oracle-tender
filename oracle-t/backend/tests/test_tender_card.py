@@ -288,3 +288,28 @@ class TestFillGaps:
 
         assert filled == []
         assert tender.region_organizer_code is None
+
+
+def test_platform_events_replace_eis_journal_and_fill_missing_tabs():
+    """Сбербанк-АСТ (22.10.2026): журнал событий площадки — с запросами разъяснений — важнее
+    журнала ЕИС; прочие вкладки площадки дополняют карточку ЕИС, но не заменяют."""
+
+    from app.adapters.eis_card import CardTable, TenderCard
+    from app.services.tender_card_service import _merge_platform_card
+
+    eis = TenderCard(tables={"events": CardTable("Журнал", ["Дата"], [["01.01"]]), "protocols": CardTable("П", [], [["ЕИС"]])})
+    platform = TenderCard(
+        tables={
+            "events": CardTable("Журнал событий площадки", ["Дата", "Событие"], [["21.10", "Запрос разъяснений"]]),
+            "protocols": CardTable("Протоколы", [], [["площадка"]]),
+            "changes": CardTable("Изменения", [], [["29.07"]]),
+        },
+        tab_urls={"events": "https://utp.sberbank-ast.ru/x"},
+    )
+
+    merged = _merge_platform_card(eis, platform)
+
+    assert merged.tables["events"].rows == [["21.10", "Запрос разъяснений"]]
+    assert merged.tables["protocols"].rows == [["ЕИС"]]
+    assert "changes" in merged.tables
+    assert _merge_platform_card(None, platform) is platform

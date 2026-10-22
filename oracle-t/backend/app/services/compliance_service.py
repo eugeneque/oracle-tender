@@ -64,7 +64,7 @@ from app.models.analysis import (
     WinVerdict,
 )
 from app.models.log import LogLevel
-from app.models.manufacturer import Manufacturer, Product, ProductCharacteristic, SiType
+from app.models.manufacturer import Manufacturer, Product, ProductCharacteristic, ProductStatus, SiType
 from app.models.tender import Tender
 from app.models.user import User
 from app.services.audit import log_action
@@ -83,8 +83,10 @@ from app.services.meter_kind import kind_group, kind_labels, kinds_from_text, pr
 from app.services.compliance_numeric import (
     CatalogModel,
     ENABLED as NUMERIC_ENABLED,
+    lost_numbers,
     prejudge,
     requirement_checks,
+    wording_for_code,
 )
 from app.services.product_relevance import select_products_for_context, tender_named_text
 from app.services.tz_reference import (
@@ -361,6 +363,9 @@ def build_manufacturer_context(
         limit=MAX_PRODUCTS_IN_CONTEXT,
         named_text=named_text,
         only_wanted_kinds=only_wanted_kinds,
+        # Свои снятые с производства модели не сравниваются (22.10.2026): поставить их
+        # нельзя, а «соответствует» по ним уводило заключение к прибору, которого нет.
+        active_only=manufacturer.is_mirtek,
     )
     primary_product_id = selected[0].product.id if selected else None
 
@@ -382,6 +387,23 @@ def build_manufacturer_context(
             blocks.append(
                 f"[si_type] Выдержка из «Описания типа» {si_type.si_code}:\n"
                 f"{description_excerpt(si_type.description_type_text)}"
+            )
+
+    if manufacturer.is_mirtek:
+        # «Описание типа» перечисляет все исполнения, в том числе снятые: модель должна знать,
+        # что их предлагать нельзя.
+        retired = list(
+            db.scalars(
+                select(Product.model_name).where(
+                    Product.manufacturer_id == manufacturer.id,
+                    Product.status != ProductStatus.ACTIVE.value,
+                )
+            )
+        )
+        if retired:
+            blocks.append(
+                "[catalog] Сняты с производства — не считать подходящими, даже если исполнение "
+                f"есть в описании типа: {'; '.join(sorted(retired))[:1500]}"
             )
 
     for product, characteristics in ((item.product, item.characteristics) for item in selected):
@@ -735,6 +757,10 @@ def _requirements_block(requirements: list[Requirement]) -> str:
     lines = []
     for index, requirement in enumerate(requirements, start=1):
         text = requirement.normalized_text or requirement.text
+        if lost_numbers(requirement.text, requirement.normalized_text):
+            # Сокращение потеряло часть условий — модель видит и формулировку ТЗ
+            # (22.10.2026: «не менее 100А» пропало, и D17 с 80 А «соответствовал»).
+            text = f"{text} (в ТЗ: {requirement.text[:300]})"
         hint = parameter_hint(_parameter_of(requirement))
         lines.append(f"{index}. {text}" + (f" {hint}" if hint else ""))
     return "\n".join(lines)
@@ -1988,11 +2014,11 @@ def catalog_models(db: Session, manufacturer: Manufacturer) -> list[CatalogModel
     """Модели производителя со значениями характеристик для предрешения кодом. Без
     руководства: оно — третий шаг сопоставления, только для оставшихся без ответа."""
 
-    products = list(
-        db.scalars(
-            select(Product).where(Product.manufacturer_id == manufacturer.id).order_by(Product.model_name)
-        )
-    )
+    query = select(Product).where(Product.manufacturer_id == manufacturer.id)
+    if manufacturer.is_mirtek:
+        # Как и в карточке: снятой с производства моделью МИРТЕК требование не закрыть.
+        query = query.where(Product.status == ProductStatus.ACTIVE.value)
+    products = list(db.scalars(query.order_by(Product.model_name)))
     by_product: dict[uuid.UUID, list[ProductCharacteristic]] = {}
     if products:
         for characteristic in db.scalars(
@@ -2023,12 +2049,17 @@ def prejudge_numeric(
     *,
     groups: set[str] | None = None,
 ) -> dict[int, RequirementVerdict]:
-    """Вердикты кодом по однозначным числовым требованиям (номер → вердикт). Только
-    «соответствует» по факту из каталога; остальное — модели (см. `compliance_numeric`).
+    """Вердикты кодом по однозначным числовым требованиям (номер → вердикт): «соответствует»
+    по факту из каталога, у МИРТЕК по току и тарифам — и «не соответствует» (22.10.2026);
+    остальное — модели (см. `compliance_numeric`). Сверяется формулировка ТЗ, если
+    сокращённая потеряла часть условий (`wording_for_code`).
 
     `groups` — типы позиции спецификации; без них — типы всей закупки."""
 
-    texts = [(index, item.normalized_text or item.text or "") for index, item in enumerate(requirements, start=1)]
+    texts = [
+        (index, wording_for_code(item.text, item.normalized_text))
+        for index, item in enumerate(requirements, start=1)
+    ]
     if not any(requirement_checks(text) for _, text in texts):
         return {}
     models = catalog_models(db, manufacturer)
@@ -2036,7 +2067,7 @@ def prejudge_numeric(
         groups = {kind_group(code) for code in (tender.meter_kinds or [])} or None
     verdicts: dict[int, RequirementVerdict] = {}
     for index, text in texts:
-        found = prejudge(text, models, groups, NUMERIC_ENABLED)
+        found = prejudge(text, models, groups, NUMERIC_ENABLED, decisive=manufacturer.is_mirtek)
         if found is not None:
             verdicts[index] = RequirementVerdict(
                 number=index,

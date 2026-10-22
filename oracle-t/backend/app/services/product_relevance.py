@@ -84,8 +84,12 @@ def select_products_for_context(
     limit: int,
     named_text: str = "",
     only_wanted_kinds: bool = False,
+    active_only: bool = False,
 ) -> list[ScoredProduct]:
     """Модели производителя, наиболее отвечающие требованиям закупки, — не более `limit`.
+
+    `active_only` — только выпускаемые модели (22.10.2026): из «Описаний типов» в каталог
+    МИРТЕК попали и снятые с производства исполнения, и ИИ предлагал их как «наш прибор».
 
     `named_text` — текст документации закупки (`tender_named_text`): прямое упоминание модели
     ищется и в нём, а не только в требованиях. Требования — пересказ модели, и обозначение
@@ -106,13 +110,10 @@ def select_products_for_context(
     отбор обычный: модель ответит «нет данных», тип решает код (`apply_position_kinds`).
     """
 
-    products = list(
-        db.scalars(
-            select(Product)
-            .where(Product.manufacturer_id == manufacturer.id)
-            .order_by(Product.model_name)
-        )
-    )
+    query = select(Product).where(Product.manufacturer_id == manufacturer.id)
+    if active_only:
+        query = query.where(Product.status == ProductStatus.ACTIVE.value)
+    products = list(db.scalars(query.order_by(Product.model_name)))
     if not products:
         return []
 
