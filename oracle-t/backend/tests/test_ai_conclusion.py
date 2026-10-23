@@ -196,3 +196,79 @@ def test_agreement_is_recorded_without_review(db_session, filled_profile, monkey
     assert job is None
     assert feedback.status == FeedbackStatus.RECORDED.value
     assert db_session.scalar(select(AiScoreFeedback).where(AiScoreFeedback.id == feedback.id))
+
+
+def test_national_regime_limits_our_devices_to_registry_records(
+    db_session, filled_profile, monkeypatch
+):
+    """SBR003-260026413800036.1 (замечание 22.10.2026): по ПП 1875 к поставке допускаются
+    только приборы с записью в реестре промпродукции, а заключение предлагало W3. Снятая с
+    производства модель из «Описания типа» не предлагается вовсе."""
+
+    from app.models.manufacturer import ProductStatus
+    from app.models.registry_record import ProductRegistryRecord
+
+    tender = _tender(db_session, title="Приобретение, установка и пуско-наладка приборов учёта", tender_type="complex")
+    _requirement(db_session, tender, "Применяется национальный режим в соответствии с ПП РФ № 1875")
+    d17 = _mirtek_product(db_session, "МИРТЕК-12-РУ-D17-2")
+    _mirtek_product(db_session, "МИРТЕК-12-РУ-W3")
+    retired = _mirtek_product(db_session, "МИРТЕК-12-РУ-W2")
+    retired.status = ProductStatus.DISCONTINUED.value
+    db_session.add(ProductRegistryRecord(product_id=d17.id, registry="industrial_products", record_number="10\\1\\1/2024"))
+    db_session.flush()
+
+    captured: list[str] = []
+    fit = _fit(our_products=[
+        ProductAnswer(model="МИРТЕК-12-РУ-W3", status="fits", note="ток подходит"),
+        ProductAnswer(model="МИРТЕК-12-РУ-W2", status="fits", note="есть в описании типа"),
+        ProductAnswer(model="МИРТЕК-12-РУ-D17-2", status="fits", note="всё выполнено"),
+    ])
+    _patch(monkeypatch, _fake(fit, captured))
+
+    conclusion = ai_profile_service.compute_profile_score(db_session, tender).score.conclusion
+
+    rows = [(item["model"], item["status"]) for item in conclusion["our_products"]]
+    assert rows == [("МИРТЕК-12-РУ-D17-2", "unchecked"), ("МИРТЕК-12-РУ-W3", "not_fits")]
+    assert "ПП 1875" in conclusion["our_products"][1]["note"]
+    prompt = next(text for text in captured if "ОГРАНИЧЕНИЕ ДОПУСКА" in text)
+    assert "Наши приборы с записью: МИРТЕК-12-РУ-D17-2" in prompt
+
+
+def test_national_regime_does_not_cut_devices_inside_cabinets(db_session, filled_profile, monkeypatch):
+    """Прибор в составе шкафа учёта: ограничение относится к шкафу — прибор не отсекается."""
+
+    from app.models.registry_record import ProductRegistryRecord
+
+    tender = _tender(db_session, title="Поставка шкафов учёта ВШУ с приборами учёта")
+    _requirement(db_session, tender, "Национальный режим (ПП РФ № 1875)")
+    d17 = _mirtek_product(db_session, "МИРТЕК-12-РУ-D17-2")
+    _mirtek_product(db_session, "МИРТЕК-12-РУ-W3")
+    db_session.add(ProductRegistryRecord(product_id=d17.id, registry="industrial_products"))
+    db_session.flush()
+
+    captured: list[str] = []
+    fit = _fit(our_products=[ProductAnswer(model="МИРТЕК-12-РУ-W3", status="fits", note="")])
+    _patch(monkeypatch, _fake(fit, captured))
+
+    conclusion = ai_profile_service.compute_profile_score(db_session, tender).score.conclusion
+
+    assert [item["status"] for item in conclusion["our_products"]] == ["unchecked"]
+    assert any("состав шкафа" in text for text in captured)
+
+
+def test_purchase_kinds_block_names_every_type_and_unparsed_phase():
+    """32616469643 (замечание 22.10.2026): в документации и однофазные, и трёхфазные, а
+    заключение по конкурентам говорило «подходит только однофазный»."""
+
+    from app.models.analysis import Requirement
+    from app.models.tender import Tender
+    from app.services.ai_conclusion_service import purchase_kinds_block
+
+    tender = Tender(title="Рамочное соглашение на поставку ПУ", meter_kinds=["1ph_direct_din"])
+    requirements = [Requirement(text="Класс точности 1", position="1. Однофазный ПУ")]
+    block = purchase_kinds_block(tender, requirements, "…однофазные и трёхфазные приборы учёта…")
+
+    assert block is not None
+    assert "1. Однофазный ПУ" in block
+    assert "трёхфазные приборы, но требований к ним не извлечено" in block
+    assert purchase_kinds_block(Tender(title="Услуги"), [], "") is None

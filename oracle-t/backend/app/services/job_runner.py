@@ -32,6 +32,7 @@ from app.services import (
     notification_service,
     tender_card_service,
     tender_insights,
+    tender_positions,
     tender_twins,
 )
 from app.services.ai_profile_service import compute_profile_score
@@ -75,6 +76,16 @@ def _run_analysis(db: Session, tender: Tender, actor: User | None) -> str:
     if outcome.okpd2_code:
         parts.append(f"ОКПД2: {outcome.okpd2_code}")
     parts.extend(outcome.messages)
+
+    # Позиции закупки — отдельным запросом к модели по тем же документам (23.10.2026, раздел
+    # 74 ARCHITECTURE.md). Сбой не отменяет анализ: требования уже сохранены, позиции
+    # остаются прежними.
+    try:
+        report_progress("Позиции закупки: таблица спецификации…")
+        parts.append(f"позиций закупки: {tender_positions.extract_positions(db, tender, actor=actor)}")
+    except Exception as exc:  # noqa: BLE001 - позиции не обязательны для анализа
+        db.rollback()
+        parts.append(f"позиции закупки не извлечены ({exc})")
 
     # Вектор и список похожих обновляются здесь же: требования только что извлечены, а
     # именно они делают «похожесть» осмысленной (без них похожими оказываются все закупки

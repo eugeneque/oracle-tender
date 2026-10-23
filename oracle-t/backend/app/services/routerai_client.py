@@ -162,7 +162,7 @@ def _chat_completion(
         if response.status_code in (401, 403):
             raise RouterAiUnavailableError(
                 f"RouterAI отклонил ключ (HTTP {response.status_code}: {detail}). Повтор не "
-                f"поможет — проверьте ключ на странице «Интеграции»"
+                f"поможет — проверьте ключ на странице «Модели ИИ»"
             )
         raise RouterAiError(f"HTTP {response.status_code}: {detail}")
     return response.json()

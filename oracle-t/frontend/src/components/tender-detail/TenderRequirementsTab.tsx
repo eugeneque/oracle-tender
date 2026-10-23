@@ -1,4 +1,4 @@
-import type { Requirement, RequirementKind } from "../../api/types";
+import type { Requirement, RequirementKind, TenderPosition } from "../../api/types";
 
 /** Вид требования (18.09.2026) — заголовки разделов вкладки. Порядок — по тому, что
  * тендерщик читает первым: требования к товару идут в матрицу соответствия, остальное —
@@ -24,18 +24,112 @@ export function ParameterChip({ requirement }: { requirement: Pick<Requirement, 
   );
 }
 
+const POSITION_NUMBER = /^\s*(?:поз[а-яё]*\.?\s*)?№?\s*(\d+)[.)]?\s*/i;
+
+/** Позиция спецификации по частям: номер («2») и наименование («Трёхфазный ПУ»). */
+function splitPosition(position: string): { number: string | null; name: string } {
+  const match = position.match(POSITION_NUMBER);
+  if (!match) return { number: null, name: position.trim() };
+  return { number: match[1], name: position.slice(match[0].length).trim() };
+}
+
 /** Значок позиции спецификации (15.10.2026): в закупке из нескольких позиций требование
- * сверяется только с приборами своей позиции, и человеку надо видеть, к какой оно относится. */
-export function PositionChip({ requirement }: { requirement: Pick<Requirement, "position"> }) {
+ * сверяется только с приборами своей позиции, и человеку надо видеть, к какой оно относится.
+ * С наименованием позиции (замечание 22.10.2026): «Поз. 2» без него не объясняло, к какому
+ * прибору относится «Класс точности: 0.5S». */
+export function PositionChip({
+  requirement,
+  compact = false,
+}: {
+  requirement: Pick<Requirement, "position">;
+  /** Узкая колонка матрицы — наименование обрезается раньше, полностью оно в подсказке. */
+  compact?: boolean;
+}) {
   if (!requirement.position) return null;
-  const short = requirement.position.match(/^\s*(?:поз[а-яё]*\.?\s*)?№?\s*(\d+)/i)?.[1];
+  const { number, name } = splitPosition(requirement.position);
   return (
     <span
-      className="max-w-[9rem] shrink-0 truncate rounded-md bg-zinc-500/10 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400"
-      title={`Позиция спецификации: ${requirement.position}`}
+      className={`${compact ? "max-w-[10rem]" : "max-w-[16rem]"} shrink-0 truncate rounded-md bg-zinc-500/10 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400`}
+      title={`Требование относится к позиции спецификации: ${requirement.position}`}
     >
-      {short ? `Поз. ${short}` : requirement.position}
+      {number ? `Поз. ${number}${name ? ` · ${name}` : ""}` : name}
     </span>
+  );
+}
+
+/** Перечень позиций над требованиями — только когда их несколько: читатель видит, что
+ * требование без значка общее для всех позиций, а со значком — только для своей. */
+function PositionsLegend({ requirements }: { requirements: Requirement[] }) {
+  const positions = [...new Set(requirements.map((item) => item.position).filter((item): item is string => !!item))];
+  if (positions.length < 2) return null;
+  return (
+    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-xs text-zinc-400">
+      <div className="mb-1 font-medium text-zinc-300">Позиции спецификации</div>
+      <ul className="space-y-0.5">
+        {positions.map((position) => {
+          const { number, name } = splitPosition(position);
+          return (
+            <li key={position}>
+              {number ? <span className="tabular-nums text-zinc-300">Поз. {number}</span> : null}
+              {number && name ? " — " : null}
+              {name}
+            </li>
+          );
+        })}
+      </ul>
+      <div className="mt-1 text-zinc-500">Требование без значка позиции относится ко всем позициям.</div>
+    </div>
+  );
+}
+
+function formatQuantity(position: TenderPosition): string {
+  if (position.quantity === null || position.quantity === undefined) return position.quantity_text ?? "—";
+  const value = Number(position.quantity);
+  return Number.isFinite(value) ? value.toLocaleString("ru-RU", { maximumFractionDigits: 3 }) : String(position.quantity);
+}
+
+/** Позиции закупки (23.10.2026) — таблица спецификации заказчика: что и сколько закупается.
+ * Тендерный отдел смотрит её первой; она же уходит в Bitrix24 строками позиций. Колонка лота —
+ * только когда лотов несколько. */
+function PositionsTable({ positions }: { positions: TenderPosition[] }) {
+  if (positions.length === 0) return null;
+  const lots = new Set(positions.map((item) => item.lot_number));
+  return (
+    <section>
+      <div className="mb-2 flex items-baseline gap-2 px-1">
+        <h3 className="text-[13px] font-semibold text-zinc-200">Позиции закупки</h3>
+        <span className="text-xs tabular-nums text-zinc-500">{positions.length}</span>
+        <span className="text-xs text-zinc-600">— таблица заказчика из документации</span>
+      </div>
+      <div className="overflow-x-auto rounded-xl border border-white/[0.08] bg-white/[0.02]">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-white/[0.08] text-left text-[11px] uppercase tracking-wide text-zinc-500">
+              <th className="w-12 px-4 py-2 font-medium">№</th>
+              {lots.size > 1 && <th className="w-14 px-2 py-2 font-medium">Лот</th>}
+              <th className="px-2 py-2 font-medium">Наименование</th>
+              <th className="w-20 px-2 py-2 font-medium">Ед. изм.</th>
+              <th className="w-28 px-4 py-2 text-right font-medium">Количество</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/[0.05]">
+            {positions.map((position) => (
+              <tr
+                key={position.id}
+                className="align-top transition-colors hover:bg-white/[0.03]"
+                title={position.quote ? `${position.document_name ? `${position.document_name}: ` : ""}${position.quote}` : undefined}
+              >
+                <td className="px-4 py-2 tabular-nums text-zinc-500">{position.position_no ?? "—"}</td>
+                {lots.size > 1 && <td className="px-2 py-2 tabular-nums text-zinc-500">{position.lot_number}</td>}
+                <td className="px-2 py-2 leading-relaxed text-zinc-200">{position.name}</td>
+                <td className="px-2 py-2 text-zinc-400">{position.unit ?? "—"}</td>
+                <td className="px-4 py-2 text-right tabular-nums text-zinc-200">{formatQuantity(position)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
@@ -145,13 +239,20 @@ function RequirementRow({ requirement, index }: { requirement: Requirement; inde
  * и группам характеристик, с нумерацией — по ней удобно сверяться с документацией. */
 export function TenderRequirementsTab({
   requirements,
+  positions = [],
   analysis,
 }: {
   requirements: Requirement[];
+  positions?: TenderPosition[];
   analysis: AnalysisState | null;
 }) {
   if (requirements.length === 0) {
-    return <EmptyRequirements analysis={analysis} />;
+    return (
+      <div className="space-y-5">
+        <PositionsTable positions={positions} />
+        <EmptyRequirements analysis={analysis} />
+      </div>
+    );
   }
 
   const sections = KIND_SECTIONS.map((section) => ({
@@ -180,6 +281,10 @@ export function TenderRequirementsTab({
           ))}
         </span>
       </div>
+
+      <PositionsTable positions={positions} />
+
+      <PositionsLegend requirements={requirements} />
 
       {sections.map((section) => (
         <section key={section.kind}>

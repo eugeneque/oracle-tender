@@ -6,7 +6,7 @@
 данные (наименование, ИНН/КПП, ОГРН, дата регистрации, адрес) для автопоиска в профиле.
 Этого хватало, пока от rusprofile требовался только КПП, которого нет в выдаче ЕГРЮЛ.
 
-**С учётной записью** (`RusprofileSession`, учётные данные — в «Интеграции → Rusprofile»)
+**С учётной записью** (`RusprofileSession`, учётные данные — в «Приложения → Rusprofile»)
 сайт отдаёт то, что без подписки закрыто символами «░»: полный список госзакупок компании
 **с проигрышами**, лицензии, численность, финансы, учредителей. Это меняет смысл раздела
 «Моя компания»: допуски, реализованные проекты и историю участий больше не нужно вводить
@@ -927,7 +927,7 @@ class RusprofileSession:
         if not anonymous and (not login or not password):
             raise RusprofileAuthError(
                 "Учётная запись rusprofile не настроена: заполните логин и пароль в разделе "
-                "«Интеграции → Rusprofile»."
+                "«Приложения → Rusprofile»."
             )
         self._anonymous = anonymous
         self._login = (login or "").strip()
@@ -998,7 +998,7 @@ class RusprofileSession:
         message = _norm(str(data.get("message") or "")) or "неизвестная ошибка"
         raise RusprofileAuthError(
             f"rusprofile.ru не принял учётные данные: {message}. Проверьте логин и пароль в "
-            "разделе «Интеграции → Rusprofile»."
+            "разделе «Приложения → Rusprofile»."
         )
 
     def _ensure_login(self) -> None:

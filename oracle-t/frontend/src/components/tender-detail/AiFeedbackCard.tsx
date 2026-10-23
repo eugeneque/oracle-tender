@@ -1,7 +1,10 @@
-import { ArrowRight, Loader2, ThumbsDown, ThumbsUp } from "lucide-react";
+import { useState } from "react";
+import { ArrowRight, Loader2, Repeat2, ThumbsDown, ThumbsUp } from "lucide-react";
 import { Link } from "react-router-dom";
 
+import { api, ApiError } from "../../api/client";
 import type { AiFeedback, ConclusionSnapshot } from "../../api/types";
+import { useAuth } from "../../context/useAuth";
 import { formatDateTime, verdictLabel } from "../../utils/format";
 
 /**
@@ -37,6 +40,60 @@ function Snapshot({ title, value }: { title: string; value: ConclusionSnapshot |
       </div>
       {value.headline && <p className="mt-1 text-xs leading-relaxed text-zinc-300">{value.headline}</p>}
       {products && <p className="mt-1 text-[11px] text-zinc-500">Приборы: {products}</p>}
+    </div>
+  );
+}
+
+/** Переносить ли несогласие в похожие закупки (23.10.2026, раздел 71 ARCHITECTURE.md). Менять
+ * может автор или администратор: замечание о частностях одной закупки выключают. */
+function PrecedentToggle({ item }: { item: AiFeedback }) {
+  const { user } = useAuth();
+  const [shared, setShared] = useState(item.share_as_precedent);
+  const [isBusy, setIsBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const canEdit = user?.role === "admin" || (item.user_id !== null && item.user_id === user?.id);
+
+  const toggle = async () => {
+    setIsBusy(true);
+    setError(null);
+    try {
+      const next = await api.patch<AiFeedback>(`/tenders/${item.tender_id}/ai-score/feedback/${item.id}`, {
+        share_as_precedent: !shared,
+      });
+      setShared(next.share_as_precedent);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Не удалось сохранить");
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const label = shared ? "Учитывается в похожих закупках" : "Только для этой закупки";
+  return (
+    <div className="mt-2 text-[11px]">
+      {canEdit ? (
+        <button
+          onClick={() => void toggle()}
+          disabled={isBusy}
+          className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 transition-colors disabled:opacity-50 ${
+            shared ? "bg-indigo-500/10 text-indigo-300" : "text-zinc-500 hover:bg-white/[0.05] hover:text-zinc-200"
+          }`}
+          title={
+            shared
+              ? "ИИ получит это возражение при разборе похожих закупок. Нажмите, чтобы оставить только для этой"
+              : "Нажмите, чтобы ИИ учитывал возражение и в похожих закупках"
+          }
+        >
+          {isBusy ? <Loader2 size={11} className="animate-spin" /> : <Repeat2 size={11} />}
+          {label}
+        </button>
+      ) : (
+        <span className={`flex items-center gap-1 ${shared ? "text-indigo-300/80" : "text-zinc-600"}`}>
+          <Repeat2 size={11} />
+          {label}
+        </span>
+      )}
+      {error && <p className="mt-1 text-red-300">{error}</p>}
     </div>
   );
 }
@@ -104,6 +161,7 @@ export function AiFeedbackCard({ item, showTender = false }: { item: AiFeedback;
           {item.status === "error" && item.error && (
             <p className="mt-2 text-xs text-red-300">{item.error}</p>
           )}
+          <PrecedentToggle item={item} />
         </>
       ) : (
         item.before?.headline && (

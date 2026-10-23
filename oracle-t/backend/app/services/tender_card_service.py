@@ -86,7 +86,7 @@ def _client() -> httpx.Client:
     )
 
 
-def _card_url(tender: Tender) -> str | None:
+def _card_url(tender: Tender, number: str | None = None) -> str | None:
     """Адрес карточки закупки в ЕИС.
 
     Для тендеров самой ЕИС это их `source_url`. Для закупок с коммерческих площадок —
@@ -97,7 +97,7 @@ def _card_url(tender: Tender) -> str | None:
     if tender.source_url and "zakupki.gov.ru" in tender.source_url:
         return tender.source_url
 
-    number = normalize_eis_number(tender.external_id)
+    number = number or normalize_eis_number(tender.external_id)
     if number is None:
         return None
 
@@ -214,6 +214,43 @@ def fill_gaps_from_card(
     return filled
 
 
+def _platform_card(tender: Tender):
+    """Карточка процедуры на Сбербанк-АСТ и её номер в ЕИС (замечание 22.10.2026).
+
+    Журнал событий площадки — запросы разъяснений и ответы на них — есть только там: у
+    коммерческих процедур (SBR003-…) карточки ЕИС нет вовсе, и вкладка «Журнал событий»
+    была пустой. Номер ЕИС из карточки площадки позволяет взять и карточку ЕИС."""
+
+    from app.adapters.sberbank_ast import card_from_xml, eis_number, fetch_purchase_xml, is_platform_card
+
+    if not is_platform_card(tender.source_url):
+        return None, None
+    try:
+        root = fetch_purchase_xml(tender.source_url)
+    except Exception as exc:  # noqa: BLE001 - площадка не ответила: остаётся ЕИС
+        logger.warning(f"Карточка {tender.external_id} на Сбербанк-АСТ не получена: {exc}")
+        return None, None
+    if root is None:
+        return None, None
+    return card_from_xml(root, tender.source_url), eis_number(root)
+
+
+def _merge_platform_card(card, platform):
+    """Карточка ЕИС полнее (лоты, договоры), но журнал событий берётся с площадки: в нём
+    запросы разъяснений, которых в журнале ЕИС нет. Прочие вкладки площадки — только если у
+    ЕИС их нет."""
+
+    if platform is None:
+        return card
+    if card is None:
+        return platform
+    for key, table in platform.tables.items():
+        if key == "events" or key not in card.tables:
+            card.tables[key] = table
+            card.tab_urls[key] = platform.tab_urls.get(key, "")
+    return card
+
+
 def get_card(db: Session, tender: Tender) -> TenderCard | None:
     return db.get(TenderCard, tender.id)
 
@@ -231,26 +268,31 @@ def sync_card(
     if existing is not None and not force:
         return existing
 
-    url = _card_url(tender)
-    if url is None:
+    platform_card, platform_number = _platform_card(tender)
+    url = _card_url(tender, platform_number)
+    if url is None and platform_card is None:
         return existing
 
-    try:
-        with _client() as client:
-            card = fetch_card(client, url)
-    except Exception as exc:  # noqa: BLE001 - недоступность источника не должна ронять карточку
-        logger.warning(f"Карточка закупки {tender.external_id} не получена: {exc}")
-        log_action(
-            db,
-            component="tender_card",
-            action=f"sync_card:{tender.external_id}",
-            result="error",
-            level=LogLevel.WARNING,
-            details=str(exc),
-            user_id=actor.id if actor else None,
-        )
-        db.commit()
-        return existing
+    card = None
+    if url is not None:
+        try:
+            with _client() as client:
+                card = fetch_card(client, url)
+        except Exception as exc:  # noqa: BLE001 - недоступность источника не должна ронять карточку
+            logger.warning(f"Карточка закупки {tender.external_id} не получена: {exc}")
+            log_action(
+                db,
+                component="tender_card",
+                action=f"sync_card:{tender.external_id}",
+                result="error",
+                level=LogLevel.WARNING,
+                details=str(exc),
+                user_id=actor.id if actor else None,
+            )
+            db.commit()
+            if platform_card is None:
+                return existing
+    card = _merge_platform_card(card, platform_card)
 
     payload = {
         "sections": [asdict(section) for section in card.sections],

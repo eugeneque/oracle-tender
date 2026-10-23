@@ -1,5 +1,6 @@
 from app.models.ai_feedback import AiScoreFeedback, FeedbackKind, FeedbackStatus
 from app.models.ai_usage import AiUsageRecord
+from app.models.compliance_review import ComplianceVerdictReview, ReviewKind, ReviewReason
 from app.models.ai_profile import (
     AiProfileScore,
     EvidenceType,
@@ -85,6 +86,7 @@ from app.models.tender_tag import TenderTag, TenderTagLink
 from app.models.tender_card import TenderCard
 from app.models.tender_document import DocumentClass, TenderDocument
 from app.models.tender_history import HistoryKind, TenderHistoryEntry
+from app.models.tender_position import TenderPosition
 from app.models.upper_software import UpperSoftwareDevice, UpperSoftwareProductLink
 from app.models.user import User
 
@@ -95,6 +97,9 @@ __all__ = [
     "AiScoreFeedback",
     "FeedbackKind",
     "FeedbackStatus",
+    "ComplianceVerdictReview",
+    "ReviewKind",
+    "ReviewReason",
     "User",
     "Region",
     "AdmissionRegistry",
@@ -113,6 +118,7 @@ __all__ = [
     "TenderStage",
     "RelevanceStatus",
     "TenderCard",
+    "TenderPosition",
     "TenderDocument",
     "DocumentClass",
     "TenderHistoryEntry",

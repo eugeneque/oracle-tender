@@ -1298,6 +1298,10 @@ def compute_profile_score(
     # Замечания специалистов (28.09.2026) идут во все вызовы, а не только в заключение:
     # «в закупке есть требование о допуске СРО» меняет «Компетенции», а не только вывод.
     feedback_text = ai_conclusion_service.feedback_block(db, tender)
+    # Возражения по похожим закупкам (23.10.2026, раздел 71 ARCHITECTURE.md) — тоже во все
+    # вызовы: в них чаще всего знание о компании («есть допуск СРО»), а оно меняет и
+    # «Компетенции», не только вывод.
+    precedent_text, precedents = ai_conclusion_service.precedents_block(db, tender)
 
     base_context = (
         f"ЗАКУПКА:\n{tender_block}\n\n"
@@ -1309,7 +1313,10 @@ def compute_profile_score(
             if feedback_text
             else ""
         )
+        + (f"\n\n{precedent_text}" if precedent_text else "")
     )
+    if precedents:
+        outcome.messages.append(f"учтены возражения по похожим закупкам: {len(precedents)}")
     task_context = base_context + (f"\n\nДОПОЛНИТЕЛЬНО:\n{matrix_hint}" if matrix_hint else "")
 
     task_score: Decimal | None = None
@@ -1418,6 +1425,8 @@ def compute_profile_score(
             metrics=metrics,
         )
         conclusion = result.conclusion
+        if conclusion is not None:
+            conclusion["precedents"] = precedents
         decision = result.participate
         outcome.messages.extend(result.messages)
     except Exception as exc:  # noqa: BLE001 - запасной путь ниже

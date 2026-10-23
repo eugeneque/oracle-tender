@@ -48,11 +48,15 @@ oracle-tender-main/            ← не git-репозиторий (git status/d
   реестр — `adapters/registry.py`.
 - `core/scheduler.py` (APScheduler: опрос площадок, сроки, уборка), `core/jobs.py` (фоновые задачи).
 - `models/` — одна сущность на файл; `alembic/versions/NNNN_name.py` — миграции с нумерацией
-  (последняя на 20.10.2026 — `0079_qwen_provider`), докстринг миграции объясняет «зачем».
+  (последняя на 23.10.2026 — `0084_tender_positions`), докстринг миграции объясняет «зачем».
 - Учёт токенов ИИ — `ai_usage_service` (пишут клиенты моделей), окно контекста моделей —
   `ai_provider_service.get_model_limits`/`input_budget_chars`; см. раздел 52 ARCHITECTURE.md.
 - Центр уведомлений в шапке — `GET /activity` (`activity_service`, задания планировщика —
   `core/activity.py`), фронт `components/nav/NotificationCenter.tsx`; раздел 58 ARCHITECTURE.md.
+- Оценка вердиктов матрицы специалистом — `compliance_review_service` (исправление перекрывает
+  вердикт и уходит прецедентом в запросы по похожим требованиям); раздел 70 ARCHITECTURE.md.
+  Несогласия с заключением ИИ — прецеденты для похожих закупок
+  (`ai_conclusion_service.precedents_block`); раздел 71.
 - Ошибки обращений к ИИ — `ai_log_service.log_ai_event` (компонент журнала `ai_models`, файл
   `logs/ai.log`, вкладка «Логирование → Ошибки ИИ»); см. раздел 56 ARCHITECTURE.md.
 - `seed/snapshot.py` — наполнение базы «из коробки» (`python -m app.seed.snapshot prepare`).
@@ -60,7 +64,8 @@ oracle-tender-main/            ← не git-репозиторий (git status/d
 
 ### Frontend (`oracle-t/frontend/src`)
 - `pages/` — `Tenders.tsx` (главная, ~2000 строк: фильтры, профили, воронка, виды списка),
-  `TenderFull`, `Analytics`, `Catalog`, `Company`, `Integrations`, `Settings`, `Users`, `Logs`,
+  `TenderFull`, `Analytics`, `Catalog`, `Company`, `Apps` («Приложения»: внешние сервисы, новая
+  интеграция — запись в `components/apps/appsCatalog.tsx`), `AiSettings` («Модели ИИ»), `Settings`, `Users`, `Logs`,
   `Home` («Что нового?»), `Changelog`.
 - `components/` — `ProfilePicker`, `RelevanceProfilesModal` (+ `ProfilesManager`, редактор
   профиля с предпросмотром), `SelectionFunnelBar`, `SelectionGuide`, `TenderDetailPanel`, …

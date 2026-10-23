@@ -20,7 +20,7 @@ from app.models.ai_feedback import AiScoreFeedback, FeedbackKind, FeedbackStatus
 from app.models.job import BackgroundJob, JobKind
 from app.models.log import LogLevel
 from app.models.tender import Tender
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.services import ai_conclusion_service, ai_profile_service
 from app.services.audit import log_action
 
@@ -168,6 +168,35 @@ def process_pending(db: Session, tender: Tender, actor: User | None) -> str:
     return f"Учтено замечаний: {processed}" + (f"; заключение: {label}" if label else "")
 
 
+def set_precedent(
+    db: Session, tender: Tender, feedback_id: uuid.UUID, *, share: bool, actor: User
+) -> AiScoreFeedback:
+    """Переносить ли несогласие в похожие закупки (23.10.2026, раздел 71 ARCHITECTURE.md).
+    Решает автор или администратор: замечание о частностях одной закупки («в этой
+    документации нет СРО») чужому разбору только навредит."""
+
+    item = db.get(AiScoreFeedback, feedback_id)
+    if item is None or item.tender_id != tender.id:
+        raise FeedbackError("Замечание не найдено — обновите карточку")
+    if item.kind != FeedbackKind.DISAGREE.value:
+        raise FeedbackError("Прецедентом бывает только несогласие")
+    if item.user_id != actor.id and actor.role != UserRole.ADMIN.value:
+        raise FeedbackError("Менять это может автор замечания или администратор")
+    item.share_as_precedent = share
+    log_action(
+        db,
+        component="ai_feedback",
+        action=f"precedent_{'on' if share else 'off'}:{tender.external_id}",
+        result="success",
+        level=LogLevel.INFO,
+        details=(item.text or "")[:500] or None,
+        user_id=actor.id,
+    )
+    db.commit()
+    db.refresh(item)
+    return item
+
+
 # --- чтение ---------------------------------------------------------------------------------
 
 
@@ -187,6 +216,7 @@ def serialize(item: AiScoreFeedback, user_name: str | None, tender: Tender | Non
         "before": item.before,
         "after": item.after,
         "ai_response": item.ai_response,
+        "share_as_precedent": item.share_as_precedent,
         "created_at": item.created_at,
         "processed_at": item.processed_at,
     }

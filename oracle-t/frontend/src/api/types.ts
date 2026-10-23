@@ -844,9 +844,24 @@ export type ComplianceSourceCode =
   | "admission_registry"
   | "astra_catalog"
   | "expert_rule"
-  | "tz_reference";
+  | "tz_reference"
+  | "human_review";
 
 export type RequirementKind = "product" | "service" | "participant" | "supply";
+
+/** Позиция закупки — строка спецификации заказчика (23.10.2026). */
+export interface TenderPosition {
+  id: string;
+  position_no: string | null;
+  lot_number: string;
+  name: string;
+  unit: string | null;
+  /** Число, если количество указано числом; иначе — только `quantity_text`. */
+  quantity: string | number | null;
+  quantity_text: string | null;
+  document_name: string | null;
+  quote: string | null;
+}
 
 export interface Requirement {
   id: string;
@@ -876,6 +891,27 @@ export interface ComplianceEntry {
   source: ComplianceSourceCode;
   confidence: string | null;
   needs_human_review: boolean;
+  /** Действующие оценки специалистов: согласия и исправление (23.10.2026). */
+  reviews: ComplianceReview[];
+}
+
+export type ComplianceReviewReason = "fact" | "requirement" | "model" | "other";
+
+/** Оценка вердикта ячейки специалистом. Исправление перекрывает ответ модели и уходит
+ *  прецедентом в разбор похожих требований других закупок. */
+export interface ComplianceReview {
+  id: string;
+  requirement_id: string | null;
+  manufacturer_id: string;
+  user_id: string | null;
+  user_name: string | null;
+  kind: "agree" | "disagree";
+  corrected_status: ComplianceStatusCode | null;
+  reason: ComplianceReviewReason | null;
+  comment: string | null;
+  model_status: ComplianceStatusCode | null;
+  model_explanation: string | null;
+  created_at: string;
 }
 
 export interface WinPercentageRow {
@@ -1399,9 +1435,21 @@ export interface AiConclusion {
   /** Требований к товару в ТЗ; нет в заключениях до 28.09.2026. */
   product_requirements?: number;
   feedback_response: string | null;
+  /** Возражения специалистов по похожим закупкам, учтённые в этом заключении (23.10.2026). */
+  precedents?: ConclusionPrecedent[];
   strategy: { approach: string; price: string; steps: string[] } | null;
   risks: ConclusionRisk[];
   metrics: ConclusionMetric[];
+}
+
+export interface ConclusionPrecedent {
+  feedback_id: string;
+  tender_id: string;
+  tender_title: string | null;
+  tender_external_id: string | null;
+  user_name: string | null;
+  text: string | null;
+  similarity: number;
 }
 
 /** Снимок заключения до или после замечания специалиста. */
@@ -1437,6 +1485,8 @@ export interface AiFeedback {
   before: ConclusionSnapshot | null;
   after: ConclusionSnapshot | null;
   ai_response: string | null;
+  /** Уходит ли несогласие прецедентом в похожие закупки (23.10.2026). */
+  share_as_precedent: boolean;
   created_at: string;
   processed_at: string | null;
 }

@@ -163,7 +163,11 @@ def test_payload_shape_matches_portal_contract(db_session, client, admin_user):
 
     tz = payload["sections"]["technical_specification"]
     prep = payload["sections"]["preparation"]
+    # Первой идёт краткая выжимка (портал 1.4.1), затем требования.
+    assert tz[0]["type"] == "technical_summary"
+    tz = tz[1:]
     assert [row["type"] for row in tz] == ["requirement"]
+    assert all(row["status"] for row in tz + prep)
     assert [row["type"] for row in prep] == ["qualification"]
     assert tz[0]["data"]["criticality"] == "Критическое"
     assert all(row["sort"] and row["key"] and row["title"] for row in tz + prep)

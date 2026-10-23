@@ -66,7 +66,7 @@ class RegistryInfo:
 REGISTRIES: dict[str, RegistryInfo] = {
     AdmissionRegistry.INDUSTRIAL_PRODUCTS.value: RegistryInfo(
         key=AdmissionRegistry.INDUSTRIAL_PRODUCTS.value,
-        label="Реестр промпродукции (ПП 719)",
+        label="Реестр промпродукции (ПП 719, ПП 1875)",
         official_name="Реестр промышленной продукции, произведённой на территории РФ (ПП РФ № 719, ГИСП)",
         source_key="reg_gisp",
         patterns=(
@@ -75,6 +75,11 @@ REGISTRIES: dict[str, RegistryInfo] = {
             re.compile(r"\bГИСП\b", re.IGNORECASE),
             re.compile(r"(постановлени\w*|ПП)\s*(Правительства\s*(РФ)?\s*)?(№\s*)?719\b", re.IGNORECASE),
             re.compile(r"№\s*719\b"),
+            # Национальный режим (ПП РФ № 1875 от 23.12.2024, замечание 22.10.2026):
+            # ограничение и запрет иностранных товаров проверяются по тому же реестру ГИСП.
+            re.compile(r"(постановлени\w*|ПП)\s*(Правительства\s*(РФ|Российской\s+Федерации)?\s*)?(от\s*[\d.]+\s*(г\.?)?\s*)?(№\s*)?1875\b", re.IGNORECASE),
+            re.compile(r"№\s*1875\b"),
+            re.compile(r"национальн\w+\s+режим", re.IGNORECASE),
         ),
     ),
     AdmissionRegistry.ROSSETI_ATTESTATION.value: RegistryInfo(

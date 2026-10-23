@@ -21,7 +21,7 @@ from app.services.audit import log_action
 
 _SINGLETON_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 _UNCONFIGURED_MESSAGE = (
-    "Подключение не настроено: заполните API-ключ и Folder ID на странице «Интеграции»."
+    "Подключение не настроено: заполните API-ключ и Folder ID на странице «Модели ИИ»."
 )
 
 

@@ -5,14 +5,16 @@
 хранится, каким заключение было до замечания и каким стало после. Без этой пары нельзя ни
 проверить, учла ли модель возражение, ни собрать из замечаний материал для правки промптов.
 
-Замечания видят все — это общий архив по закупке, а не личные заметки.
+Замечания видят все — это общий архив по закупке, а не личные заметки. С 23.10.2026
+несогласие ещё и уходит прецедентом в разбор похожих закупок
+(`ai_conclusion_service.precedents_block`).
 """
 
 import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -63,6 +65,11 @@ class AiScoreFeedback(Base):
     after: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # Что модель ответила на замечание: с чем согласилась, что изменила, где осталась при своём.
     ai_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Переносить ли несогласие в разбор похожих закупок прецедентом (23.10.2026, раздел 71
+    # ARCHITECTURE.md). Замечание о частностях одной закупки автор выключает.
+    share_as_precedent: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

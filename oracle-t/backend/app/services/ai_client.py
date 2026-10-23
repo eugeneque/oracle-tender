@@ -130,7 +130,7 @@ def _run_structured(
     if not is_provider_enabled(db, provider):
         raise AiModelDisabledError(
             "Все модели ИИ отключены администратором — разбор недоступен, пока одну из них "
-            "не включат на странице «Интеграции»."
+            "не включат на странице «Модели ИИ»."
         )
     called_at = datetime.now(timezone.utc)
     if provider in ROUTERAI_PROVIDERS:

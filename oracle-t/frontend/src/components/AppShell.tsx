@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronsLeft, ChevronsRight } from "lucide-react";
+import { ChevronDown, PanelLeftClose, PanelLeftOpen, Search } from "lucide-react";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -12,8 +12,10 @@ import { Logo, LogoMark } from "./Logo";
 import { HeaderNav } from "./nav/HeaderNav";
 import { NotificationCenter } from "./nav/NotificationCenter";
 import { PageHeaderSlotContext } from "./nav/pageHeaderSlotContext";
-import { WhatsNewCard, WhatsNewPill } from "./nav/WhatsNew";
-import { isNavItemActive, visibleNavItems } from "./nav/navConfig";
+import { CommandPalette } from "./nav/CommandPalette";
+import { SidebarNavLink } from "./nav/SidebarNavLink";
+import { WhatsNewPill } from "./nav/WhatsNew";
+import { NAV_GROUPS, isNavItemActive, visibleNavItems } from "./nav/navConfig";
 import type { NavItem } from "./nav/navConfig";
 
 const COLLAPSED_KEY = "nav.sidebarCollapsed";
@@ -100,9 +102,9 @@ export function AppLayout() {
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="z-30 flex h-16 shrink-0 items-center gap-4 border-b border-white/[0.05] bg-zinc-950/80 px-6 backdrop-blur">
           {slot}
+          {/* Учётная запись — карточкой внизу боковой панели (23.10.2026). */}
           <div className="ml-auto flex items-center gap-4">
             <NotificationCenter />
-            <AccountMenu />
           </div>
         </header>
         {main}
@@ -111,10 +113,25 @@ export function AppLayout() {
   );
 }
 
+// Мак показывает подсказку ⌘K, остальные — Ctrl K: сочетание одно и то же (metaKey/ctrlKey).
+const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+
+/**
+ * Боковая панель (редизайн 23.10.2026 по образцу соседнего проекта): бренд с подписью,
+ * поле быстрого перехода (⌘K), разделы по группам с подписями, активный пункт — на
+ * приподнятой плашке, которая перетекает между пунктами. Внизу — «Настройки», ниже
+ * карточка учётной записи (меню раскрывается вверх, в нём блок «Что нового?»). Цвета
+ * прежние: фон zinc-950, знак — в переливающемся градиенте бренда.
+ *
+ * Сворачивает панель нажатие на знак (по наведению сова сменяется значком панели) —
+ * отдельная кнопка внизу убрана. Высоты пунктов и отступы тянутся по высоте окна
+ * (`.sidebar-fit` в index.css), чтобы меню целиком помещалось без прокрутки.
+ */
 function Sidebar() {
   const { user } = useAuth();
   const { pathname, search } = useLocation();
   const [isCollapsed, setIsCollapsed] = useState(readCollapsed);
+  const [isPaletteOpen, setIsPaletteOpen] = useState(false);
 
   const toggle = () => {
     setIsCollapsed((prev) => {
@@ -127,11 +144,29 @@ function Sidebar() {
     });
   };
 
+  // ⌘K / Ctrl+K открывает быстрый переход. В «Настройках» сочетание уже занято поиском по
+  // настройкам — там уступаем ему, чтобы не открывалось два поиска сразу.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "k" || !(event.metaKey || event.ctrlKey)) return;
+      if (pathname.startsWith("/settings")) return;
+      event.preventDefault();
+      setIsPaletteOpen((open) => !open);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [pathname]);
+
   // В боковой панели — основные разделы; «Избранное» живёт только в выпадающем меню шапки
   // (здесь до него один клик из меню учётной записи).
   const allItems = visibleNavItems(user).filter((item) => !item.headerOnly);
-  const items = allItems.filter((item) => !item.parent);
+  const items = allItems.filter((item) => !item.parent && !item.sidebarFooter);
+  const footerItems = allItems.filter((item) => item.sidebarFooter);
   const childrenOf = (item: NavItem) => allItems.filter((child) => child.parent === item.to);
+  const groups = NAV_GROUPS.map((group) => ({
+    ...group,
+    items: items.filter((item) => item.group === group.key),
+  })).filter((group) => group.items.length > 0);
   const [expanded, setExpanded] = useState<Record<string, boolean>>(readExpanded);
   const toggleGroup = (to: string) => {
     setExpanded((prev) => {
@@ -145,15 +180,130 @@ function Sidebar() {
     });
   };
 
+  const renderItem = (item: NavItem) => {
+    const children = childrenOf(item);
+    const childActive = children.some((child) => isNavItemActive(child, pathname, search));
+    // В свёрнутой панели вложенных пунктов не видно — подсвечивается родитель.
+    const isActive = isNavItemActive(item, pathname, search) || (isCollapsed && childActive);
+    // Открытый вложенный раздел раскрывает группу сам, иначе его не видно в меню.
+    const isOpen = !isCollapsed && children.length > 0 && (expanded[item.to] || childActive);
+    return (
+      <motion.div key={item.to} variants={navItemVariants}>
+        <div className="relative flex items-center">
+          <SidebarNavLink
+            to={item.to}
+            label={item.label}
+            icon={item.icon}
+            isActive={isActive}
+            collapsed={isCollapsed}
+            // место под стрелку группы, чтобы длинная подпись не уходила под неё
+            trailing={children.length > 0 ? <span className="w-6" /> : undefined}
+          />
+          {!isCollapsed && children.length > 0 && (
+            <button
+              type="button"
+              onClick={() => toggleGroup(item.to)}
+              aria-expanded={isOpen}
+              title={isOpen ? "Свернуть подразделы" : "Показать подразделы"}
+              className="absolute right-2 z-10 flex h-7 w-7 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-white/[0.08] hover:text-zinc-100"
+            >
+              <ChevronDown
+                size={15}
+                className={`transition-transform duration-300 ease-out ${isOpen ? "rotate-180" : ""}`}
+              />
+            </button>
+          )}
+        </div>
+        <AnimatePresence initial={false}>
+          {isOpen && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={SPRING_SNAPPY}
+              className="overflow-hidden"
+            >
+              <div className="my-0.5 ml-[22px] flex flex-col gap-0.5 border-l border-white/[0.08] pl-3">
+                {children.map((child) => (
+                  <SidebarNavLink
+                    key={child.to}
+                    to={child.to}
+                    label={child.label}
+                    icon={child.icon}
+                    isActive={isNavItemActive(child, pathname, search)}
+                    collapsed={false}
+                    nested
+                  />
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
+    );
+  };
+
   return (
     <motion.aside
       initial={false}
-      animate={{ width: isCollapsed ? 76 : 260 }}
+      animate={{ width: isCollapsed ? 76 : 272 }}
       transition={SPRING_SOFT}
-      className="flex h-screen shrink-0 flex-col overflow-hidden border-r border-white/[0.06] bg-zinc-950"
+      className="sidebar-fit flex h-screen shrink-0 flex-col overflow-hidden border-r border-white/[0.06] bg-zinc-950"
     >
-      <div className="mb-4 flex h-16 shrink-0">
-        <SidebarBrand collapsed={isCollapsed} onToggle={toggle} />
+      <div className="shrink-0 px-4 pt-[var(--nav-gap)]">
+        <button
+          type="button"
+          onClick={toggle}
+          title={isCollapsed ? "Развернуть меню" : "Свернуть меню"}
+          aria-label={isCollapsed ? "Развернуть меню" : "Свернуть меню"}
+          className="group flex w-full items-center gap-3 text-left"
+        >
+          <span className="brand-gradient relative flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-[14px] text-snow transition-transform duration-200 group-hover:scale-[1.04] group-active:scale-95">
+            <LogoMark
+              size={15}
+              className="text-snow drop-shadow transition-[opacity,transform] duration-200 group-hover:scale-75 group-hover:opacity-0"
+            />
+            {isCollapsed ? (
+              <PanelLeftOpen
+                size={18}
+                className="absolute scale-75 opacity-0 transition-[opacity,transform] duration-200 group-hover:scale-100 group-hover:opacity-100"
+              />
+            ) : (
+              <PanelLeftClose
+                size={18}
+                className="absolute scale-75 opacity-0 transition-[opacity,transform] duration-200 group-hover:scale-100 group-hover:opacity-100"
+              />
+            )}
+          </span>
+          {!isCollapsed && (
+            <motion.span
+              initial={{ opacity: 0, x: -6 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.25, delay: 0.08 }}
+              className="min-w-0 whitespace-nowrap"
+            >
+              <span className="brand-wordmark block text-[16px] leading-tight text-white">Sova</span>
+              <span className="block text-xs text-zinc-500">Тендерная аналитика</span>
+            </motion.span>
+          )}
+        </button>
+        <div className="my-[var(--nav-gap)] h-px bg-white/[0.06]" />
+        <button
+          type="button"
+          onClick={() => setIsPaletteOpen(true)}
+          title={`Поиск (${IS_MAC ? "⌘K" : "Ctrl K"})`}
+          className="nav-well group flex h-[var(--nav-item)] w-full items-center gap-3 whitespace-nowrap rounded-2xl px-[13px] text-sm text-zinc-500 transition-[color,transform] duration-200 hover:text-zinc-300 active:scale-[0.98]"
+        >
+          <Search size={18} className="shrink-0 transition-colors group-hover:text-zinc-200" />
+          {!isCollapsed && (
+            <>
+              <span className="flex-1 text-left">Поиск…</span>
+              <kbd className="rounded-full border border-white/[0.06] bg-white/[0.06] px-2 py-0.5 font-sans text-[11px] font-medium text-zinc-400">
+                {IS_MAC ? "⌘K" : "Ctrl K"}
+              </kbd>
+            </>
+          )}
+        </button>
       </div>
 
       <LayoutGroup id="sidebar-nav">
@@ -161,159 +311,48 @@ function Sidebar() {
           variants={staggerContainer}
           initial="initial"
           animate="animate"
-          className="flex flex-col gap-0.5 px-3"
+          className="no-scrollbar flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden px-4 pb-[var(--nav-gap)]"
         >
-          {items.map((item) => {
-            const children = childrenOf(item);
-            const childActive = children.some((child) => isNavItemActive(child, pathname, search));
-            // В свёрнутой панели вложенных пунктов не видно — подсвечивается родитель.
-            const isActive =
-              isNavItemActive(item, pathname, search) || (isCollapsed && childActive);
-            // Открытый вложенный раздел раскрывает группу сам, иначе его не видно в меню.
-            const isOpen = !isCollapsed && children.length > 0 && (expanded[item.to] || childActive);
-            return (
-              <motion.div key={item.to} variants={navItemVariants}>
-                <div className="relative flex items-center">
-                  <SidebarLink item={item} isActive={isActive} isCollapsed={isCollapsed} />
-                  {!isCollapsed && children.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => toggleGroup(item.to)}
-                      aria-expanded={isOpen}
-                      title={isOpen ? "Свернуть подразделы" : "Показать подразделы"}
-                      className="absolute right-1.5 z-10 rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
-                    >
-                      <ChevronDown
-                        size={14}
-                        className={`transition-transform duration-200 ${isOpen ? "rotate-180" : ""}`}
-                      />
-                    </button>
-                  )}
-                </div>
-                <AnimatePresence initial={false}>
-                  {isOpen && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: "auto", opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      transition={SPRING_SNAPPY}
-                      className="overflow-hidden"
-                    >
-                      <div className="mb-0.5 ml-5 mt-0.5 flex flex-col gap-0.5 border-l border-white/[0.06] pl-2">
-                        {children.map((child) => (
-                          <SidebarLink
-                            key={child.to}
-                            item={child}
-                            isActive={isNavItemActive(child, pathname, search)}
-                            isCollapsed={false}
-                            nested
-                          />
-                        ))}
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </motion.div>
-            );
-          })}
+          {groups.map((group, index) => (
+            <div key={group.key} className="flex flex-col gap-0.5">
+              {isCollapsed ? (
+                <div className={`mx-auto my-[var(--nav-gap)] h-px w-6 bg-white/[0.08] ${index === 0 ? "opacity-0" : ""}`} />
+              ) : (
+                <motion.div
+                  variants={navItemVariants}
+                  className="whitespace-nowrap px-[13px] pb-1 pt-[var(--nav-gap)] text-xs font-medium text-zinc-500"
+                >
+                  {group.label}
+                </motion.div>
+              )}
+              {group.items.map(renderItem)}
+            </div>
+          ))}
         </motion.nav>
+
+        <div className="shrink-0 px-4 pb-[var(--nav-gap)]">
+          <div className="h-px bg-white/[0.06]" />
+          <div className="flex flex-col gap-0.5 py-[calc(var(--nav-gap)/1.5)]">
+            {footerItems.map((item) => (
+              <SidebarNavLink
+                key={item.to}
+                to={item.to}
+                label={item.label}
+                icon={item.icon}
+                isActive={isNavItemActive(item, pathname, search)}
+                collapsed={isCollapsed}
+              />
+            ))}
+          </div>
+          <div className="mb-[calc(var(--nav-gap)/1.5)] h-px bg-white/[0.06]" />
+          <div className="flex items-center justify-center">
+            <AccountMenu variant="sidebar" collapsed={isCollapsed} />
+          </div>
+        </div>
       </LayoutGroup>
 
-      <div className={`mt-auto ${isCollapsed ? "pb-4" : "p-3"}`}>
-        <WhatsNewCard collapsed={isCollapsed} />
-        {!isCollapsed && (
-          <div className="mt-3 whitespace-nowrap px-1 text-xs text-zinc-700">Sova</div>
-        )}
-      </div>
+      <CommandPalette open={isPaletteOpen} onClose={() => setIsPaletteOpen(false)} />
     </motion.aside>
-  );
-}
-
-function SidebarLink({
-  item,
-  isActive,
-  isCollapsed,
-  nested = false,
-}: {
-  item: NavItem;
-  isActive: boolean;
-  isCollapsed: boolean;
-  nested?: boolean;
-}) {
-  const Icon = item.icon;
-  return (
-    <Link
-      to={item.to}
-      className={`relative flex flex-1 items-center gap-3 whitespace-nowrap rounded-xl font-medium transition-colors ${
-        nested ? "px-2.5 py-1.5 text-[13px]" : "px-3 py-2.5 text-sm"
-      } ${isActive ? "text-white" : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"}`}
-      title={item.label}
-    >
-      {isActive && (
-        <motion.span
-          layoutId="sidebar-active"
-          className="absolute inset-0 rounded-xl border border-white/10 bg-white/[0.07] shadow-sm"
-          transition={SPRING_SNAPPY}
-        />
-      )}
-      <Icon size={nested ? 15 : 17} className="relative shrink-0" />
-      {!isCollapsed && <span className="relative">{item.label}</span>}
-    </Link>
-  );
-}
-
-/**
- * Блок бренда вверху боковой панели: переливающийся градиент (.brand-gradient в index.css),
- * на нём сова и «SOVA». Блок без скруглений заливает всю шапку панели — от её правой границы
- * до линии шапки страницы, — а ширина следует за панелью: при сворачивании остаётся квадрат
- * с одной совой. Отступ слева постоянный (сова по центру свёрнутой панели), знак не прыгает. Стрелка сворачивания — внутри
- * блока справа; в свёрнутом виде разворачивает весь квадрат (по наведению сова → стрелка).
- */
-function SidebarBrand({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
-  const box = "brand-gradient brand-gradient--flush group relative flex h-full min-w-0 flex-1 items-center overflow-hidden text-snow";
-  const mark = (
-    <span className="relative flex h-6 w-6 shrink-0 items-center justify-center">
-      <LogoMark
-        size={18}
-        className={`text-snow drop-shadow transition-opacity duration-200 ${collapsed ? "group-hover:opacity-0" : ""}`}
-      />
-      {collapsed && (
-        <ChevronsRight
-          size={18}
-          className="absolute opacity-0 transition-opacity duration-200 group-hover:opacity-100"
-        />
-      )}
-    </span>
-  );
-
-  if (collapsed) {
-    return (
-      <button onClick={onToggle} className={`${box} pl-[26px]`} title="Развернуть" aria-label="Развернуть меню">
-        {mark}
-      </button>
-    );
-  }
-  return (
-    <div className={box}>
-      <Link to="/tenders" className="flex h-full min-w-0 flex-1 items-center gap-3 pl-[26px]" title="Тендеры">
-        {mark}
-        <motion.span
-          initial={{ opacity: 0, x: -6 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 0.25, delay: 0.08 }}
-          className="brand-wordmark whitespace-nowrap text-[17px] leading-none"
-        >
-          Sova
-        </motion.span>
-      </Link>
-      <button
-        onClick={onToggle}
-        className="mr-4 shrink-0 rounded-md p-1 text-snow/70 transition-colors hover:bg-snow/15 hover:text-snow"
-        title="Свернуть"
-      >
-        <ChevronsLeft size={16} />
-      </button>
-    </div>
   );
 }
 

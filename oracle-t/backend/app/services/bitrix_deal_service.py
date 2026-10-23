@@ -187,7 +187,7 @@ def _get_or_create(db: Session) -> Bitrix24Settings:
 def _webhook(settings: Bitrix24Settings | None) -> str:
     if settings is None or not settings.webhook_url:
         raise BitrixNotConfiguredError(
-            "Bitrix24 не подключён: укажите вебхук в разделе «Интеграции → Bitrix24»."
+            "Bitrix24 не подключён: укажите вебхук в разделе «Приложения → Bitrix24»."
         )
     try:
         return decrypt_secret(settings.webhook_url)
@@ -403,7 +403,7 @@ def push_tender(db: Session, tender_id: uuid.UUID, *, actor: User) -> dict[str, 
     settings = _get_or_create(db)
     if not settings.push_enabled:
         raise BitrixPushDisabledError(
-            "Отправка в Bitrix24 выключена. Включите её в разделе «Интеграции → Bitrix24», "
+            "Отправка в Bitrix24 выключена. Включите её в разделе «Приложения → Bitrix24», "
             "когда проверите подключение и предпросмотр сделки."
         )
 

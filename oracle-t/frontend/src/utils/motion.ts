@@ -48,6 +48,13 @@ export const dropdownVariants: Variants = {
   exit: { opacity: 0, y: -4, scale: 0.98, filter: "blur(2px)", transition: { duration: 0.12 } },
 };
 
+/** Меню, которое раскрывается вверх от своей кнопки (карточка учётной записи внизу панели). */
+export const dropupVariants: Variants = {
+  initial: { opacity: 0, y: 6, scale: 0.97, filter: "blur(4px)" },
+  animate: { opacity: 1, y: 0, scale: 1, filter: "blur(0px)", transition: SPRING_SOFT },
+  exit: { opacity: 0, y: 4, scale: 0.98, filter: "blur(2px)", transition: { duration: 0.12 } },
+};
+
 /** Группы пунктов: каскад сверху вниз. */
 export const staggerContainer: Variants = {
   initial: {},

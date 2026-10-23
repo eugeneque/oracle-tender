@@ -695,6 +695,35 @@ def test_ambiguous_requirements_and_values_go_to_model():
     assert _decide("Срок службы: 30 лет", one) is None
 
 
+def test_paired_base_and_max_current_both_checked():
+    """32616482191 (замечание 22.10.2026): «Базовый / максимальный ток – не более 5А / не
+    менее 100А». D17 с максимальным 80 А не подходит; у своего каталога (МИРТЕК) код
+    ставит «не соответствует», у чужого — решает модель."""
+
+    from app.services.compliance_numeric import lost_numbers, wording_for_code
+
+    text = "Базовый / максимальный ток – не более 5А / не менее 100А"
+    d17 = _model("D17", {"1ph_direct"}, nominal="5 А", maximum="80 А", tariffs="4")
+    w3 = _model("W3", {"1ph_direct"}, nominal="5 А", maximum="100 А")
+    groups = {"1ph_direct"}
+
+    assert _decide(text, d17, w3, groups=groups) == "meets"
+    assert _decide(text, d17, groups=groups) is None
+    found = prejudge(text, [d17], groups, NUMERIC_ENABLED, decisive=True)
+    assert found is not None and found.status == "not_meets" and "80 А" in found.explanation
+    found = prejudge("Количество тарифов: не менее 8", [d17], groups, NUMERIC_ENABLED, decisive=True)
+    assert found is not None and found.status == "not_meets"
+    # Не ток и не тарифы — «не соответствует» код не ставит и у своего каталога.
+    assert prejudge("Срок службы: 40 лет", [_model("А", {"1ph_direct"}, life="30 лет")], groups,
+                    NUMERIC_ENABLED, decisive=True) is None
+
+    # Сокращение «Базовый ток: 5 А» потеряло 100 А — сверяется формулировка ТЗ.
+    assert lost_numbers(text, "Базовый ток: 5 А") == {"100"}
+    assert wording_for_code(text, "Базовый ток: 5 А") == text
+    # ГОСТ и год — не значения требования.
+    assert not lost_numbers("Класс точности 1 по ГОСТ 31819.21-2012", "Класс точности: 1")
+
+
 def test_prejudged_requirements_are_not_sent_to_model(db_session, admin_user: User, monkeypatch):
     tender = _make_tender(db_session)
     _add_requirement(db_session, tender, text="Класс точности не хуже 1,0")

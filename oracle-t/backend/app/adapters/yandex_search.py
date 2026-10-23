@@ -106,8 +106,8 @@ class YandexSearchClient:
 
         if response.status_code == 403:
             raise YandexSearchError(
-                "Yandex Search API отказал в доступе (403): у API-ключа из «Настройки → "
-                "Интеграции» нет роли search-api.executor на каталоге"
+                "Yandex Search API отказал в доступе (403): у API-ключа со страницы «Модели "
+                "ИИ» нет роли search-api.executor на каталоге"
             )
         if response.status_code >= 400:
             raise YandexSearchError(

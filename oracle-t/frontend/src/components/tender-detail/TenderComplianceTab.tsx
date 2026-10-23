@@ -2,6 +2,7 @@ import { Fragment, useMemo, useState } from "react";
 import { AlertTriangle, BookOpen, ChevronDown, ChevronRight } from "lucide-react";
 
 import type { ComplianceEntry, ComplianceMatrix } from "../../api/types";
+import { ComplianceVerdictReview } from "./ComplianceVerdictReview";
 import { ParameterChip, PositionChip } from "./TenderRequirementsTab";
 import {
   complianceLabel,
@@ -201,10 +202,15 @@ function MethodologyHint() {
 }
 
 export function TenderComplianceTab({
+  tenderId,
   matrix,
+  onMatrixChange,
   requirementsCount,
 }: {
+  tenderId: string;
   matrix: ComplianceMatrix;
+  /** Оценка ячейки специалистом возвращает матрицу целиком: процент меняется сразу. */
+  onMatrixChange: (matrix: ComplianceMatrix) => void;
   /** Сколько требований извлечено из документации. Нужно, чтобы объяснить пустую матрицу:
    *  «нечего сопоставлять» и «расчёт ещё не запускали» — разные ситуации с разными
    *  следующими шагами. `null` — список ещё грузится. */
@@ -352,7 +358,7 @@ export function TenderComplianceTab({
                           }`}
                         />
                         <span className="flex-1 leading-snug text-zinc-200">{requirement.text}</span>
-                        <PositionChip requirement={requirement} />
+                        <PositionChip requirement={requirement} compact />
                         <ParameterChip requirement={requirement} />
                       </div>
                     </td>
@@ -375,6 +381,12 @@ export function TenderComplianceTab({
                               <span
                                 className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-amber-400"
                                 title="Требует проверки человеком"
+                              />
+                            )}
+                            {entry?.source === "human_review" && (
+                              <span
+                                className="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-indigo-400"
+                                title="Исправлено специалистом"
                               />
                             )}
                           </span>
@@ -412,6 +424,11 @@ export function TenderComplianceTab({
                                 {entry.needs_human_review && (
                                   <p className="mt-1 text-[11px] text-amber-400">Низкая уверенность — проверьте вручную</p>
                                 )}
+                                <ComplianceVerdictReview
+                                  tenderId={tenderId}
+                                  entry={entry}
+                                  onMatrixChange={onMatrixChange}
+                                />
                               </div>
                             );
                           })}
@@ -438,7 +455,14 @@ export function TenderComplianceTab({
           <span className="h-2 w-2 rounded-full bg-amber-400" />
           требует проверки
         </span>
-        <span className="text-zinc-600">Нажмите на строку — пояснения по каждому производителю.</span>
+        <span className="flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full bg-indigo-400" />
+          исправлено специалистом
+        </span>
+        <span className="text-zinc-600">
+          Нажмите на строку — пояснения по каждому производителю; там же можно согласиться с
+          вердиктом или исправить его.
+        </span>
       </div>
     </div>
   );

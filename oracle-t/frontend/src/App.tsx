@@ -5,12 +5,13 @@ import { AppLayout } from "./components/AppShell";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { WHATS_NEW_PATH } from "./components/nav/WhatsNew";
 import { AccountPage } from "./pages/Account";
+import { AiSettingsPage } from "./pages/AiSettings";
 import { AnalyticsPage } from "./pages/Analytics";
+import { AppDetailPage, AppsPage, LegacyIntegrationsRedirect } from "./pages/Apps";
 import { CatalogPage } from "./pages/Catalog";
 import { ChangelogPage } from "./pages/Changelog";
 import { CompanyPage } from "./pages/Company";
 import { HomePage } from "./pages/Home";
-import { IntegrationsPage } from "./pages/Integrations";
 import { LoginPage } from "./pages/Login";
 import { LogsPage } from "./pages/Logs";
 import { SettingsPage } from "./pages/Settings";
@@ -48,7 +49,18 @@ export default function App() {
             }
           />
           <Route path="/company" element={<CompanyPage />} />
-          <Route path="/integrations" element={<IntegrationsPage />} />
+          {/* «Интеграции» разделены 23.10.2026: внешние сервисы — «Приложения», ИИ — свой раздел. */}
+          <Route path="/apps" element={<AppsPage />} />
+          <Route path="/apps/:appKey" element={<AppDetailPage />} />
+          <Route
+            path="/ai"
+            element={
+              <ProtectedRoute requireRole="admin">
+                <AiSettingsPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route path="/integrations" element={<LegacyIntegrationsRedirect />} />
           <Route path="/logs" element={<LogsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/changelog" element={<ChangelogPage />} />

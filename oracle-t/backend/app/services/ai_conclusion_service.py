@@ -24,6 +24,7 @@ YandexGPT рвёт по лимиту токенов на выходе (см. з�
 
 from __future__ import annotations
 
+import math
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -34,7 +35,7 @@ import pydantic
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.ai_feedback import AiScoreFeedback, FeedbackKind
+from app.models.ai_feedback import AiScoreFeedback, FeedbackKind, FeedbackStatus
 from app.models.analysis import (
     ComplianceMatrixEntry,
     ComplianceStatus,
@@ -45,7 +46,7 @@ from app.models.analysis import (
 )
 from app.models.ai_profile import WeakPointSeverity
 from app.models.company_participation import CompanyParticipation, ParticipationOutcome
-from app.models.manufacturer import Manufacturer, Product
+from app.models.manufacturer import Manufacturer, Product, ProductStatus
 from app.models.market import NicheStatistics
 from app.models.tender import Tender
 from app.models.user import User
@@ -55,6 +56,8 @@ from app.services.product_relevance import (
     select_products_for_context,
     tender_named_text,
 )
+from app.services.meter_kind import kind_labels
+from app.services.national_regime import NationalRegime, national_regime, regime_block
 from app.services.tz_reference import is_model_requirement, is_vendor_exclusive, match_manufacturer
 
 # --- словари ---------------------------------------------------------------------------
@@ -167,13 +170,16 @@ _FIT_PROMPT = """Ты — руководитель тендерного отде
   или "unchecked" (не проверен по ТЗ); note — чего не хватает или почему подходит, коротко.
   Пустой список, если предмет закупки — не приборы учёта.
 - competitors — производители, которые проходят или проходят с оговорками, сильнейший
-  первым (до 5); если мы не проходим — обязательно назови тех, кто проходит. manufacturer —
+  первым (до 5); если мы не проходим — обязательно назови тех, кто проходит. Если закупаются
+  приборы нескольких типов (раздел «ЧТО ЗАКУПАЕТСЯ»), в note укажи, по каким типам или
+  позициям производитель проходит, а по каким нет. manufacturer —
   название из раздела «ПРОИЗВОДИТЕЛИ»; model — модель из списка этого производителя или
   пустая строка; status — "fits", "partial" или "not_fits"; note — коротко, чем берёт или
   на чём отсекается.
 - feedback_response — если есть раздел «ЗАМЕЧАНИЯ СПЕЦИАЛИСТОВ»: ответь на последнее
   замечание по существу — с чем согласен и что изменил в заключении, а где остаёшься при
-  своём и почему (со ссылкой на факт). Без замечаний — пустая строка.
+  своём и почему (со ссылкой на факт). Без замечаний — пустая строка. Раздел «ПРЕЦЕДЕНТЫ» —
+  возражения по другим закупкам, а не замечание к этой: на него feedback_response не пиши.
 
 Порядок рассуждения — строго такой, и headline называет ПЕРВУЮ сработавшую причину:
 1. Предмет закупки — приборы учёта электроэнергии или нет.
@@ -203,6 +209,10 @@ _FIT_PROMPT = """Ты — руководитель тендерного отде
 - Если замечание специалиста указывает на причину из пунктов 1-3 (например, «ТЗ под приборы
   другого производителя») и входные данные её не опровергают — заключение перестраивается
   вокруг неё, а не повторяет прежний вывод.
+- Раздел «ОГРАНИЧЕНИЕ ДОПУСКА ИНОСТРАННЫХ ТОВАРОВ» (ПП 1875) — обязателен: в закупке
+  поставки предлагай только приборы, которые он называет допустимыми, и назови ограничение
+  в rationale. Если приборы в составе шкафа или закупаются работы — не отсекай приборы, а
+  укажи, что применимость ограничения нужно проверить.
 - Не выдумывай приборов, производителей и фактов, которых нет во входных данных.
 Отвечай по-русски, без markdown."""
 
@@ -268,6 +278,9 @@ class ConclusionFacts:
     product_requirements: int = 0
     # ТЗ под конкретный товарный знак (05.10.2026) — найдено кодом, см. `detect_brand_lock`.
     brand_lock: "BrandLock | None" = None
+    # Национальный режим, ПП 1875 (22.10.2026) — какие наши приборы допустимы, см.
+    # `national_regime`.
+    regime: NationalRegime | None = None
 
 
 _VERDICT_TEXT = {
@@ -583,13 +596,17 @@ def collect_facts(db: Session, tender: Tender) -> ConclusionFacts:
 
     facts: list[ManufacturerFacts] = []
     for manufacturer in db.scalars(select(Manufacturer).order_by(Manufacturer.legal_name)):
-        products = list(
-            db.scalars(select(Product).where(Product.manufacturer_id == manufacturer.id))
-        )
+        query = select(Product).where(Product.manufacturer_id == manufacturer.id)
+        if manufacturer.is_mirtek:
+            # Наш прибор — только выпускаемый (22.10.2026): снятые исполнения из «Описаний
+            # типов» предлагались как подходящие.
+            query = query.where(Product.status == ProductStatus.ACTIVE.value)
+        products = list(db.scalars(query))
         limit = OUR_CANDIDATES if manufacturer.is_mirtek else COMPETITOR_CANDIDATES
         selected = (
             select_products_for_context(
-                db, manufacturer, requirements, limit=limit, named_text=named_text
+                db, manufacturer, requirements, limit=limit, named_text=named_text,
+                active_only=manufacturer.is_mirtek,
             )
             if products
             else []
@@ -606,6 +623,19 @@ def collect_facts(db: Session, tender: Tender) -> ConclusionFacts:
     mirtek = next((item for item in facts if item.manufacturer.is_mirtek), None)
     others = [item for item in facts if not item.manufacturer.is_mirtek]
     matrix_built = bool(wins)
+
+    # Национальный режим: при поставке кандидаты в «наши приборы» — только с записью в
+    # реестре промпродукции, иначе модель выбирает из тех, кого предлагать нельзя.
+    documents_text = _documents_text(db, tender)
+    all_requirements = list(db.scalars(select(Requirement).where(Requirement.tender_id == tender.id)))
+    regime = national_regime(
+        db, tender, mirtek.manufacturer if mirtek else None, all_requirements, documents_text
+    )
+    if regime is not None and mirtek is not None and regime.strict and regime.allowed:
+        allowed = {product.model_name for product in regime.allowed}
+        ordered = [name for name in mirtek.candidates if name in allowed]
+        ordered += [name for name in sorted(allowed) if name not in ordered]
+        mirtek.candidates = ordered[:OUR_CANDIDATES]
 
     lines: list[str] = []
     lines.append("НАШИ ПРИБОРЫ (МИРТЕК):")
@@ -680,6 +710,11 @@ def collect_facts(db: Session, tender: Tender) -> ConclusionFacts:
 
     # Заточка под товарный знак — в начало: это главный факт, когда он есть, и модель должна
     # увидеть его раньше процентов матрицы.
+    kinds_line = purchase_kinds_block(tender, requirements, documents_text)
+    if kinds_line:
+        lines.insert(0, kinds_line + "\n")
+    if regime is not None:
+        lines.insert(0, regime_block(regime) + "\n")
     lock = detect_brand_lock(db, tender, requirements, [item.manufacturer for item in facts])
     if lock is not None:
         lines.insert(0, brand_lock_block(lock) + "\n")
@@ -703,7 +738,50 @@ def collect_facts(db: Session, tender: Tender) -> ConclusionFacts:
         matrix_built=matrix_built,
         product_requirements=len(requirements),
         brand_lock=lock,
+        regime=regime,
     )
+
+
+_PHASE_IN_DOCS = (
+    (re.compile(r"однофазн", re.IGNORECASE), "однофазные"),
+    (re.compile(r"тр[её]хфазн", re.IGNORECASE), "трёхфазные"),
+)
+
+
+def purchase_kinds_block(tender: Tender, requirements: list[Requirement], documents_text: str) -> str | None:
+    """Какие приборы закупаются — типы, позиции спецификации и фазность из документации
+    (замечание 22.10.2026, 32616469643: в документации и однофазные, и трёхфазные, а
+    заключение по конкурентам написало «подходит только однофазный»). Модель должна
+    ответить по каждому типу, а не по тому, который первым попался в кандидатах."""
+
+    labels = kind_labels(tender.meter_kinds)
+    positions: list[str] = []
+    for requirement in requirements:
+        if requirement.position and requirement.position not in positions:
+            positions.append(requirement.position)
+    in_docs = [label for pattern, label in _PHASE_IN_DOCS if pattern.search(documents_text or "")]
+    if not labels and not positions and len(in_docs) < 2:
+        return None
+    lines = ["ЧТО ЗАКУПАЕТСЯ:"]
+    if labels:
+        lines.append(f"  Типы приборов по требованиям: {'; '.join(labels)}.")
+    if positions:
+        lines.append(f"  Позиции спецификации: {'; '.join(positions[:12])}.")
+    phases_known = {"однофазные": "1ph", "трёхфазные": "3ph"}
+    missing = [
+        label for label in in_docs
+        if not any(code.startswith(phases_known[label]) for code in tender.meter_kinds or [])
+    ]
+    if len(in_docs) == 2 and missing and tender.meter_kinds:
+        lines.append(
+            f"  В документации упоминаются и {missing[0]} приборы, но требований к ним не "
+            "извлечено — проверить по документации."
+        )
+    lines.append(
+        "  Оценивай приборы по КАЖДОМУ типу и позиции: не пиши «подходит только однофазный», "
+        "если закупаются и трёхфазные, — назови, кто проходит по ним, или что данных нет."
+    )
+    return "\n".join(lines)
 
 
 def _niche(db: Session, tender: Tender) -> NicheStatistics | None:
@@ -794,6 +872,112 @@ def feedback_block(db: Session, tender: Tender) -> str | None:
             f"{f' (на заключение: «{before}»)' if before else ''}: {feedback.text}"
         )
     return "\n".join(lines)
+
+
+# Прецеденты (23.10.2026, раздел 71 ARCHITECTURE.md): несогласия специалистов по ПОХОЖИМ
+# закупкам. Сходство — косинус по основам слов текста закупки (наименование, заказчик,
+# ОКПД2, способ, требования — `similarity_service.tender_text`). На локальной базе у 99% пар
+# закупок он ниже 0,39, а от 0,45 — почти всегда тот же заказчик и тот же предмет. Векторы
+# (`tender_embeddings`) не годятся: они есть у единиц закупок.
+PRECEDENT_MIN_SIMILARITY = 0.45
+MAX_PRECEDENTS = 3
+# Сколько последних несогласий перебирать: у каждого кандидата читается текст закупки.
+PRECEDENT_POOL = 200
+PRECEDENT_TEXT_CHARS = 600
+
+
+def find_precedents(db: Session, tender: Tender) -> list[tuple[AiScoreFeedback, Tender, str | None, float]]:
+    """Несогласия из других закупок, похожих на эту, — самые похожие первыми.
+
+    Берутся только учтённые (`applied`): модель их уже пересмотрела, и «после» видно, что
+    из замечания вышло. По каждой закупке — последнее замечание: остальные обычно уточняют
+    его же. Замечание, которое автор пометил «только для этой закупки», не берётся."""
+
+    from app.services.compliance_service import _stems
+    from app.services.similarity_service import tender_text
+
+    rows = db.execute(
+        select(AiScoreFeedback, User.full_name)
+        .outerjoin(User, User.id == AiScoreFeedback.user_id)
+        .where(
+            AiScoreFeedback.tender_id != tender.id,
+            AiScoreFeedback.kind == FeedbackKind.DISAGREE.value,
+            AiScoreFeedback.status == FeedbackStatus.APPLIED.value,
+            AiScoreFeedback.share_as_precedent.is_(True),
+        )
+        .order_by(AiScoreFeedback.created_at.desc())
+        .limit(PRECEDENT_POOL)
+    ).all()
+    if not rows:
+        return []
+    target = _stems(tender_text(db, tender))
+    if not target:
+        return []
+
+    found: list[tuple[AiScoreFeedback, Tender, str | None, float]] = []
+    seen: set[uuid.UUID] = set()
+    for feedback, author in rows:
+        if feedback.tender_id in seen:
+            continue
+        seen.add(feedback.tender_id)
+        other = db.get(Tender, feedback.tender_id)
+        if other is None:
+            continue
+        stems = _stems(tender_text(db, other))
+        if not stems:
+            continue
+        score = len(target & stems) / math.sqrt(len(target) * len(stems))
+        if score >= PRECEDENT_MIN_SIMILARITY:
+            found.append((feedback, other, author, score))
+    found.sort(key=lambda item: -item[3])
+    return found[:MAX_PRECEDENTS]
+
+
+def precedents_block(db: Session, tender: Tender) -> tuple[str | None, list[dict]]:
+    """Раздел запроса с прецедентами и их описание для заключения (карточка показывает, чьи
+    замечания учтены). Заголовок нарочно не «ЗАМЕЧАНИЯ СПЕЦИАЛИСТОВ»: на те модель обязана
+    ответить в `feedback_response`, а прецедент — не замечание к этой закупке."""
+
+    found = find_precedents(db, tender)
+    if not found:
+        return None, []
+
+    def view(value: dict | None) -> str:
+        value = value or {}
+        label = value.get("fit_label") or "—"
+        headline = (value.get("headline") or "").strip()
+        return f"{label}: {headline[:200]}" if headline else label
+
+    lines = [
+        "ПРЕЦЕДЕНТЫ — ВОЗРАЖЕНИЯ СПЕЦИАЛИСТОВ ПО ПОХОЖИМ ЗАКУПКАМ (это ДРУГИЕ закупки):"
+    ]
+    described: list[dict] = []
+    for feedback, other, author, score in found:
+        response = (feedback.ai_response or "").strip()
+        lines.append(
+            f"- Закупка «{(other.title or '—')[:150]}» ({other.customer_name or 'заказчик не указан'}). "
+            f"ИИ заключил «{view(feedback.before)}». Специалист возразил: "
+            f"«{(feedback.text or '')[:PRECEDENT_TEXT_CHARS]}». После пересмотра: «{view(feedback.after)}»"
+            + (f". Ответ ИИ: {response[:300]}" if response else "")
+        )
+        described.append(
+            {
+                "feedback_id": str(feedback.id),
+                "tender_id": str(other.id),
+                "tender_title": other.title,
+                "tender_external_id": other.external_id,
+                "user_name": author,
+                "text": feedback.text,
+                "similarity": round(score, 2),
+            }
+        )
+    lines.append(
+        "Знание о компании и её приборах из этих возражений («у нас есть допуск», «прибор это "
+        "поддерживает») учитывай и здесь. Частности тех закупок (их требования, сроки, "
+        "заказчика) к этой не переноси; если факты этой закупки противоречат прецеденту — "
+        "следуй фактам."
+    )
+    return "\n".join(lines), described
 
 
 # --- метрики (считает код) -----------------------------------------------------------------
@@ -1050,15 +1234,25 @@ def _clean_products(answer: FitAnswer, facts: ConclusionFacts) -> list[dict]:
         # Без матрицы прибор по ТЗ никто не сверял — «подходит» было бы обещанием без факта.
         if not facts.matrix_built and status in {"fits", "partial"}:
             status = "unchecked"
+        note = item.note.strip()
+        regime = facts.regime
+        if regime is not None and regime.blocks(product):
+            status = "not_fits"
+            note = "Нет записи в реестре промпродукции — по ПП 1875 к поставке не допускается"
+        elif regime is not None and regime.strict and not regime.allowed and status == "fits":
+            status = "partial"
+            note = f"{note} Проверить запись в реестре ГИСП (ПП 1875).".strip()
         result.append(
             {
                 "product_id": str(product.id),
                 "model": product.model_name,
                 "status": status,
                 "status_label": PRODUCT_STATUS_LABELS[status],
-                "note": item.note.strip(),
+                "note": note,
             }
         )
+    # Недопустимые — в конец: первым в списке стоит прибор, который предлагаем.
+    result.sort(key=lambda row: row["status"] == "not_fits")
     return result[:4]
 
 

@@ -267,7 +267,7 @@ def get_routerai_credentials(
     if settings is None or not settings.routerai_api_key:
         raise AiNotConfiguredError(
             f"Подключение к {PROVIDER_LABELS.get(provider, provider)} (RouterAI) не настроено: "
-            "заполните API-ключ в разделе «Интеграции → Искусственный интеллект»."
+            "заполните API-ключ в разделе «Модели ИИ»."
         )
     return (
         settings.routerai_api_key,

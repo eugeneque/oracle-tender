@@ -620,6 +620,28 @@ def _folded(column):
     return func.replace(func.replace(column, "ё", "е"), "Ё", "Е")
 
 
+# Организационно-правовая форма в поиске не различает (замечание 22.10.2026): заказчика
+# пишут то «АКЦИОНЕРНОЕ ОБЩЕСТВО "ЭНЕРГОСБЫТ ПЛЮС"», то «АО «ЭнергосбыТ Плюс»», и поиск
+# целой строкой с кавычками не находил ничего. Форма и кавычки из запроса выбрасываются,
+# остальные слова ищутся каждое по отдельности.
+_LEGAL_FORM_WORDS = frozenset(
+    {
+        "акционерное", "общество", "публичное", "открытое", "закрытое", "непубличное",
+        "ограниченной", "ответственностью", "ао", "пао", "оао", "зао", "нао", "ооо",
+    }
+)
+_SEARCH_WORD = re.compile(r"[0-9a-zа-я]+")
+
+
+def search_words(text: str) -> list[str]:
+    """Слова запроса для поиска: без кавычек, знаков и организационно-правовой формы.
+    Запрос из одной формы («ООО») ищется как есть."""
+
+    words = _SEARCH_WORD.findall(fold_yo(text).lower())
+    meaningful = [word for word in words if word not in _LEGAL_FORM_WORDS and len(word) > 1]
+    return meaningful or words
+
+
 def analyzed_condition():
     """Закупка разобрана — ИИ-разбор извлёк из документации хотя бы одно требование.
     Требования лежат у записи с разбором (`analysed_tender_id`), поэтому двойник из
@@ -748,10 +770,12 @@ def _build_conditions(filters: TenderFilters) -> list:
     if filters.search:
         # Е и Ё не различаются (14.10.2026): пользователь пишет «счетчик», а в наименовании
         # «счётчик» (или наоборот) — и закупка не находилась. Обе стороны приводятся к «е».
-        pattern = f"%{fold_yo(filters.search)}%"
-        conditions.append(
-            _folded(Tender.title).ilike(pattern) | _folded(Tender.customer_name).ilike(pattern)
+        # Каждое слово — в наименовании, заказчике или номере закупки (22.10.2026).
+        haystack = _folded(
+            func.concat_ws(" ", Tender.title, Tender.customer_name, Tender.external_id)
         )
+        for word in search_words(filters.search):
+            conditions.append(haystack.ilike(f"%{word}%"))
     feed_condition = feed_condition_for(filters.feed)
     if feed_condition is not None:
         conditions.append(feed_condition)
