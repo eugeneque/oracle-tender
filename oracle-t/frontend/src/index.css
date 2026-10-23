@@ -20,7 +20,7 @@ body {
 }
 
 ::selection {
-  background-color: rgba(99, 102, 241, 0.35);
+  background-color: rgba(24, 93, 241, 0.35);
 }
 
 * {
@@ -223,6 +223,72 @@ body {
   .bento-hero-gradient, .keynote-fade, .keynote-rise { animation: none; }
 }
 
+/* Плитки «Что нового?» в новом стиле (24.10.2026): поверхность `.surface`, при наведении кромка
+   светлеет и появляется тень — как у карточек списка закупок. */
+.bento-card { transition: background-color 0.25s, box-shadow 0.25s; }
+.bento-card:hover {
+  background: linear-gradient(180deg, rgb(var(--c-white) / 0.055), rgb(var(--c-white) / 0.025));
+  box-shadow:
+    inset 0 1px 0 rgb(var(--c-white) / 0.07),
+    inset 0 0 0 1px rgb(var(--c-white) / 0.14),
+    0 14px 30px -18px rgb(0 0 0 / 0.8);
+}
+:root[data-theme="light"] .bento-card:hover {
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.1), 0 10px 24px -12px rgb(0 0 0 / 0.18);
+}
+
+/* Блок «Знакомьтесь: Мира» (components/home/MiraSpotlight.tsx). Рамка — `.mira-frame`, но
+   ярче, чем в карточке закупки: здесь Мира — главное нововведение, а не фон для текста.
+   Свечение и ореол за ней — в цвет текущего настроения и плавно перетекают при смене. */
+.mira-frame.mira-spotlight::before { opacity: 0.55; animation-duration: 10s; }
+.mira-frame.mira-spotlight::after { opacity: 0.1; animation-duration: 10s; }
+.mira-frame.mira-spotlight[data-tone="working"]::before { opacity: 0.9; }
+.mira-frame.mira-spotlight[data-tone="working"]::after { opacity: 0.18; }
+.mira-spotlight__glow {
+  --g1: #6d5cff; --g2: #38bdf8;
+  background:
+    radial-gradient(42% 70% at 78% 50%, color-mix(in srgb, var(--g1) 30%, transparent), transparent 70%),
+    radial-gradient(30% 55% at 92% 15%, color-mix(in srgb, var(--g2) 22%, transparent), transparent 70%),
+    radial-gradient(35% 60% at 8% 100%, color-mix(in srgb, var(--g1) 10%, transparent), transparent 70%);
+  transition: --g1 1s ease, --g2 1s ease;
+  animation: mira-spot-drift 12s ease-in-out infinite alternate;
+}
+.mira-spotlight__glow[data-tone="working"] { --g1: #3b4bff; --g2: #ff9f0a; }
+.mira-spotlight__glow[data-tone="happy"] { --g1: #14b8a6; --g2: #8cf27a; }
+@property --g1 { syntax: "<color>"; inherits: false; initial-value: #6d5cff; }
+@property --g2 { syntax: "<color>"; inherits: false; initial-value: #38bdf8; }
+@keyframes mira-spot-drift {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to { transform: translate3d(-3%, 2%, 0) scale(1.06); }
+}
+.mira-spotlight__halo {
+  background: radial-gradient(closest-side, rgb(var(--c-white) / 0.08), transparent);
+  box-shadow: inset 0 0 0 1px rgb(var(--c-white) / 0.06);
+  animation: mira-spot-halo 4s ease-in-out infinite;
+}
+@keyframes mira-spot-halo {
+  0%, 100% { transform: scale(0.94); opacity: 0.6; }
+  50% { transform: scale(1.04); opacity: 1; }
+}
+.mira-spotlight__name {
+  background: linear-gradient(100deg, #8b7bff, #38bdf8 45%, #c084fc 75%, #8b7bff);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: mira-spot-name 6s linear infinite;
+}
+@keyframes mira-spot-name {
+  to { background-position: -200% 0; }
+}
+:root[data-theme="light"] .mira-spotlight__halo {
+  background: radial-gradient(closest-side, rgb(24 93 241 / 0.08), transparent);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.05);
+}
+@media (prefers-reduced-motion: reduce) {
+  .mira-spotlight__glow, .mira-spotlight__halo, .mira-spotlight__name { animation: none; }
+}
+
 /* Попап «Почему нельзя отправить в Битрикс» (20.10.2026): карточка выпрыгивает с лёгкой
    пружиной, значок покачивается, от него расходятся два кольца — внимание сразу на причине. */
 @keyframes bitrix-pop {
@@ -328,61 +394,23 @@ html.theme-switching *::after {
   .catalog-searching { animation: none; }
 }
 
-/* Блок бренда в боковой панели (28.09.2026): переливающийся градиент в цветах интерфейса
-   (indigo → violet → fuchsia → sky) и блик, который раз в несколько секунд проходит по
-   диагонали. Оттенки 500 выбраны потому, что зеркальная палитра светлой темы оставляет их
-   на месте — блок выглядит одинаково в обеих темах, а текст на нём всегда `snow`. */
+/* Знак в боковой панели. Был переливающийся градиент с бликом (28.09.2026); 24.10.2026 —
+   строже, в палитре SalesPort: неподвижный градиент от фирменного синего к Prussian Blue.
+   Цвета заданы явно, чтобы в светлой теме знак не бледнел от зеркальной шкалы. */
 .brand-gradient {
-  isolation: isolate;
-  background: linear-gradient(
-    115deg,
-    rgb(var(--c-indigo-500)),
-    rgb(var(--c-violet-500)),
-    rgb(var(--c-fuchsia-500)),
-    rgb(var(--c-sky-500)),
-    rgb(var(--c-indigo-500))
-  );
-  background-size: 400% 400%;
-  animation: brand-flow 12s ease-in-out infinite;
+  background: linear-gradient(160deg, #2a6bf3 0%, #185df1 45%, #0f3b9b 100%);
   box-shadow:
-    inset 0 0 0 1px rgb(255 255 255 / 0.14),
-    0 6px 24px -8px rgb(var(--c-indigo-500) / 0.6);
+    inset 0 1px 0 rgb(255 255 255 / 0.18),
+    inset 0 0 0 1px rgb(255 255 255 / 0.08),
+    0 4px 14px -6px rgb(24 93 241 / 0.5);
 }
-.brand-gradient::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background:
-    radial-gradient(circle at 20% 30%, rgb(255 255 255 / 0.22), transparent 45%),
-    radial-gradient(circle at 80% 80%, rgb(0 0 0 / 0.25), transparent 55%);
-  mix-blend-mode: soft-light;
-}
-.brand-gradient::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background: linear-gradient(105deg, transparent 35%, rgb(255 255 255 / 0.28) 50%, transparent 65%);
-  transform: translateX(-120%);
-  animation: brand-sheen 6s ease-in-out infinite;
-}
+/* Название — Inter средней насыщенности вместо жирного Unbounded: спокойнее и в тон
+   остальному интерфейсу. */
 .brand-wordmark {
-  font-family: "Unbounded", "Inter", sans-serif;
-  font-weight: 800;
-  letter-spacing: 0.12em;
+  font-family: "Inter", sans-serif;
+  font-weight: 500;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
-}
-@keyframes brand-flow {
-  0%, 100% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-}
-@keyframes brand-sheen {
-  0%, 55% { transform: translateX(-120%); }
-  100% { transform: translateX(120%); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .brand-gradient, .brand-gradient::after { animation: none; }
 }
 
 /* Боковая панель (редизайн 23.10.2026). Три фактуры: `nav-pill` — активный пункт,
@@ -591,11 +619,11 @@ html.theme-switching *::after {
 .mira-frame::before {
   inset: 0;
   padding: 1px;
-  opacity: 0.5;
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
   z-index: 2;
+  opacity: 0.2;
 }
 /* Плотная подложка: свечение лежит позади блока и не должно просвечивать сквозь
    полупрозрачную `.surface` внутрь, на текст. */
@@ -605,15 +633,36 @@ html.theme-switching *::after {
     rgb(var(--c-zinc-950));
 }
 :root[data-theme="light"] .mira-frame.surface { background: #ffffff; }
-/* Мягкое свечение за блоком. */
+/* Мягкое свечение за блоком. Блок изолирован (`isolation`), поэтому свечение с
+   `z-index: -1` ложится поверх подложки и окрашивает всю карточку. */
 .mira-frame::after {
   inset: 8px;
   z-index: -1;
   filter: blur(22px);
-  opacity: 0.12;
+  opacity: 0.04;
 }
-.mira-frame[data-tone="working"]::before { opacity: 0.85; animation-duration: 3s; }
-.mira-frame[data-tone="working"]::after { opacity: 0.22; animation-duration: 3s; }
+/* Цвет как сигнал (24.10.2026): пока Мира работает, рамка яркая и перелив быстрый; когда
+   закончила, фон сразу становится почти нейтральным с медленным переливом, а цветная кромка
+   держится пару секунд и плавно гаснет — «готово». Работает на переходах: у каждого
+   состояния своя `transition`, и браузер берёт ту, в которое состояние переходит. */
+.mira-frame::before {
+  animation-duration: 24s;
+  transition: opacity 2.4s ease-out 1.6s;
+}
+.mira-frame::after {
+  animation-duration: 24s;
+  transition: opacity 1.2s ease-out;
+}
+.mira-frame[data-tone="working"]::before {
+  opacity: 0.85;
+  animation-duration: 3s;
+  transition: opacity 0.4s ease-out;
+}
+.mira-frame[data-tone="working"]::after {
+  opacity: 0.14;
+  animation-duration: 3s;
+  transition: opacity 0.4s ease-out;
+}
 @keyframes mira-frame-spin {
   to { --mira-angle: 360deg; }
 }
@@ -643,7 +692,8 @@ html.theme-switching *::after {
   from { stroke-dashoffset: 100; }
   to { stroke-dashoffset: 0; }
 }
-:root[data-theme="light"] .mira-frame::before { opacity: 0.7; }
+:root[data-theme="light"] .mira-frame::before { opacity: 0.3; }
+:root[data-theme="light"] .mira-frame[data-tone="working"]::before { opacity: 0.7; }
 
 /* Шкала по шагам (src/components/ui/StepProgress.tsx): пройденный сегмент залит,
    текущий переливается, впереди — пустой желобок. */
@@ -727,22 +777,22 @@ html.theme-switching *::after {
 }
 
 /* Свечение под шапкой блока Миры — в цвет её настроения. */
+/* После разбора — едва заметно (24.10.2026), ярче только во время работы. */
 .mira-glow {
-  background: radial-gradient(60% 100% at 12% 0%, rgb(139 92 246 / 0.16), transparent 70%),
-    radial-gradient(40% 80% at 30% 0%, rgb(236 72 153 / 0.08), transparent 70%);
+  background: radial-gradient(60% 100% at 12% 0%, rgb(139 92 246 / 0.06), transparent 70%);
   transition: background 0.4s;
 }
 .mira-glow[data-mood="working"] {
-  background: radial-gradient(60% 100% at 12% 0%, rgb(59 75 255 / 0.18), transparent 70%),
-    radial-gradient(40% 80% at 30% 0%, rgb(255 59 48 / 0.1), transparent 70%);
+  background: radial-gradient(60% 100% at 12% 0%, rgb(59 75 255 / 0.14), transparent 70%),
+    radial-gradient(40% 80% at 30% 0%, rgb(255 59 48 / 0.07), transparent 70%);
 }
 .mira-glow[data-mood="happy"] {
-  background: radial-gradient(60% 100% at 12% 0%, rgb(16 185 129 / 0.16), transparent 70%);
+  background: radial-gradient(60% 100% at 12% 0%, rgb(16 185 129 / 0.07), transparent 70%);
 }
 .mira-glow[data-mood="doubtful"] {
-  background: radial-gradient(60% 100% at 12% 0%, rgb(245 158 11 / 0.14), transparent 70%);
+  background: radial-gradient(60% 100% at 12% 0%, rgb(245 158 11 / 0.06), transparent 70%);
 }
 .mira-glow[data-mood="sad"],
 .mira-glow[data-mood="error"] {
-  background: radial-gradient(60% 100% at 12% 0%, rgb(239 68 68 / 0.14), transparent 70%);
+  background: radial-gradient(60% 100% at 12% 0%, rgb(239 68 68 / 0.06), transparent 70%);
 }

@@ -54,7 +54,7 @@ export function AiSummaryCard({
   onGenerate: () => void;
 }) {
   return (
-    <div className="rounded-2xl border border-indigo-500/20 bg-gradient-to-br from-indigo-500/[0.07] to-violet-500/[0.03] p-5">
+    <div className="rounded-2xl border border-indigo-500/20 bg-gradient-to-br from-indigo-500/[0.07] to-indigo-400/[0.03] p-5">
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold text-indigo-300">
@@ -69,7 +69,7 @@ export function AiSummaryCard({
         <button
           onClick={onGenerate}
           disabled={isLoading}
-          className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-2 text-sm font-medium text-snow transition-opacity hover:opacity-90 disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-indigo-400 px-3 py-2 text-sm font-medium text-snow transition-opacity hover:opacity-90 disabled:opacity-50"
         >
           <RefreshCw size={15} className={isLoading ? "animate-spin" : ""} />
           {isLoading ? "Анализирую…" : summary ? "Обновить сводку" : "Сформировать сводку"}

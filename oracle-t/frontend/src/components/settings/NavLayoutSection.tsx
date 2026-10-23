@@ -50,7 +50,7 @@ function Preview({ layout }: { layout: NavLayout }) {
         {[0, 1, 2, 3].map((i) => (
           <div key={i} className={`h-1 w-4 ${bar} ${i === 0 ? "bg-indigo-400/60" : ""}`} />
         ))}
-        <div className="ml-auto h-1.5 w-6 rounded-full bg-gradient-to-r from-indigo-400/70 to-fuchsia-400/70" />
+        <div className="ml-auto h-1.5 w-6 rounded-full bg-gradient-to-r from-indigo-500/70 to-indigo-300/70" />
       </div>
       <div className="flex flex-1 gap-1">
         <div className={`w-2/5 ${card}`} />

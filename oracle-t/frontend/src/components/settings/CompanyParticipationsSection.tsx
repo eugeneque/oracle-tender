@@ -11,6 +11,8 @@ import type {
   ParticipationWrite,
 } from "../../api/types";
 import { formatDate, formatDateTime, formatPrice, plural } from "../../utils/format";
+import { Tooltip } from "../ui/Tooltip";
+import { SettingsNotice } from "./ui";
 
 /**
  * История участий МИРТЕК (раздел 5.6 «Моя компания», раздел 7 ТЗ).
@@ -32,7 +34,7 @@ import { formatDate, formatDateTime, formatPrice, plural } from "../../utils/for
  */
 
 const inputClass =
-  "mt-1 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none";
+  "mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none";
 
 const OUTCOME_OPTIONS: Array<{ value: ParticipationOutcome; label: string }> = [
   { value: "won", label: "Победа" },
@@ -41,12 +43,18 @@ const OUTCOME_OPTIONS: Array<{ value: ParticipationOutcome; label: string }> = [
   { value: "unknown", label: "Исход неизвестен" },
 ];
 
-const OUTCOME_CLASS: Record<ParticipationOutcome, string> = {
-  won: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
-  lost: "border-red-500/30 bg-red-500/10 text-red-300",
-  disqualified: "border-amber-500/30 bg-amber-500/10 text-amber-300",
-  unknown: "border-white/10 bg-white/5 text-zinc-500",
+const OUTCOME_DOT: Record<ParticipationOutcome, string> = {
+  won: "bg-emerald-400",
+  lost: "bg-red-400",
+  disqualified: "bg-amber-400",
+  unknown: "bg-zinc-600",
 };
+
+const primaryButton =
+  "flex items-center gap-2 rounded-lg bg-indigo-500 px-3.5 py-2 text-sm font-medium text-snow hover:bg-indigo-400 disabled:opacity-50";
+
+const secondaryButton =
+  "flex items-center gap-2 rounded-lg border border-white/10 px-3.5 py-2 text-sm text-zinc-300 transition-colors hover:bg-white/5 hover:text-zinc-100 disabled:opacity-50";
 
 const EMPTY_FORM: ParticipationWrite = {
   external_tender_id: "",
@@ -59,71 +67,71 @@ const EMPTY_FORM: ParticipationWrite = {
   lessons_learned_md: "",
 };
 
-function SummaryTile({
-  label,
-  value,
-  hint,
-  accent,
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-  accent?: string;
-}) {
-  return (
-    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] px-3 py-2.5">
-      <div className="text-[11px] uppercase tracking-wide text-zinc-500">{label}</div>
-      <div className={`mt-0.5 text-lg font-semibold ${accent ?? "text-zinc-100"}`}>{value}</div>
-      {hint && <div className="mt-0.5 text-[11px] text-zinc-600">{hint}</div>}
-    </div>
-  );
-}
-
+/**
+ * Сводка — одна карточка с рядом цифр (редизайн 24.10.2026): прежние пять плиток в своих
+ * цветах и абзац предупреждения под ними спорили с таблицей за внимание. Цвет исхода остался
+ * только точкой у подписи, предупреждение о выборке «одни победы» — одной строкой с
+ * подробностями по наведению.
+ */
 function Summary({ summary }: { summary: ParticipationSummary }) {
   const decided = summary.won + summary.lost + summary.disqualified;
   const winRate = summary.win_rate === null ? null : Math.round(Number(summary.win_rate));
+  const figures: Array<{ label: string; value: string; dot?: string; hint?: string }> = [
+    { label: "Участий", value: String(summary.total) },
+    { label: "Побед", value: String(summary.won), dot: OUTCOME_DOT.won },
+    { label: "Проигрышей", value: String(summary.lost), dot: OUTCOME_DOT.lost },
+    {
+      label: "Дисквалификаций",
+      value: String(summary.disqualified),
+      dot: OUTCOME_DOT.disqualified,
+      hint: "не допустили к торгам",
+    },
+    {
+      label: "Win-rate",
+      value: winRate === null ? "—" : `${winRate}%`,
+      hint:
+        winRate === null
+          ? "нет исходов"
+          : summary.wins_only_data
+            ? "выборка без проигрышей"
+            : `от ${decided} ${plural(decided, "участия", "участий", "участий")}`,
+    },
+  ];
   return (
-    <>
-    <div className="mb-4 grid gap-2 sm:grid-cols-3 lg:grid-cols-5">
-      <SummaryTile label="Участий" value={String(summary.total)} />
-      <SummaryTile label="Побед" value={String(summary.won)} accent="text-emerald-300" />
-      <SummaryTile label="Проигрышей" value={String(summary.lost)} accent="text-red-300" />
-      <SummaryTile
-        label="Дисквалификаций"
-        value={String(summary.disqualified)}
-        accent="text-amber-300"
-        hint="не допустили к торгам"
-      />
-      <SummaryTile
-        label="Win-rate"
-        value={winRate === null ? "нет данных" : `${winRate}%`}
-        hint={
-          winRate === null
-            ? "нет участий с известным исходом"
-            : summary.wins_only_data
-              ? "по выборке без проигрышей — см. ниже"
-              : `от ${decided} ${plural(decided, "участия", "участий", "участий")} с известным исходом`
-        }
-      />
-    </div>
-    {summary.wins_only_data && (
-      <div className="mb-4 flex gap-2 rounded-lg border border-amber-500/25 bg-amber-500/[0.07] px-3 py-2.5">
-        <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-400" />
-        <p className="text-[11px] leading-relaxed text-amber-200/90">
-          Вся история выгружена из реестра контрактов ЕИС, где есть только заключённые
-          контракты — проигрышей там нет по устройству. Поэтому win-rate здесь равен 100% как
-          свойство выборки, а не как факт о компании, и измерение «История» по таким данным
-          долю побед не считает. Проигрыши подтянутся сами по закупкам, отмеченным как
-          «заявка подана», а полностью — кнопкой «Обновить из rusprofile» на вкладке
-          «Профили компаний»: сайт показывает и закупки, которые компания не выиграла.
-        </p>
+    <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03]">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
+        {figures.map((figure, index) => (
+          <div
+            key={figure.label}
+            className={`px-5 py-4 ${index > 0 ? "lg:border-l lg:border-white/[0.06]" : ""}`}
+          >
+            <div className="flex items-center gap-1.5 text-xs text-zinc-500">
+              {figure.dot && <span className={`h-1.5 w-1.5 rounded-full ${figure.dot}`} />}
+              {figure.label}
+            </div>
+            <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight text-zinc-100">
+              {figure.value}
+            </div>
+            {figure.hint && <div className="mt-0.5 truncate text-xs text-zinc-600">{figure.hint}</div>}
+          </div>
+        ))}
       </div>
-    )}
-    </>
+      {summary.wins_only_data && (
+        <div className="flex items-center gap-2 border-t border-white/[0.06] px-5 py-3 text-sm text-zinc-400">
+          <AlertTriangle size={14} className="shrink-0 text-amber-400" />
+          <span>В истории только победы из реестра ЕИС — win-rate не показателен.</span>
+          <Tooltip content="В реестре контрактов ЕИС лежат только заключённые контракты, проигрышей там нет по устройству. Измерение «История» по таким данным долю побед не считает. Проигрыши подтянутся по закупкам с поданной заявкой, а полностью — кнопкой «Обновить из rusprofile» у компании.">
+            <span className="cursor-help text-zinc-600 underline decoration-dotted underline-offset-2">
+              Почему
+            </span>
+          </Tooltip>
+        </div>
+      )}
+    </div>
   );
 }
 
-function ManualForm({ onSaved }: { onSaved: () => void }) {
+function ManualForm({ onSaved, onCancel }: { onSaved: () => void; onCancel: () => void }) {
   const [form, setForm] = useState<ParticipationWrite>(EMPTY_FORM);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -153,20 +161,20 @@ function ManualForm({ onSaved }: { onSaved: () => void }) {
   };
 
   return (
-    <div className="mb-4 rounded-xl border border-white/[0.08] bg-black/20 p-4">
-      <h4 className="mb-1 text-xs font-semibold text-zinc-200">Добавить участие вручную</h4>
-      <p className="mb-3 text-[11px] text-zinc-600">
-        Для закупок, которые не подхватились автоматически: снятия с торгов, участие в
-        закупках вне ЕИС и всё, что было до появления системы. Повторная выгрузка такие
-        записи не трогает.
-      </p>
+    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-5">
+      <div className="mb-4 flex items-center gap-2">
+        <h3 className="text-[15px] font-semibold text-zinc-100">Новое участие</h3>
+        <Tooltip content="Для закупок, которые не подхватились автоматически: снятия с торгов, закупки вне ЕИС, всё, что было до системы. Повторная выгрузка такие записи не трогает.">
+          <span className="cursor-help text-sm text-zinc-600">?</span>
+        </Tooltip>
+      </div>
       {error && (
-        <div className="mb-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-400">
-          {error}
+        <div className="mb-4">
+          <SettingsNotice tone="error">{error}</SettingsNotice>
         </div>
       )}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <label className="block text-xs text-zinc-400 lg:col-span-2">
+        <label className="block text-sm text-zinc-400 lg:col-span-2">
           Закупка
           <input
             value={form.tender_title ?? ""}
@@ -175,7 +183,7 @@ function ManualForm({ onSaved }: { onSaved: () => void }) {
             className={inputClass}
           />
         </label>
-        <label className="block text-xs text-zinc-400">
+        <label className="block text-sm text-zinc-400">
           Номер закупки
           <input
             value={form.external_tender_id ?? ""}
@@ -184,7 +192,7 @@ function ManualForm({ onSaved }: { onSaved: () => void }) {
             className={inputClass}
           />
         </label>
-        <label className="block text-xs text-zinc-400">
+        <label className="block text-sm text-zinc-400">
           Заказчик (юрлицо)
           <input
             value={form.customer_name ?? ""}
@@ -192,7 +200,7 @@ function ManualForm({ onSaved }: { onSaved: () => void }) {
             className={inputClass}
           />
         </label>
-        <label className="block text-xs text-zinc-400">
+        <label className="block text-sm text-zinc-400">
           Итог
           <select
             value={form.outcome}
@@ -206,7 +214,7 @@ function ManualForm({ onSaved }: { onSaved: () => void }) {
             ))}
           </select>
         </label>
-        <label className="block text-xs text-zinc-400">
+        <label className="block text-sm text-zinc-400">
           Дата
           <input
             type="date"
@@ -215,7 +223,7 @@ function ManualForm({ onSaved }: { onSaved: () => void }) {
             className={inputClass}
           />
         </label>
-        <label className="block text-xs text-zinc-400">
+        <label className="block text-sm text-zinc-400">
           Наша ставка, ₽
           <input
             value={form.our_bid ?? ""}
@@ -224,7 +232,7 @@ function ManualForm({ onSaved }: { onSaved: () => void }) {
             className={inputClass}
           />
         </label>
-        <label className="block text-xs text-zinc-400">
+        <label className="block text-sm text-zinc-400">
           Цена контракта, ₽
           <input
             value={form.final_contract_value ?? ""}
@@ -232,7 +240,7 @@ function ManualForm({ onSaved }: { onSaved: () => void }) {
             className={inputClass}
           />
         </label>
-        <label className="block text-xs text-zinc-400 lg:col-span-3">
+        <label className="block text-sm text-zinc-400 lg:col-span-3">
           Выводы и заметки
           <textarea
             value={form.lessons_learned_md ?? ""}
@@ -243,14 +251,15 @@ function ManualForm({ onSaved }: { onSaved: () => void }) {
           />
         </label>
       </div>
-      <button
-        onClick={() => void save()}
-        disabled={isSaving}
-        className="mt-3 flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-xs font-medium text-snow hover:opacity-90 disabled:opacity-50"
-      >
-        {isSaving && <Loader2 size={12} className="animate-spin" />}
-        Добавить запись
-      </button>
+      <div className="mt-4 flex justify-end gap-2">
+        <button onClick={onCancel} className={secondaryButton}>
+          Отмена
+        </button>
+        <button onClick={() => void save()} disabled={isSaving} className={primaryButton}>
+          {isSaving && <Loader2 size={14} className="animate-spin" />}
+          Добавить
+        </button>
+      </div>
     </div>
   );
 }
@@ -292,10 +301,8 @@ export function CompanyParticipationsPanel({
         {},
       );
       setNotice(
-        `Победы из реестра контрактов: получено ${result.fetched}, добавлено ` +
-          `${result.created}, обновлено ${result.updated}, сопоставлено с тендерами ` +
-          `${result.matched_tenders}. Проигрыши: проверено закупок с поданной заявкой ` +
-          `${result.checked_submitted}, записано ${result.losses_found}.`,
+        `Побед из ЕИС: добавлено ${result.created}, обновлено ${result.updated}. ` +
+          `Проигрышей записано ${result.losses_found} из ${result.checked_submitted} поданных заявок.`,
       );
       await load();
     } catch (err) {
@@ -315,51 +322,19 @@ export function CompanyParticipationsPanel({
   };
 
   return (
-    <div>
-
-      {error && (
-        <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
-          {error}
-        </div>
-      )}
-      {notice && (
-        <div className="mb-4 rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-4 py-2.5 text-sm text-indigo-300">
-          {notice}
+    <div className="space-y-6">
+      {(error || notice) && (
+        <div className="space-y-2">
+          {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
+          {notice && <SettingsNotice tone="success">{notice}</SettingsNotice>}
         </div>
       )}
 
-      {isAdmin && (
-        <div className="mb-4 flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => void sync()}
-            disabled={isSyncing || !hasInn}
-            title={hasInn ? "Победы — из реестра контрактов по ИНН, проигрыши — по закупкам с поданной заявкой" : "Сначала укажите ИНН на вкладке «Профиль компании»"}
-            className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-xs font-medium text-snow hover:opacity-90 disabled:opacity-40"
-          >
-            {isSyncing ? (
-              <Loader2 size={13} className="animate-spin" />
-            ) : (
-              <RefreshCw size={13} />
-            )}
-            Обновить историю из ЕИС
-          </button>
-          <button
-            onClick={() => setShowForm((v) => !v)}
-            className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-300 hover:bg-white/5"
-          >
-            <Plus size={13} />
-            Добавить вручную
-          </button>
-          {!hasInn && (
-            <span className="text-[11px] text-amber-400">
-              ИНН не заполнен — реестр контрактов ищется именно по нему.
-            </span>
-          )}
-        </div>
-      )}
+      {data && <Summary summary={data.summary} />}
 
       {showForm && isAdmin && (
         <ManualForm
+          onCancel={() => setShowForm(false)}
           onSaved={() => {
             setShowForm(false);
             void load();
@@ -367,77 +342,111 @@ export function CompanyParticipationsPanel({
         />
       )}
 
-      {data && <Summary summary={data.summary} />}
-      {data?.summary.last_synced_at && (
-        <p className="mb-3 text-[11px] text-zinc-600">
-          Последняя выгрузка: {formatDateTime(data.summary.last_synced_at)}
-        </p>
-      )}
-
-      {data && data.items.length === 0 ? (
-        <p className="text-xs text-zinc-600">
-          Записей нет. Обновите историю из ЕИС или добавьте участия вручную.
-        </p>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[720px] text-left text-xs">
-            <thead>
-              <tr className="border-b border-white/[0.08] text-zinc-500">
-                <th className="py-2 pr-3 font-medium">Закупка</th>
-                <th className="py-2 pr-3 font-medium">Заказчик</th>
-                <th className="py-2 pr-3 font-medium">Итог</th>
-                <th className="py-2 pr-3 font-medium">Наша ставка</th>
-                <th className="py-2 pr-3 font-medium">Дата</th>
-                <th className="py-2 pr-3 font-medium">Источник</th>
-                {isAdmin && <th className="py-2" />}
-              </tr>
-            </thead>
-            <tbody>
-              {data?.items.map((item) => (
-                <tr key={item.id} className="border-b border-white/[0.04] align-top">
-                  <td className="py-2 pr-3 text-zinc-300">
-                    {item.tender_title ?? item.external_tender_id ?? "—"}
-                    {item.external_tender_id && item.tender_title && (
-                      <div className="text-[11px] text-zinc-600">{item.external_tender_id}</div>
-                    )}
-                    {item.lessons_learned_md && (
-                      <div className="mt-1 text-[11px] text-zinc-500">
-                        {item.lessons_learned_md}
-                      </div>
-                    )}
-                  </td>
-                  <td className="py-2 pr-3 text-zinc-400">{item.customer_name ?? "—"}</td>
-                  <td className="py-2 pr-3">
-                    <span
-                      className={`inline-block rounded-md border px-2 py-0.5 text-[11px] ${OUTCOME_CLASS[item.outcome]}`}
-                    >
-                      {item.outcome_label}
-                    </span>
-                  </td>
-                  <td className="py-2 pr-3 text-zinc-400">
-                    {formatPrice(item.our_bid, "RUB") ?? "—"}
-                  </td>
-                  <td className="py-2 pr-3 text-zinc-400">
-                    {formatDate(item.executed_at) ?? "—"}
-                  </td>
-                  <td className="py-2 pr-3 text-zinc-600">{item.source_label}</td>
-                  {isAdmin && (
-                    <td className="py-2">
-                      <button
-                        onClick={() => void remove(item.id)}
-                        className="rounded-lg border border-white/10 px-2 py-1 text-zinc-500 hover:bg-white/5 hover:text-red-400"
-                        title="Удалить запись"
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </td>
+      <section>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 px-1">
+          <div className="text-sm text-zinc-500">
+            {data?.summary.last_synced_at
+              ? `Выгрузка из ЕИС: ${formatDateTime(data.summary.last_synced_at)}`
+              : "Из ЕИС ещё не выгружалось"}
+          </div>
+          {isAdmin && (
+            <div className="flex items-center gap-2">
+              {!showForm && (
+                <button onClick={() => setShowForm(true)} className={secondaryButton}>
+                  <Plus size={15} />
+                  Вручную
+                </button>
+              )}
+              <Tooltip
+                content={
+                  hasInn
+                    ? "Победы — из реестра контрактов по ИНН, проигрыши — по закупкам с поданной заявкой"
+                    : "Укажите ИНН основной компании — реестр ищется по нему"
+                }
+              >
+                <button
+                  onClick={() => void sync()}
+                  disabled={isSyncing || !hasInn}
+                  className={primaryButton}
+                >
+                  {isSyncing ? (
+                    <Loader2 size={14} className="animate-spin" />
+                  ) : (
+                    <RefreshCw size={14} />
                   )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  Обновить из ЕИС
+                </button>
+              </Tooltip>
+            </div>
+          )}
         </div>
-      )}
+
+        {data && data.items.length === 0 ? (
+          <p className="rounded-2xl border border-dashed border-white/[0.1] px-6 py-12 text-center text-sm text-zinc-500">
+            Записей нет
+          </p>
+        ) : (
+          <div className="overflow-x-auto rounded-2xl border border-white/[0.08] bg-white/[0.03]">
+            <table className="w-full min-w-[760px] text-left text-sm">
+              <thead>
+                <tr className="border-b border-white/[0.06] text-xs text-zinc-500">
+                  <th className="px-5 py-3 font-medium">Закупка</th>
+                  <th className="px-3 py-3 font-medium">Заказчик</th>
+                  <th className="px-3 py-3 font-medium">Итог</th>
+                  <th className="px-3 py-3 text-right font-medium">Наша ставка</th>
+                  <th className="px-3 py-3 text-right font-medium">Дата</th>
+                  {isAdmin && <th className="w-12 px-3 py-3" />}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/[0.04]">
+                {data?.items.map((item) => (
+                  <tr key={item.id} className="group align-top hover:bg-white/[0.02]">
+                    <td className="max-w-[360px] px-5 py-3">
+                      <div className="line-clamp-2 text-zinc-200">
+                        {item.tender_title ?? item.external_tender_id ?? "—"}
+                      </div>
+                      <div className="mt-0.5 truncate text-xs text-zinc-600">
+                        {[item.tender_title ? item.external_tender_id : null, item.source_label]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </div>
+                      {item.lessons_learned_md && (
+                        <div className="mt-1 text-xs text-zinc-500">{item.lessons_learned_md}</div>
+                      )}
+                    </td>
+                    <td className="max-w-[240px] px-3 py-3 text-zinc-400">
+                      <span className="line-clamp-2">{item.customer_name ?? "—"}</span>
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-3">
+                      <span className="inline-flex items-center gap-1.5 text-zinc-300">
+                        <span className={`h-1.5 w-1.5 rounded-full ${OUTCOME_DOT[item.outcome]}`} />
+                        {item.outcome_label}
+                      </span>
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-zinc-300">
+                      {formatPrice(item.our_bid, "RUB") ?? "—"}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-zinc-400">
+                      {formatDate(item.executed_at) ?? "—"}
+                    </td>
+                    {isAdmin && (
+                      <td className="px-3 py-2.5">
+                        <button
+                          onClick={() => void remove(item.id)}
+                          className="rounded-lg p-1.5 text-zinc-600 opacity-0 transition-opacity hover:bg-white/5 hover:text-red-400 focus:opacity-100 group-hover:opacity-100"
+                          title="Удалить запись"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
     </div>
   );
 }

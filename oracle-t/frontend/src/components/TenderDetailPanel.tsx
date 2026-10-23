@@ -52,7 +52,7 @@ import { TenderRegistryBlock } from "./tender-detail/TenderRegistryBlock";
 import { TenderExtraTab } from "./tender-detail/TenderExtraTab";
 import { TenderHistoryTab } from "./tender-detail/TenderHistoryTab";
 import { TenderOverviewTab } from "./tender-detail/TenderOverviewTab";
-import { TenderRequirementsTab } from "./tender-detail/TenderRequirementsTab";
+import { PositionsSummary, TenderRequirementsTab } from "./tender-detail/TenderRequirementsTab";
 import { TagChip } from "./tags/TagChip";
 import { BitrixUploadButton } from "./tender-detail/BitrixUploadButton";
 import { TagPicker } from "./tags/TagPicker";
@@ -207,7 +207,9 @@ export function TenderDetailPanel({
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const [requirements, setRequirements] = useState<Requirement[] | null>(null);
-  const [positions, setPositions] = useState<TenderPosition[]>([]);
+  // `null` — ещё не загружены. Грузятся при открытии закупки, а не только с вкладкой
+  // «Требования»: количество приборов показывается и на «Основном» (24.10.2026).
+  const [positions, setPositions] = useState<TenderPosition[] | null>(null);
   // Последний запуск анализа документов. Нужен пустой вкладке «Требования»: без него она
   // советует нажать «Анализ документов» и тогда, когда он только что отработал и честно не
   // нашёл ни одного требования. `undefined` — ещё не спрашивали, `null` — не запускался.
@@ -350,6 +352,20 @@ export function TenderDetailPanel({
   useEffect(() => {
     void loadCard();
   }, [loadCard]);
+
+  useEffect(() => {
+    setPositions(null);
+    let cancelled = false;
+    api
+      .get<TenderPosition[]>(`/tenders/${tender.id}/positions`)
+      .catch(() => [] as TenderPosition[])
+      .then((loaded) => {
+        if (!cancelled) setPositions(loaded);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tender.id]);
 
   const loadRequirements = useCallback(async () => {
     // Позиции закупки извлекаются тем же анализом — грузятся вместе с требованиями; без них
@@ -950,10 +966,14 @@ export function TenderDetailPanel({
             {expandable && <BitrixUploadButton tenderId={tender.id} stage={tender.stage} compact />}
             {/* Черта отделяет действия над закупкой от управления самой панелью. */}
             <span className="mx-1 h-4 w-px bg-white/[0.08]" />
+            {/* Полная карточка открывается в новой вкладке (24.10.2026): список с фильтрами
+                и прокруткой остаётся на месте, к нему не нужно возвращаться заново. */}
             {expandable && (
               <Link
                 to={`/tenders/${tender.id}`}
-                title="Развернуть на отдельную страницу (средней кнопкой — в новой вкладке)"
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Развернуть в новой вкладке"
                 className={iconButton}
               >
                 <Maximize2 size={15} />
@@ -1215,6 +1235,13 @@ export function TenderDetailPanel({
 
         {activeTab === "overview" && (
           <div className="space-y-5">
+            {/* Что и сколько закупается — первым (24.10.2026): заключение Миры длинное, и под
+                ним количество приборов не видели без прокрутки. Блок в несколько строк. */}
+            <PositionsSummary
+              positions={positions}
+              analyzed={tender.requirements_count > 0}
+              onShowAll={() => setActiveTab("requirements")}
+            />
             {/* Главная метрика — выше данных источника: с неё начинается решение об участии. */}
             <TenderAiScorePanel
               score={score}
@@ -1345,7 +1372,7 @@ export function TenderDetailPanel({
           ) : (
             <TenderRequirementsTab
               requirements={requirements}
-              positions={positions}
+              positions={positions ?? []}
               analysis={
                 analysisJob === undefined
                   ? null

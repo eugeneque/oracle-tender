@@ -260,8 +260,8 @@ function Sidebar() {
         >
           <span className="brand-gradient relative flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-[14px] text-snow transition-transform duration-200 group-hover:scale-[1.04] group-active:scale-95">
             <LogoMark
-              size={15}
-              className="text-snow drop-shadow transition-[opacity,transform] duration-200 group-hover:scale-75 group-hover:opacity-0"
+              size={20}
+              className="text-snow transition-[opacity,transform] duration-200 group-hover:scale-75 group-hover:opacity-0"
             />
             {isCollapsed ? (
               <PanelLeftOpen
@@ -282,8 +282,7 @@ function Sidebar() {
               transition={{ duration: 0.25, delay: 0.08 }}
               className="min-w-0 whitespace-nowrap"
             >
-              <span className="brand-wordmark block text-[16px] leading-tight text-white">Sova</span>
-              <span className="block text-xs text-zinc-500">Тендерная аналитика</span>
+              <span className="brand-wordmark block text-[17px] leading-tight text-white">Sova</span>
             </motion.span>
           )}
         </button>

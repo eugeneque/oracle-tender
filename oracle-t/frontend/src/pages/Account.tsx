@@ -164,7 +164,7 @@ export function AccountPage() {
               <button
                 onClick={() => fileInput.current?.click()}
                 disabled={isUploading}
-                className="group relative rounded-full ring-1 ring-white/10 transition-shadow hover:shadow-[0_0_0_4px_rgba(99,102,241,0.25)] disabled:opacity-60"
+                className="group relative rounded-full ring-1 ring-white/10 transition-shadow hover:shadow-[0_0_0_4px_rgba(24,93,241,0.25)] disabled:opacity-60"
                 title="Загрузить новую картинку"
               >
                 <UserAvatar user={user} size="xl" />
@@ -252,7 +252,7 @@ export function AccountPage() {
               <button
                 onClick={() => void saveName()}
                 disabled={!isDirty || isSaving}
-                className="flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-2 text-sm font-medium text-snow hover:opacity-90 disabled:opacity-40"
+                className="flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-indigo-400 px-3.5 py-2 text-sm font-medium text-snow hover:opacity-90 disabled:opacity-40"
               >
                 <Save size={14} />
                 {isSaving ? "Сохраняю…" : "Сохранить"}

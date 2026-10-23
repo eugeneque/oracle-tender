@@ -102,8 +102,16 @@ def to_out(db: Session, settings: NotificationSettings) -> NotificationSettingsO
     )
 
 
+def sender_address(settings: NotificationSettings) -> str | None:
+    """Адрес отправителя; пустой — логин ящика (24.10.2026). Почтовые серверы обычно и не
+    дают слать от чужого имени, а пустое поле «Адрес отправителя» при заполненном логине
+    молча выключало весь канал («не настроен: нет адреса отправителя»)."""
+
+    return settings.from_address or settings.smtp_username or None
+
+
 def is_configured(settings: NotificationSettings) -> bool:
-    return bool(settings.smtp_host and settings.from_address and settings.recipients)
+    return bool(settings.smtp_host and sender_address(settings) and settings.recipients)
 
 
 def get_settings_out(db: Session) -> NotificationSettingsOut:
@@ -302,7 +310,7 @@ def _send_email(
 
     message = EmailMessage()
     message["Subject"] = subject
-    message["From"] = formataddr(("Sova", settings.from_address or ""))
+    message["From"] = formataddr(("Sova", sender_address(settings) or ""))
     # Адресат может быть записан как «Иванов Иван <ivanov@example.ru>» — заголовок соберёт
     # RFC-форму сам, а smtplib возьмёт из него адресную часть для RCPT TO.
     message["To"] = ", ".join(recipients)
@@ -363,11 +371,15 @@ def _dispatch(
     )
 
     if respect_enabled and not settings.is_enabled:
-        entry.error = "Уведомления выключены в настройках"
+        entry.error = "Рассылка выключена: не стоит флажок «рассылка включена» в «Приложения → Почта и уведомления»"
     # Проверяется не `is_configured`: тому нужны ещё и получатели из настроек, а у письма с
     # явными адресатами их может не быть вовсе — список задан прямо в форме.
-    elif not settings.smtp_host or not settings.from_address or not recipients:
-        entry.error = "Почтовый канал не настроен (адрес отправителя, сервер или получатели)"
+    elif not settings.smtp_host or not sender_address(settings) or not recipients:
+        entry.error = (
+            "Не указаны получатели — заполните «Получатели» или «Получатели сообщений об ошибках»"
+            if settings.smtp_host and sender_address(settings)
+            else "Почтовый канал не настроен: укажите SMTP-сервер и логин ящика"
+        )
     else:
         try:
             _send_email(settings, recipients, subject, body, html=html)
@@ -622,7 +634,10 @@ def notify_documents_updated(db: Session, *, subject: str, body: str) -> Notific
 
 def send_test_notification(db: Session, *, actor: User) -> Notification:
     """Проверочное письмо из настроек — единственный способ убедиться, что ящик и пароль
-    рабочие, не дожидаясь настоящего триггера."""
+    рабочие, не дожидаясь настоящего триггера.
+
+    Флажок «рассылка включена» проверку не блокирует (24.10.2026): канал проверяют как раз
+    перед тем, как включить рассылку, а ответ «уведомления выключены» принимали за поломку."""
 
     entry = _dispatch(
         db,
@@ -634,6 +649,7 @@ def send_test_notification(db: Session, *, actor: User) -> Notification:
             "Если письмо дошло — канал настроен верно."
         ),
         to_admins=True,
+        respect_enabled=False,
     )
     return entry
 

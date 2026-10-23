@@ -2,7 +2,12 @@ import type { ReactNode } from "react";
 import { Mail } from "lucide-react";
 
 import { api } from "../../api/client";
-import type { Bitrix24Settings, NotificationSettings, RusprofileSettings } from "../../api/types";
+import type {
+  Bitrix24Settings,
+  BitrixAiSettings,
+  NotificationSettings,
+  RusprofileSettings,
+} from "../../api/types";
 import { BitrixSection } from "../settings/BitrixSection";
 import { NotificationsSection } from "../settings/NotificationsSection";
 import { RusprofileSection } from "../settings/RusprofileSection";
@@ -18,7 +23,9 @@ import { RusprofileMark } from "./RusprofileMark";
  * остальные видят карточку без отметки.
  */
 
-export type AppStatus = "connected" | "error" | "off";
+/** `paused` (24.10.2026) — подключено, но отправка выключена переключателем: прежнее
+ * «Подключено» в этом случае и сбивало с толку («Битрикс настроен, а кнопка не работает»). */
+export type AppStatus = "connected" | "paused" | "error" | "off";
 
 export interface AppStatusInfo {
   status: AppStatus;
@@ -38,7 +45,13 @@ export interface AppDef {
 }
 
 /** Плитка логотипа: фирменный цвет сервиса и монограмма или знак, если есть его SVG. */
-function LogoTile({ className, children }: { className: string; children: ReactNode }) {
+function LogoTile({
+  className,
+  children,
+}: {
+  className: string;
+  children: ReactNode;
+}) {
   return (
     <span
       className={`flex h-full w-full items-center justify-center rounded-[inherit] font-bold tracking-tight text-white ${className}`}
@@ -53,21 +66,30 @@ export const APPS: AppDef[] = [
     key: "bitrix24",
     name: "Bitrix24",
     category: "CRM",
-    description: "Сделки по тендерам в воронку портала, разбор ИИ в карточку сделки, лиды и ключи API",
+    description:
+      "Сделки по тендерам в воронку портала, разбор ИИ в карточку сделки, лиды и ключи API",
     logo: <LogoTile className="bg-[#2FC6F6] text-[0.95em]">24</LogoTile>,
     loadStatus: async () => {
-      const s = await api.get<Bitrix24Settings>("/integrations/bitrix24");
-      if (!s.is_configured) return { status: "off" };
-      if (s.last_check_status === "error") return { status: "error", detail: s.last_check_message };
+      const [s, ai] = await Promise.all([
+        api.get<Bitrix24Settings>("/integrations/bitrix24"),
+        api.get<BitrixAiSettings>("/integrations/bitrix24/ai"),
+      ]);
+      const aiConfigured = Boolean(ai.receiver_url && ai.secret_set);
+      if (!s.is_configured && !aiConfigured) return { status: "off" };
+      if (s.last_check_status === "error")
+        return { status: "error", detail: s.last_check_message };
+      if (!ai.push_enabled && !s.push_enabled)
+        return { status: "paused", detail: "Подключено, отправка выключена" };
       return { status: "connected", detail: s.portal };
     },
-    render: ({ isAdmin }) => <BitrixSection isAdmin={isAdmin} embedded />,
+    render: ({ isAdmin }) => <BitrixSection isAdmin={isAdmin} />,
   },
   {
     key: "mail",
     name: "Почта и уведомления",
     category: "Рассылка",
-    description: "Письма о новых релевантных закупках, сроках подачи и ошибках; журнал отправок",
+    description:
+      "Письма о новых релевантных закупках, сроках подачи и ошибках; журнал отправок",
     logo: (
       <LogoTile className="bg-indigo-500">
         <Mail size="1em" strokeWidth={2.25} />
@@ -76,16 +98,21 @@ export const APPS: AppDef[] = [
     loadStatus: async () => {
       const s = await api.get<NotificationSettings>("/notifications/settings");
       if (!s.is_configured) return { status: "off" };
-      if (!s.is_enabled) return { status: "off", detail: "Рассылка выключена" };
+      if (!s.is_enabled)
+        return {
+          status: "paused",
+          detail: "Канал настроен, рассылка выключена",
+        };
       return { status: "connected", detail: s.from_address ?? s.smtp_username };
     },
-    render: ({ isAdmin }) => <NotificationsSection isAdmin={isAdmin} embedded />,
+    render: ({ isAdmin }) => <NotificationsSection isAdmin={isAdmin} />,
   },
   {
     key: "rusprofile",
     name: "Rusprofile",
     category: "Данные о компаниях",
-    description: "Реквизиты, лицензии, проекты и история участий для раздела «Моя компания»",
+    description:
+      "Реквизиты, лицензии, проекты и история участий для раздела «Моя компания»",
     logo: (
       <LogoTile className="bg-white">
         <RusprofileMark className="h-[70%] w-[70%]" />
@@ -95,7 +122,8 @@ export const APPS: AppDef[] = [
     loadStatus: async () => {
       const s = await api.get<RusprofileSettings>("/integrations/rusprofile");
       if (!s.is_configured) return { status: "off" };
-      if (s.last_sync_status === "error") return { status: "error", detail: s.last_sync_message };
+      if (s.last_sync_status === "error")
+        return { status: "error", detail: s.last_sync_message };
       return { status: "connected", detail: s.login };
     },
     render: () => <RusprofileSection embedded />,
@@ -108,6 +136,7 @@ export function visibleApps(isAdmin: boolean): AppDef[] {
 
 export const APP_STATUS_LABELS: Record<AppStatus, string> = {
   connected: "Подключено",
+  paused: "Выключено",
   error: "Ошибка",
   off: "Не настроено",
 };

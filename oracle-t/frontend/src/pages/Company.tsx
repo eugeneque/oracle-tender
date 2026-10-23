@@ -1,11 +1,10 @@
 import { useState } from "react";
-import { Building2 } from "lucide-react";
 
 import type { CompanyProfile } from "../api/types";
 import { AppShell } from "../components/AppShell";
-import { PageHeader } from "../components/PageHeader";
 import { CompanyParticipationsPanel } from "../components/settings/CompanyParticipationsSection";
 import { CompanyProfilesPanel } from "../components/settings/CompanyProfileSection";
+import { SegmentedControl } from "../components/ui/SegmentedControl";
 import { useAuth } from "../context/useAuth";
 
 /**
@@ -26,12 +25,15 @@ import { useAuth } from "../context/useAuth";
  * основной из них — её же профиль страница держит у себя и передаёт вкладке истории.
  * Остальные карточки пока только копят данные: раскладывать участие по юрлицам аналитика
  * научится позже, но заводить их имеет смысл уже сейчас.
+ *
+ * Редизайн 24.10.2026: шапка как у «Приложений» — крупный заголовок и переключатель вкладок
+ * справа; плашка «основной профиль не заполнен» переехала в карточку самой компании.
  */
 
 type Tab = "profile" | "participations";
 
 const TABS: Array<{ key: Tab; label: string }> = [
-  { key: "profile", label: "Профили компаний" },
+  { key: "profile", label: "Компании" },
   { key: "participations", label: "История участий" },
 ];
 
@@ -46,52 +48,29 @@ export function CompanyPage() {
 
   return (
     <AppShell>
-      <div className="mx-auto max-w-7xl px-8 py-8">
-        <PageHeader
-          breadcrumb={["Sova", "Моя компания"]}
-          title="Моя компания"
-          icon={
-            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
-              <Building2 size={18} />
-            </span>
-          }
-          actions={
-            profile && !profile.is_filled ? (
-              <span className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-300">
-                основной профиль не заполнен
-              </span>
-            ) : undefined
-          }
-        />
-
-
-        <div className="mb-6 inline-flex gap-1 rounded-full border border-white/[0.08] bg-black/30 p-1">
-          {TABS.map((item) => (
-            <button
-              key={item.key}
-              onClick={() => setTab(item.key)}
-              className={`rounded-full px-4 py-1.5 text-xs transition-colors ${
-                tab === item.key
-                  ? "bg-zinc-100 text-zinc-900 shadow"
-                  : "text-zinc-400 hover:text-zinc-100"
-              }`}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
+      <div className="mx-auto max-w-6xl px-6 py-8 sm:px-8">
+        <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
+          <h1 className="text-4xl font-bold tracking-tight text-white">Моя компания</h1>
+          <SegmentedControl<Tab>
+            value={tab}
+            onChange={setTab}
+            size="sm"
+            ariaLabel="Раздел компании"
+            segments={TABS.map((item) => ({ value: item.key, label: item.label }))}
+          />
+        </header>
 
         {/* Обе вкладки монтируются сразу и прячутся стилем: список компаний здесь — источник
             признака «ИНН основной заполнен» для соседней вкладки, и перемонтирование при
             каждом переключении гоняло бы запрос списка впустую. */}
-        <div className={tab === "profile" ? "" : "hidden"}>
+        <div className={`pb-16 ${tab === "profile" ? "" : "hidden"}`}>
           <CompanyProfilesPanel
             isAdmin={Boolean(isAdmin)}
             onPrimaryLoaded={setProfile}
             onRusprofileSynced={() => setParticipationsKey((k) => k + 1)}
           />
         </div>
-        <div className={tab === "participations" ? "" : "hidden"}>
+        <div className={`pb-16 ${tab === "participations" ? "" : "hidden"}`}>
           <CompanyParticipationsPanel
             key={participationsKey}
             isAdmin={Boolean(isAdmin)}

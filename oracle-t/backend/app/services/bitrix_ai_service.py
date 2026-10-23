@@ -1139,7 +1139,11 @@ def tender_state(db: Session, tender: Tender) -> dict[str, Any]:
     if reason is None and not (settings.ai_receiver_url and settings.ai_secret_encrypted):
         reason = "Bitrix24 не подключён — обратитесь к администратору."
     elif reason is None and not settings.ai_push_enabled:
-        reason = "Выгрузка в Bitrix24 выключена администратором."
+        # Название флажка и путь к нему (24.10.2026): «выключена администратором» читали как
+        # поломку — Bitrix24 на странице выглядит подключённым, а снят лишь флажок отправки.
+        reason = (
+            "Отправка в Bitrix24 выключена: не стоит флажок «Отправлять пакеты анализа»."
+        )
     return {
         "can_upload": reason is None,
         "reason": reason,

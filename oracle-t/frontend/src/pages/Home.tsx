@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 
 import { AppShell } from "../components/AppShell";
 import { BentoRecap } from "../components/home/BentoRecap";
+import { MiraSpotlight } from "../components/home/MiraSpotlight";
 import { ModelUpdates } from "../components/home/ModelUpdates";
 import { markWhatsNewSeen } from "../components/nav/WhatsNew";
 import { SegmentedControl } from "../components/ui/SegmentedControl";
@@ -23,21 +24,17 @@ const TAB_KEY = "home.tab";
 
 // Раскладки мозаики на широком экране: четыре колонки, `hero` — центральная плитка.
 // Каждый `id` из homeSlides должен встретиться здесь ровно одной прямоугольной областью.
+// С 24.10.2026 у нововведений центральной плитки нет: главное — Мира, большим блоком над
+// мозаикой (`MiraSpotlight`), поэтому её `id` в раскладке не встречается.
 const NEWS_AREAS = [
-  "ai-usage hero hero ai-errors",
-  "ai-usage hero hero analyzed-only",
-  "model-sources model-sources top-search schedule",
-  "requirements-view requirements-view registries catalog-lean",
-  "bitrix qwen integrations-tabs integrations-tabs",
-  "tz-reference tz-reference marked-lists marked-lists",
-  "selection selection profiles profiles",
-  "okpd2-tree tenders-header minutes feeds",
-  "brand-lock brand-lock job-queue feeds",
-  "no-auto-analysis meter-vpu deepseek-fast catalog-hide-eol",
+  "tender-list tender-list sidebar palette",
+  "bitrix-deal bitrix-deal apps ai-models",
+  "positions verdicts matrix matrix",
+  "pp1875 qwen activity activity",
+  "catalog-sources catalog-sources deadline search",
+  "selection selection roseltorg sberbank",
 ];
-// Плиток только для администратора сейчас нет — раскладка общая. Блок «Исправлено» под
-// мозаикой (08.10.2026) убран 14.10.2026: исправления — во «Всей истории обновлений».
-const NEWS_AREAS_ADMIN = NEWS_AREAS;
+const SPOTLIGHT_ID = "mira";
 
 const GUIDE_AREAS = [
   "tenders hero hero tender-card",
@@ -84,6 +81,8 @@ export function HomePage() {
   };
 
   const news = useMemo(() => WHATS_NEW.filter((slide) => !slide.adminOnly || isAdmin), [isAdmin]);
+  const spotlight = news.find((slide) => slide.id === SPOTLIGHT_ID);
+  const tiles = news.filter((slide) => slide.id !== SPOTLIGHT_ID);
   const [welcome, ...guide] = ONBOARDING;
 
   const firstName = user?.full_name?.split(" ")[0];
@@ -94,7 +93,11 @@ export function HomePage() {
         <div className="mb-8 flex flex-wrap items-end justify-between gap-6">
           <div>
             <div className="text-sm text-zinc-500">
-              {firstName ? `${firstName}, добро пожаловать в Sova` : "Sova"}
+              {tab === "news"
+                ? `Октябрь 2026 · ${news.length} нововведений`
+                : firstName
+                  ? `${firstName}, добро пожаловать в Sova`
+                  : "Sova"}
             </div>
             <h1 className="mt-1 text-5xl font-semibold tracking-tight text-zinc-50">
               {tab === "news" ? "Что нового?" : tab === "model" ? "Обновления модели" : "С чего начать"}
@@ -116,12 +119,10 @@ export function HomePage() {
         {tab === "model" ? (
           <ModelUpdates />
         ) : tab === "news" ? (
-          <BentoRecap
-            key="news"
-            hero={{ title: "Sova", subtitle: `Сентябрь — октябрь 2026 · ${news.length} нововведений` }}
-            slides={news}
-            areas={isAdmin ? NEWS_AREAS_ADMIN : NEWS_AREAS}
-          />
+          <>
+            {spotlight && <MiraSpotlight slide={spotlight} />}
+            <BentoRecap key="news" slides={tiles} areas={NEWS_AREAS} />
+          </>
         ) : (
           <BentoRecap
             key="guide"
