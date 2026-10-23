@@ -36,7 +36,7 @@ import time
 import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -47,6 +47,7 @@ from app.core.crypto import SecretStorageError, decrypt_secret, encrypt_secret
 from app.models.ai_profile import AiProfileScore
 from app.models.analysis import (
     ComplianceMatrixEntry,
+    ComplianceStatus,
     Requirement,
     RequirementKind,
     TenderOutcome,
@@ -61,7 +62,12 @@ from app.models.tender import Tender, TenderStage, TenderStatus, TenderType
 from app.models.tender_card import TenderCard
 from app.models.tender_document import TenderDocument
 from app.models.user import User
+from app.services import tender_positions
 from app.services.audit import log_action
+from app.services.tender_key_facts import KeyFact, is_generic_norm, key_facts, priority, split_requirement
+
+if TYPE_CHECKING:
+    from app.services.ai_conclusion_service import BrandLock
 
 SCHEMA_VERSION = 2
 SECTIONS = (
@@ -177,10 +183,15 @@ def update_settings(db: Session, changes: dict[str, Any], *, actor: User) -> dic
 # --- значения ---------------------------------------------------------------------------------
 
 
-def _clip(text: str | None, limit: int = MAX_TEXT) -> str | None:
+def _clip(text: str | None, limit: int = MAX_TEXT, *, lines: bool = False) -> str | None:
+    # `lines` — переводы строк сохраняются: причины несоответствия в выжимке портал ждёт
+    # каждую с новой строки.
     if text is None:
         return None
-    text = re.sub(r"\s+", " ", str(text)).strip()
+    if lines:
+        text = "\n".join(re.sub(r"[^\S\n]+", " ", line).strip() for line in str(text).splitlines()).strip()
+    else:
+        text = re.sub(r"\s+", " ", str(text)).strip()
     if not text:
         return None
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
@@ -227,6 +238,29 @@ _VERDICT = {
     "unknown": "Не хватает данных",
 }
 _SEVERITY = {"significant": "Существенный", "moderate": "Умеренный", "minor": "Незначительный"}
+# `status` строки — вывод ИИ, по нему портал рисует плашку («Нужно проверить»). Значения — как
+# в примерах `docs/AI_API.md` 1.4.1: `extracted`, `matches`, `partially_matches`,
+# `requires_review`; `not_matches` — по аналогии (в примерах портала не встречается).
+STATUS_EXTRACTED = "extracted"
+STATUS_REVIEW = "requires_review"
+_ROW_STATUS = {
+    "meets": "matches",
+    "partial": "partially_matches",
+    "not_meets": "not_matches",
+    "no_data": STATUS_REVIEW,
+}
+_VERDICT_STATUS = {
+    "passes": "matches",
+    "caveats": "partially_matches",
+    "fails": "not_matches",
+    "unknown": STATUS_REVIEW,
+}
+_PRODUCT_STATUS = {
+    "fits": "matches",
+    "partial": "partially_matches",
+    "not_fits": "not_matches",
+    "unchecked": STATUS_REVIEW,
+}
 # Риски заключения про договор и исполнение — в раздел «Договор», остальные — в подготовку.
 _CONTRACT_RISKS = {"contract", "price", "deadline", "logistics", "customer"}
 
@@ -389,11 +423,13 @@ def _row(
     evidence: list[dict[str, Any]] | None = None,
     confidence: float | None = None,
     updated_at: datetime | None = None,
+    status: str = STATUS_EXTRACTED,
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "key": key,
         "type": type_,
         "title": _clip(title, 250) or "—",
+        "status": status,
         "data": _compact(data),
         "evidence": evidence or [],
     }
@@ -437,10 +473,24 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
         )
     )
     cells = _mirtek_cells(db, tender)
+    lock = _brand_lock(db, tender, requirements)
 
-    # ТЗ и номенклатура: требования к товару, работам и поставке — с выводом по МИРТЕК.
-    # Требования к участнику — квалификация в «Подготовке заявки».
-    for requirement in requirements:
+    # Замечания тендерного отдела 23.10.2026: менеджер смотрит сначала ключевые сведения и
+    # причины несоответствия, а не сотню требований подряд. Сведения — блоком «Краткая
+    # выжимка по ТЗ» (одна строка `technical_summary`), первым в разделе.
+    summary_row = _summary_row(key_facts(db, tender, requirements, cells, lock))
+
+    # ТЗ и номенклатура: требования к товару и работам — с выводом по МИРТЕК, по приоритету:
+    # сначала то, по чему наш прибор не проходит, затем критичные. Общие нормы (паспорт,
+    # методика поверки, условия поставки, типовые требования к участнику по закону) не
+    # передаются, если только прибор по ним не проходит. Требования к участнику — квалификация
+    # в «Подготовке заявки».
+    requirement_rows: list[tuple[tuple[int, int, int], int, dict[str, Any]]] = []
+    for index, requirement in enumerate(requirements):
+        cell = cells.get(requirement.id)
+        entry, model = cell if cell else (None, None)
+        if is_generic_norm(requirement) and not (entry and entry.status == ComplianceStatus.NOT_MEETS.value):
+            continue
         document = documents.get(requirement.source_document_id) if requirement.source_document_id else None
         evidence = _evidence(document, requirement.text)
         criticality = _CRITICALITY.get(requirement.criticality)
@@ -459,31 +509,35 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
                     },
                     evidence=evidence,
                     updated_at=requirement.created_at,
+                    status=STATUS_REVIEW,
                 )
             )
             continue
-        cell = cells.get(requirement.id)
-        entry, model = cell if cell else (None, None)
-        sections["technical_specification"].append(
-            _row(
-                key,
-                "requirement",
-                _requirement_title(requirement),
-                {
-                    "position": _clip(requirement.position, 200),
-                    "requirement": _clip(requirement.text),
-                    "criticality": criticality,
-                    "equivalent_allowed": "Нет" if requirement.vendor_exclusive else None,
-                    "manufacturer": requirement.vendor,
-                    "proposed_model": model,
-                    "result": _COMPLIANCE.get(entry.status) if entry else None,
-                    "actual_value": _clip(entry.explanation) if entry else None,
-                },
-                evidence=evidence,
-                confidence=float(entry.confidence) if entry and entry.confidence is not None else None,
-                updated_at=requirement.created_at,
-            )
+        # Портал 1.4.1 показывает параметр и требуемое значение раздельно (`required_value`);
+        # формулировка ТЗ целиком — в цитате источника.
+        subject, required = split_requirement(requirement)
+        row = _row(
+            key,
+            "requirement",
+            _requirement_title(requirement),
+            {
+                "position": _clip(requirement.position, 200),
+                "requirement": _clip(subject),
+                "required_value": _clip(required),
+                "criticality": criticality,
+                "equivalent_allowed": "Нет" if requirement.vendor_exclusive else None,
+                "manufacturer": requirement.vendor,
+                "proposed_model": model,
+                "result": _COMPLIANCE.get(entry.status) if entry else None,
+                "actual_value": _clip(entry.explanation) if entry else None,
+            },
+            evidence=evidence,
+            confidence=float(entry.confidence) if entry and entry.confidence is not None else None,
+            updated_at=requirement.created_at,
+            status=_ROW_STATUS.get(entry.status, STATUS_REVIEW) if entry else STATUS_REVIEW,
         )
+        requirement_rows.append((priority(requirement, entry.status if entry else None), index, row))
+    requirement_rows.sort(key=lambda item: item[:2])
 
     score = db.scalar(
         select(AiProfileScore)
@@ -502,6 +556,7 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
             WinPercentage.tender_id == tender.id, WinPercentage.is_current.is_(True)
         )
     ).all()
+    competitor_rows: list[dict[str, Any]] = []
     for win in sorted(wins, key=lambda item: -float(item.percentage)):
         manufacturer = manufacturers.get(win.manufacturer_id)
         if manufacturer is None:
@@ -510,7 +565,7 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
         if manufacturer.is_mirtek:
             continue
         note = notes_by_name.get(name.lower())
-        sections["technical_specification"].append(
+        competitor_rows.append(
             _row(
                 f"mfr-{manufacturer.id}",
                 "manufacturer_match",
@@ -523,14 +578,16 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
                     "risk": _clip((note or {}).get("note")) or _clip(win.reason_summary),
                 },
                 updated_at=win.calculated_at,
+                status=_VERDICT_STATUS.get(win.verdict or "", STATUS_REVIEW),
             )
         )
     mirtek_win = next(
         (win for win in wins if manufacturers.get(win.manufacturer_id) and manufacturers[win.manufacturer_id].is_mirtek),
         None,
     )
+    mirtek_rows: list[dict[str, Any]] = []
     for product in conclusion.get("our_products") or []:
-        sections["technical_specification"].append(
+        mirtek_rows.append(
             _row(
                 f"mirtek-{product.get('product_id') or _key('m', product.get('model'))}",
                 "mirtek_recommendation",
@@ -542,10 +599,11 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
                     "action": _clip(product.get("note")),
                 },
                 updated_at=score.calculated_at if score else None,
+                status=_PRODUCT_STATUS.get(product.get("status") or "", STATUS_REVIEW),
             )
         )
     if not conclusion.get("our_products") and mirtek_win is not None:
-        sections["technical_specification"].append(
+        mirtek_rows.append(
             _row(
                 "mirtek-matrix",
                 "mirtek_recommendation",
@@ -556,8 +614,15 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
                     "risk": _clip(mirtek_win.reason_summary),
                 },
                 updated_at=mirtek_win.calculated_at,
+                status=_VERDICT_STATUS.get(mirtek_win.verdict or "", STATUS_REVIEW),
             )
         )
+
+    # Порядок вкладки: выжимка, позиции закупки, наши приборы, требования по приоритету,
+    # конкуренты.
+    sections["technical_specification"] = (
+        [summary_row] + position_rows(db, tender) + mirtek_rows + [row for *_, row in requirement_rows] + competitor_rows
+    )
 
     # Подготовка заявки: вывод ИИ об участии и шаги стратегии — как пункты чек-листа.
     if conclusion.get("fit_label"):
@@ -647,7 +712,7 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
         )
 
     # ФАС: ТЗ под товарный знак конкурента без эквивалента — признак ограничения конкуренции.
-    _brand_lock_signal(db, tender, requirements, sections)
+    _brand_lock_signal(lock, sections)
 
     # Порядок строк внутри раздела — как собраны; общий предел портала — 5000 строк.
     total = 0
@@ -670,16 +735,73 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
     return sections
 
 
-def _brand_lock_signal(
-    db: Session, tender: Tender, requirements: list[Requirement], sections: dict[str, list]
-) -> None:
+def _brand_lock(db: Session, tender: Tender, requirements: list[Requirement]) -> "BrandLock | None":
+    """Эталон ТЗ по требованиям к товару: нужен и сигналу ФАС, и ключевым сведениям."""
+
     # Импорт здесь: модуль заключения тяжёлый (клиенты моделей), а нужен ему один детектор.
     from app.services.ai_conclusion_service import detect_brand_lock
 
     product = [item for item in requirements if item.kind == RequirementKind.PRODUCT.value]
     if not product:
-        return
-    lock = detect_brand_lock(db, tender, product, list(db.scalars(select(Manufacturer))))
+        return None
+    return detect_brand_lock(db, tender, product, list(db.scalars(select(Manufacturer))))
+
+
+def position_rows(db: Session, tender: Tender) -> list[dict[str, Any]]:
+    """Позиции закупки строками `procurement_position` (портал 1.4.1). Ключ постоянный —
+    по номеру лота и позиции, без номера — по наименованию: позиции пересоздаются при каждом
+    разборе, и ключ от id завёл бы на портале дубли."""
+
+    rows = []
+    for item in tender_positions.list_positions(db, tender):
+        number = (item.position_no or "").strip()
+        lot = re.sub(r"[^\w.-]+", "-", item.lot_number or "1").strip("-") or "1"
+        row_no = re.sub(r"[^\w.-]+", "-", number).strip("-")
+        if row_no:
+            key = f"procurement-position-lot-{lot}-row-{row_no}"
+        else:
+            key = f"procurement-position-lot-{lot}-{_key('name', item.name)}"
+        quantity = _number(item.quantity) if item.quantity is not None else _clip(item.quantity_text, 100)
+        rows.append(
+            _row(
+                key,
+                "procurement_position",
+                f"Позиция №{number}" if number else (_clip(item.name, 120) or "Позиция"),
+                {
+                    "position": number or None,
+                    "name": _clip(item.name, 1000),
+                    "unit": item.unit,
+                    "quantity": quantity,
+                    "lot_number": item.lot_number or "1",
+                },
+                evidence=_evidence(item.document_name, item.quote),
+            )
+        )
+    return rows
+
+
+def _summary_row(facts: list[KeyFact]) -> dict[str, Any]:
+    """Строка «Краткая выжимка по ТЗ» (`technical_summary`, портал 1.4.1): одна на сделку,
+    ключ постоянный, имена полей `data` — как в документации портала. Статус «нужно
+    проверить», если хоть одно сведение выведено по признакам или не найдено."""
+
+    evidence = [
+        item
+        for fact in facts
+        if fact.quote
+        for item in _evidence(fact.document, f"{fact.title}: {fact.quote}")
+    ]
+    return _row(
+        "technical-summary",
+        "technical_summary",
+        "Краткая выжимка по ТЗ",
+        {fact.key: _clip(fact.text, lines=True) for fact in facts},
+        evidence=evidence,
+        status=STATUS_REVIEW if any(fact.review for fact in facts) else STATUS_EXTRACTED,
+    )
+
+
+def _brand_lock_signal(lock: "BrandLock | None", sections: dict[str, list]) -> None:
     if lock is None or lock.is_ours:
         return
     if lock.equivalent_allowed is not False and not lock.exclusive:
@@ -701,6 +823,7 @@ def _brand_lock_signal(
                 "question": "Допускается ли эквивалент указанной модели?",
             },
             evidence=_evidence(None, lock.clause),
+            status=STATUS_REVIEW,
         )
     )
 
@@ -779,7 +902,7 @@ def _post(settings: Bitrix24Settings, record: BitrixAiRequest, transport: httpx.
     secret = _secret(settings)
     if not settings.ai_receiver_url or not secret:
         raise BitrixAiNotConfiguredError(
-            "Обработчик Bitrix24 не настроен: укажите адрес receive.php и секрет в «Интеграции → Bitrix24»."
+            "Обработчик Bitrix24 не настроен: укажите адрес receive.php и секрет в «Приложения → Bitrix24»."
         )
     body = record.body.encode("utf-8")
     timestamp = str(int(time.time()))
@@ -889,7 +1012,7 @@ def send(
     settings = _settings(db)
     if not settings.ai_push_enabled:
         raise BitrixAiPushDisabledError(
-            "Отправка пакетов в Bitrix24 выключена. Включите её в «Интеграции → Bitrix24» после "
+            "Отправка пакетов в Bitrix24 выключена. Включите её в «Приложения → Bitrix24» после "
             "проверки адреса и секрета."
         )
     payload = build_payload(db, tender, full_snapshot=full_snapshot)
@@ -1032,5 +1155,9 @@ def upload_from_card(
     reason = _not_eligible_reason(tender)
     if reason:
         raise BitrixAiError(reason)
-    send(db, tender, actor=actor, transport=transport)
+    # Полный снимок (23.10.2026): пакет содержит весь анализ, и строки прошлых выгрузок,
+    # которых в нём больше нет (общие нормы, пересозданные требования), портал скрывает как
+    # неактуальные, а не держит рядом с новыми. Решения сотрудников портал хранит отдельно —
+    # их снимок не трогает (`docs/AI_API.md` 1.4.1).
+    send(db, tender, actor=actor, transport=transport, full_snapshot=True)
     return tender_state(db, tender)

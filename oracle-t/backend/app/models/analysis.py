@@ -91,6 +91,9 @@ class ComplianceSource(str, enum.Enum):
     # ТЗ составлено по модели этого производителя («CE207 … или эквивалент»): требование, по
     # которому в каталоге нет данных, описывает сам эталонный прибор (06.10.2026).
     TZ_REFERENCE = "tz_reference"
+    # Вердикт исправлен специалистом (`compliance_verdict_reviews`, 23.10.2026): перекрывает
+    # ответ модели и переживает пересчёт матрицы.
+    HUMAN_REVIEW = "human_review"
 
 
 class WinVerdict(str, enum.Enum):

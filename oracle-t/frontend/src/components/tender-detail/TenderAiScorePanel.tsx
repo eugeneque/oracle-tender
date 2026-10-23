@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import {
   AlertOctagon,
   AlertTriangle,
@@ -9,8 +10,10 @@ import {
   Loader2,
   MessageSquareReply,
   RefreshCw,
+  Repeat2,
   ThumbsDown,
   ThumbsUp,
+  X,
 } from "lucide-react";
 
 import type {
@@ -25,8 +28,11 @@ import type {
 } from "../../api/types";
 import { useAiProvider } from "../../hooks/useAiProvider";
 import { formatDateTime, percentValue, verdictLabel } from "../../utils/format";
-import { AiOrb } from "../AiOrb";
 import { AiProviderPicker } from "../AiProviderPicker";
+import { Mira, moodFromProgress } from "../mira/Mira";
+import type { MiraMood } from "../mira/Mira";
+import { MiraFrame } from "../mira/MiraFrame";
+import { parseStep } from "../ui/StepProgress";
 
 /**
  * «Заключение ИИ» (28.09.2026) — главный блок карточки закупки.
@@ -37,9 +43,33 @@ import { AiProviderPicker } from "../AiProviderPicker";
  * проходит. Поэтому сверху стоит вывод, под ним приборы, затем стратегия входа, риски и
  * метрики. Измерения профиля не пропали — они в свёрнутом «Как считались измерения».
  *
+ * Редизайн 23.10.2026: блок ведёт Мира — маскот ИИ вместо переливающейся сферы. По её
+ * лицу видна стадия (читает документы, сверяет с каталогом, думает) и итог (подходим, с
+ * оговорками, не подходим), под шапкой во время работы — шкала по шагам.
+ *
  * С заключением специалист соглашается или спорит. Причина несогласия уходит модели на
  * пересмотр, ответ модели показывается здесь же, а вся переписка — в «Комментариях».
  */
+
+const FIT_MOOD: Record<ConclusionFit, MiraMood> = {
+  fit: "happy",
+  fit_with_caveats: "doubtful",
+  not_fit: "sad",
+  unknown: "idle",
+};
+
+/** Что Мира делает сейчас — от первого лица, по стадии задачи на сервере. */
+function busyLine(mood: MiraMood, progress: string | null): string {
+  if (mood === "listening") return "Перечитываю закупку с учётом вашего замечания…";
+  if (mood === "reading") return "Читаю документацию закупки…";
+  if (mood === "comparing") {
+    // «Матрица соответствия: 6 из 17 производителей — Энергомера» — ход полезнее общей фразы.
+    return progress && !parseStep(progress) ? `${progress.replace(/…$/, "")}…` : "Сверяю требования с каталогом…";
+  }
+  // «AI-оценка: измерения «Задача» и «Компетенции»» — конкретнее общей фразы.
+  if (progress && !parseStep(progress)) return `${progress.replace(/…$/, "")}…`;
+  return "Думаю над заключением…";
+}
 
 const FIT_STYLE: Record<ConclusionFit, string> = {
   fit: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
@@ -370,6 +400,34 @@ function DimensionsDetails({ score, defaultOpen = false }: { score: AiProfileSco
 
 // --- ответ специалиста -------------------------------------------------------------------
 
+/** Возражения по похожим закупкам, учтённые в этом заключении (23.10.2026, раздел 71
+ * ARCHITECTURE.md): видно, откуда модель взяла знание, и можно открыть исходную закупку. */
+function PrecedentsNote({ items }: { items: NonNullable<AiConclusion["precedents"]> }) {
+  return (
+    <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+      <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+        <Repeat2 size={12} />
+        Учтены возражения по похожим закупкам
+      </div>
+      <ul className="mt-1.5 space-y-1.5">
+        {items.map((item) => (
+          <li key={item.feedback_id} className="text-xs leading-relaxed text-zinc-400">
+            <Link
+              to={`/tenders/${item.tender_id}`}
+              className="text-zinc-300 hover:text-indigo-300"
+              title={item.tender_title ?? undefined}
+            >
+              {item.tender_external_id ? `№ ${item.tender_external_id}` : "Закупка"}
+            </Link>
+            {item.user_name && <span className="text-zinc-600"> · {item.user_name}</span>}
+            {item.text && <span>: «{item.text}»</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function FeedbackBar({
   score,
   feedback,
@@ -420,14 +478,14 @@ function FeedbackBar({
           <button
             onClick={() => void send(onAgree)}
             disabled={isSending}
-            className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-emerald-500/40 hover:text-emerald-300 disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-full border border-white/10 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:border-emerald-500/40 hover:bg-emerald-500/10 hover:text-emerald-300 disabled:opacity-50"
           >
             <ThumbsUp size={13} />
             Согласен
           </button>
           <button
             onClick={() => setMode("disagree")}
-            className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-red-500/40 hover:text-red-300"
+            className="flex items-center gap-1.5 rounded-full border border-white/10 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-300"
           >
             <ThumbsDown size={13} />
             Не согласен
@@ -497,6 +555,8 @@ export function TenderAiScorePanel({
   isReviewing,
   progress = null,
   onRun,
+  onCancel,
+  isCancelling = false,
   error,
   feedback,
   onAgree,
@@ -508,55 +568,88 @@ export function TenderAiScorePanel({
   /** Ход задачи от сервера: «Матрица соответствия: 6 из 17 производителей — Энергомера». */
   progress?: string | null;
   onRun: () => void;
+  /** Остановить идущую задачу — пока она идёт, кнопка «Обновить» становится «Отменить». */
+  onCancel?: () => void;
+  isCancelling?: boolean;
   error: string | null;
   feedback: AiFeedback[] | null;
   onAgree: () => Promise<void>;
   onDisagree: (text: string) => Promise<void>;
 }) {
   const provider = useAiProvider();
-  const providerKey = provider?.active_provider ?? "yandex";
   const conclusion = score?.conclusion ?? null;
   const busy = isRunning || isReviewing;
+  const mood: MiraMood = isReviewing
+    ? "listening"
+    : isRunning
+      ? moodFromProgress(progress)
+      : conclusion
+        ? FIT_MOOD[conclusion.fit]
+        : error && !score
+          ? "error"
+          : "idle";
 
   return (
-    <section className="rounded-xl border border-white/[0.08] bg-white/[0.02]">
-      <div className="flex items-center gap-3 border-b border-white/[0.06] px-4 py-3">
-        <AiOrb size={28} busy={busy} variant={providerKey} />
+    <MiraFrame
+      tone={busy ? "working" : mood}
+      busy={busy}
+      progress={isRunning ? progress : null}
+      className="surface rounded-[22px]"
+    >
+      {/* Мягкое свечение под шапкой в цвет настроения Миры. */}
+      <div className="mira-glow pointer-events-none absolute inset-x-0 top-0 h-28 rounded-t-[22px]" data-mood={busy ? "working" : mood} />
+      <div className="relative flex items-center gap-3.5 px-5 pb-4 pt-5">
+        <Mira mood={mood} size={48} busy={busy} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-sm font-semibold text-zinc-100">Заключение ИИ</h3>
+            <h3 className="text-[15px] font-semibold text-white">Мира</h3>
             {provider && <AiProviderPicker status={provider} />}
           </div>
-          <p className="truncate text-[11px] text-zinc-500">
-            {isRunning
-              ? progress ?? "Модель разбирает закупку…"
+          <p className={`mt-0.5 truncate text-xs ${busy ? "text-zinc-300" : "text-zinc-500"}`}>
+            {busy
+              ? busyLine(mood, progress)
               : score
                 ? `${formatDateTime(score.calculated_at)}${score.ai_model ? ` · ${score.ai_model}` : ""}`
-                : "Проходим ли мы, каким прибором и кто ещё проходит"}
+                : "Скажу, проходим ли мы, каким прибором и кто ещё проходит"}
           </p>
         </div>
-        <button
-          onClick={onRun}
-          disabled={busy}
-          title="Пересчитать заключение с учётом всех замечаний"
-          className="flex shrink-0 items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-        >
-          {isRunning ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-          {score ? "Обновить" : "Разобрать"}
-        </button>
+        {busy && onCancel ? (
+          <button
+            onClick={onCancel}
+            disabled={isCancelling}
+            title="Убрать из очереди; идущий разбор остановится на ближайшем запросе к модели, сохранённое останется"
+            className="flex shrink-0 items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50"
+          >
+            <X size={13} />
+            {isCancelling ? "Отменяю…" : "Отменить"}
+          </button>
+        ) : (
+          <button
+            onClick={onRun}
+            disabled={busy}
+            title="Пересчитать заключение с учётом всех замечаний"
+            className="nav-card flex shrink-0 items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium text-zinc-200 hover:text-white active:scale-[0.97] disabled:opacity-50"
+          >
+            {busy ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+            {score ? "Обновить" : "Разобрать"}
+          </button>
+        )}
       </div>
+      {/* Прогресс — по контуру блока (MiraFrame); здесь — подпись шага. */}
+      {isRunning && parseStep(progress) && (
+        <p className="relative -mt-1 px-5 pb-3 text-[11px] text-zinc-500">
+          Шаг {parseStep(progress)?.step} из {parseStep(progress)?.total} · {parseStep(progress)?.label}
+        </p>
+      )}
+      <div className="relative mx-5 h-px bg-white/[0.06]" />
 
-      <div className="space-y-5 px-4 py-4">
+      <div className="relative space-y-5 px-5 py-5">
         {error && (
           <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>
         )}
 
-        {isRunning && score && (
-          <div className="flex items-center gap-2 text-xs text-indigo-300">
-            <Loader2 size={13} className="animate-spin" />
-            Идёт пересчёт на сервере — ниже прежний результат.
-          </div>
-        )}
+        {/* Ход — в шапке у Миры; здесь только пометка, что ниже не новый результат. */}
+        {isRunning && score && <p className="text-[11px] text-zinc-500">Ниже — прежнее заключение, пока Мира считает новое.</p>}
 
         {!score && (
           <p className="text-sm text-zinc-500">
@@ -572,7 +665,7 @@ export function TenderAiScorePanel({
           <>
             <div>
               <div className="mb-2 flex flex-wrap items-center gap-2">
-                <span className={`rounded-md border px-2 py-0.5 text-xs font-medium ${FIT_STYLE[conclusion.fit]}`}>
+                <span className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${FIT_STYLE[conclusion.fit]}`}>
                   {conclusion.fit_label}
                 </span>
                 {score.verdict && (
@@ -581,7 +674,7 @@ export function TenderAiScorePanel({
                   </span>
                 )}
               </div>
-              <p className="text-base font-medium leading-snug text-zinc-100">{conclusion.headline}</p>
+              <p className="text-[17px] font-semibold leading-snug tracking-[-0.01em] text-white">{conclusion.headline}</p>
               {conclusion.rationale && (
                 <p className="mt-1.5 text-sm leading-relaxed text-zinc-400">{conclusion.rationale}</p>
               )}
@@ -594,6 +687,10 @@ export function TenderAiScorePanel({
                 </div>
                 <p className="mt-0.5 text-sm leading-relaxed text-zinc-300">{conclusion.feedback_response}</p>
               </div>
+            )}
+
+            {conclusion.precedents && conclusion.precedents.length > 0 && (
+              <PrecedentsNote items={conclusion.precedents} />
             )}
 
             <FeedbackBar
@@ -645,6 +742,6 @@ export function TenderAiScorePanel({
           </>
         )}
       </div>
-    </section>
+    </MiraFrame>
   );
 }

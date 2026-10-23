@@ -154,7 +154,7 @@ def get_credentials(db: Session) -> tuple[str, str]:
     if settings is None or not settings.api_key or not settings.folder_id:
         raise YandexAiNotConfiguredError(
             "Подключение к Yandex AI Studio не настроено: заполните API-ключ и Folder ID "
-            "на странице «Интеграции» (блок «Искусственный интеллект»)."
+            "на странице «Модели ИИ»."
         )
     return settings.api_key, settings.folder_id
 

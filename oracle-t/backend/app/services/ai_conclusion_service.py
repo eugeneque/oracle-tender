@@ -24,6 +24,7 @@ YandexGPT рвёт по лимиту токенов на выходе (см. з�
 
 from __future__ import annotations
 
+import math
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -34,7 +35,7 @@ import pydantic
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.ai_feedback import AiScoreFeedback, FeedbackKind
+from app.models.ai_feedback import AiScoreFeedback, FeedbackKind, FeedbackStatus
 from app.models.analysis import (
     ComplianceMatrixEntry,
     ComplianceStatus,
@@ -177,7 +178,8 @@ _FIT_PROMPT = """Ты — руководитель тендерного отде
   на чём отсекается.
 - feedback_response — если есть раздел «ЗАМЕЧАНИЯ СПЕЦИАЛИСТОВ»: ответь на последнее
   замечание по существу — с чем согласен и что изменил в заключении, а где остаёшься при
-  своём и почему (со ссылкой на факт). Без замечаний — пустая строка.
+  своём и почему (со ссылкой на факт). Без замечаний — пустая строка. Раздел «ПРЕЦЕДЕНТЫ» —
+  возражения по другим закупкам, а не замечание к этой: на него feedback_response не пиши.
 
 Порядок рассуждения — строго такой, и headline называет ПЕРВУЮ сработавшую причину:
 1. Предмет закупки — приборы учёта электроэнергии или нет.
@@ -870,6 +872,112 @@ def feedback_block(db: Session, tender: Tender) -> str | None:
             f"{f' (на заключение: «{before}»)' if before else ''}: {feedback.text}"
         )
     return "\n".join(lines)
+
+
+# Прецеденты (23.10.2026, раздел 71 ARCHITECTURE.md): несогласия специалистов по ПОХОЖИМ
+# закупкам. Сходство — косинус по основам слов текста закупки (наименование, заказчик,
+# ОКПД2, способ, требования — `similarity_service.tender_text`). На локальной базе у 99% пар
+# закупок он ниже 0,39, а от 0,45 — почти всегда тот же заказчик и тот же предмет. Векторы
+# (`tender_embeddings`) не годятся: они есть у единиц закупок.
+PRECEDENT_MIN_SIMILARITY = 0.45
+MAX_PRECEDENTS = 3
+# Сколько последних несогласий перебирать: у каждого кандидата читается текст закупки.
+PRECEDENT_POOL = 200
+PRECEDENT_TEXT_CHARS = 600
+
+
+def find_precedents(db: Session, tender: Tender) -> list[tuple[AiScoreFeedback, Tender, str | None, float]]:
+    """Несогласия из других закупок, похожих на эту, — самые похожие первыми.
+
+    Берутся только учтённые (`applied`): модель их уже пересмотрела, и «после» видно, что
+    из замечания вышло. По каждой закупке — последнее замечание: остальные обычно уточняют
+    его же. Замечание, которое автор пометил «только для этой закупки», не берётся."""
+
+    from app.services.compliance_service import _stems
+    from app.services.similarity_service import tender_text
+
+    rows = db.execute(
+        select(AiScoreFeedback, User.full_name)
+        .outerjoin(User, User.id == AiScoreFeedback.user_id)
+        .where(
+            AiScoreFeedback.tender_id != tender.id,
+            AiScoreFeedback.kind == FeedbackKind.DISAGREE.value,
+            AiScoreFeedback.status == FeedbackStatus.APPLIED.value,
+            AiScoreFeedback.share_as_precedent.is_(True),
+        )
+        .order_by(AiScoreFeedback.created_at.desc())
+        .limit(PRECEDENT_POOL)
+    ).all()
+    if not rows:
+        return []
+    target = _stems(tender_text(db, tender))
+    if not target:
+        return []
+
+    found: list[tuple[AiScoreFeedback, Tender, str | None, float]] = []
+    seen: set[uuid.UUID] = set()
+    for feedback, author in rows:
+        if feedback.tender_id in seen:
+            continue
+        seen.add(feedback.tender_id)
+        other = db.get(Tender, feedback.tender_id)
+        if other is None:
+            continue
+        stems = _stems(tender_text(db, other))
+        if not stems:
+            continue
+        score = len(target & stems) / math.sqrt(len(target) * len(stems))
+        if score >= PRECEDENT_MIN_SIMILARITY:
+            found.append((feedback, other, author, score))
+    found.sort(key=lambda item: -item[3])
+    return found[:MAX_PRECEDENTS]
+
+
+def precedents_block(db: Session, tender: Tender) -> tuple[str | None, list[dict]]:
+    """Раздел запроса с прецедентами и их описание для заключения (карточка показывает, чьи
+    замечания учтены). Заголовок нарочно не «ЗАМЕЧАНИЯ СПЕЦИАЛИСТОВ»: на те модель обязана
+    ответить в `feedback_response`, а прецедент — не замечание к этой закупке."""
+
+    found = find_precedents(db, tender)
+    if not found:
+        return None, []
+
+    def view(value: dict | None) -> str:
+        value = value or {}
+        label = value.get("fit_label") or "—"
+        headline = (value.get("headline") or "").strip()
+        return f"{label}: {headline[:200]}" if headline else label
+
+    lines = [
+        "ПРЕЦЕДЕНТЫ — ВОЗРАЖЕНИЯ СПЕЦИАЛИСТОВ ПО ПОХОЖИМ ЗАКУПКАМ (это ДРУГИЕ закупки):"
+    ]
+    described: list[dict] = []
+    for feedback, other, author, score in found:
+        response = (feedback.ai_response or "").strip()
+        lines.append(
+            f"- Закупка «{(other.title or '—')[:150]}» ({other.customer_name or 'заказчик не указан'}). "
+            f"ИИ заключил «{view(feedback.before)}». Специалист возразил: "
+            f"«{(feedback.text or '')[:PRECEDENT_TEXT_CHARS]}». После пересмотра: «{view(feedback.after)}»"
+            + (f". Ответ ИИ: {response[:300]}" if response else "")
+        )
+        described.append(
+            {
+                "feedback_id": str(feedback.id),
+                "tender_id": str(other.id),
+                "tender_title": other.title,
+                "tender_external_id": other.external_id,
+                "user_name": author,
+                "text": feedback.text,
+                "similarity": round(score, 2),
+            }
+        )
+    lines.append(
+        "Знание о компании и её приборах из этих возражений («у нас есть допуск», «прибор это "
+        "поддерживает») учитывай и здесь. Частности тех закупок (их требования, сроки, "
+        "заказчика) к этой не переноси; если факты этой закупки противоречат прецеденту — "
+        "следуй фактам."
+    )
+    return "\n".join(lines), described
 
 
 # --- метрики (считает код) -----------------------------------------------------------------

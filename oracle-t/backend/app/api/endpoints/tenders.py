@@ -19,7 +19,9 @@ from app.models.source import FEED_PATTERN
 from app.models.user import User
 from app.schemas.job import BackgroundJobOut
 from app.schemas.tender import (
+    ComplianceReviewCreate,
     AiFeedbackCreate,
+    AiFeedbackPrecedentUpdate,
     AiFeedbackCreated,
     AiFeedbackOut,
     AiProfileScoreOut,
@@ -35,6 +37,7 @@ from app.schemas.tender import (
     ComplianceMatrixOut,
     RelevanceUpdate,
     RequirementOut,
+    TenderPositionOut,
     TenderCommentCreate,
     TenderDocumentOut,
     TenderHistoryOut,
@@ -64,6 +67,7 @@ from app.services.analysis_service import (
 )
 from app.services import (
     ai_feedback_service,
+    compliance_review_service,
     bookmark_service,
     tag_service,
     ai_profile_service,
@@ -71,6 +75,7 @@ from app.services import (
     similarity_service,
     tender_card_service,
     tender_insights,
+    tender_positions,
     tender_twins,
 )
 from app.services.company_profile_service import CompanyProfileError
@@ -573,6 +578,19 @@ def get_tender_requirements(
     return list_requirements(db, tender.id)
 
 
+@router.get("/{tender_id}/positions", response_model=list[TenderPositionOut])
+def get_tender_positions(
+    tender_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Позиции закупки — таблица спецификации заказчика, извлечённая при анализе документов.
+    Только чтение, как и требования."""
+
+    tender = _get_subject_or_404(db, tender_id)
+    return tender_positions.list_positions(db, tender)
+
+
 @router.get("/{tender_id}/compliance", response_model=ComplianceMatrixOut)
 def get_tender_compliance(
     tender_id: uuid.UUID,
@@ -582,6 +600,56 @@ def get_tender_compliance(
     """Матрица соответствия и проценты победителя (раздел 5.5 ТЗ)."""
 
     tender = _get_subject_or_404(db, tender_id)
+    return get_compliance_matrix(db, tender)
+
+
+@router.post("/{tender_id}/compliance/reviews", response_model=ComplianceMatrixOut)
+def create_compliance_review(
+    tender_id: uuid.UUID,
+    payload: ComplianceReviewCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ComplianceMatrixOut:
+    """Согласие с вердиктом ячейки или его исправление (23.10.2026, раздел 70
+    ARCHITECTURE.md). Исправление сразу меняет ячейку и процент производителя — без
+    обращения к модели, — поэтому в ответе матрица целиком."""
+
+    tender = _get_subject_or_404(db, tender_id)
+    try:
+        compliance_review_service.create(
+            db,
+            tender,
+            requirement_id=payload.requirement_id,
+            manufacturer_id=payload.manufacturer_id,
+            kind=payload.kind,
+            corrected_status=payload.corrected_status,
+            reason=payload.reason,
+            comment=payload.comment,
+            actor=user,
+        )
+    except compliance_review_service.ReviewError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    return get_compliance_matrix(db, tender)
+
+
+@router.delete("/{tender_id}/compliance/reviews/{review_id}", response_model=ComplianceMatrixOut)
+def withdraw_compliance_review(
+    tender_id: uuid.UUID,
+    review_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ComplianceMatrixOut:
+    """Отзыв своей оценки (администратор — любой): ячейке возвращается ответ модели."""
+
+    tender = _get_subject_or_404(db, tender_id)
+    try:
+        compliance_review_service.withdraw(db, tender, review_id, user)
+    except compliance_review_service.ReviewError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     return get_compliance_matrix(db, tender)
 
 
@@ -858,6 +926,32 @@ def create_ai_feedback(
     return AiFeedbackCreated(
         feedback=AiFeedbackOut(**ai_feedback_service.serialize(feedback, user.full_name, tender)),
         job=BackgroundJobOut.model_validate(job, from_attributes=True) if job else None,
+    )
+
+
+@router.patch("/{tender_id}/ai-score/feedback/{feedback_id}", response_model=AiFeedbackOut)
+def update_ai_feedback_precedent(
+    tender_id: uuid.UUID,
+    feedback_id: uuid.UUID,
+    payload: AiFeedbackPrecedentUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Включает или выключает перенос несогласия в разбор похожих закупок (23.10.2026,
+    раздел 71 ARCHITECTURE.md) — автор замечания или администратор."""
+
+    tender = _get_subject_or_404(db, tender_id)
+    try:
+        feedback = ai_feedback_service.set_precedent(
+            db, tender, feedback_id, share=payload.share_as_precedent, actor=user
+        )
+    except ai_feedback_service.FeedbackError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    author = db.get(User, feedback.user_id) if feedback.user_id else None
+    return AiFeedbackOut(
+        **ai_feedback_service.serialize(feedback, author.full_name if author else None, tender)
     )
 
 

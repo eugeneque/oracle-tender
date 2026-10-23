@@ -149,7 +149,7 @@ def get_credentials(db: Session) -> tuple[str, str]:
     if settings is None or not settings.login or not settings.password:
         raise RusprofileNotConfiguredError(
             "Учётная запись rusprofile.ru не настроена: заполните логин и пароль в разделе "
-            "«Интеграции → Rusprofile»."
+            "«Приложения → Rusprofile»."
         )
     return settings.login, settings.password
 
@@ -521,7 +521,7 @@ def sync_profile(
     if anonymous:
         summary += (
             " Без учётной записи: прочитана открытая часть карточки, прежние данные только"
-            " дополнены. Для полной синхронизации заполните «Интеграции → Rusprofile»."
+            " дополнены. Для полной синхронизации заполните «Приложения → Rusprofile»."
         )
     elif hidden:
         summary += (

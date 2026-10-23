@@ -16,31 +16,56 @@ import { plural } from "../utils/format";
 
 const fmt = (value: number) => value.toLocaleString("ru-RU");
 
+/** Шаг отбора (редизайн 23.10.2026): номер на линии-«нитке», число справа и полоса доли
+ *  от собранного — чтобы глазами было видно, какой слой режет больше всего. */
 function Step({
+  index,
   label,
   hint,
   value,
+  total,
   delta,
   action,
+  last = false,
 }: {
+  index: number;
   label: string;
   hint?: string;
   value: number;
+  total: number;
   delta?: number;
   action?: ReactNode;
+  last?: boolean;
 }) {
+  const share = total > 0 ? value / total : 0;
   return (
-    <div className="flex items-start gap-3 py-1.5">
-      <div className="min-w-0 flex-1">
-        <div className="text-zinc-200">{label}</div>
-        {hint && <div className="text-[11px] leading-snug text-zinc-500">{hint}</div>}
-        {action && <div className="mt-0.5">{action}</div>}
-      </div>
-      <div className="shrink-0 text-right tabular-nums">
-        <div className="font-medium text-zinc-100">{fmt(value)}</div>
-        {delta !== undefined && delta > 0 && (
-          <div className="text-[11px] text-rose-300/80">−{fmt(delta)}</div>
-        )}
+    <div className="relative flex gap-3">
+      {!last && <span className="absolute bottom-0 left-[11px] top-7 w-px bg-white/[0.08]" />}
+      <span
+        className={`relative mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold tabular-nums ${
+          last ? "bg-indigo-500/20 text-indigo-200 ring-1 ring-indigo-400/40" : "nav-well text-zinc-400"
+        }`}
+      >
+        {index}
+      </span>
+      <div className={`min-w-0 flex-1 ${last ? "" : "pb-3.5"}`}>
+        <div className="flex items-baseline gap-2">
+          <span className="min-w-0 flex-1 truncate font-medium text-zinc-100">{label}</span>
+          {delta !== undefined && delta > 0 && (
+            <span className="shrink-0 rounded-full bg-rose-500/10 px-1.5 py-px text-[10px] tabular-nums text-rose-300">
+              −{fmt(delta)}
+            </span>
+          )}
+          <span className="shrink-0 text-[13px] font-semibold tabular-nums text-white">{fmt(value)}</span>
+        </div>
+        {hint && <div className="mt-0.5 text-[11px] leading-snug text-zinc-500">{hint}</div>}
+        <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/[0.06]">
+          <div
+            className="step-fill h-full rounded-full"
+            style={{ width: `${Math.max(1.5, Math.round(share * 1000) / 10)}%` }}
+          />
+        </div>
+        {action && <div className="mt-1.5">{action}</div>}
       </div>
     </div>
   );
@@ -48,7 +73,11 @@ function Step({
 
 function LinkButton({ onClick, children }: { onClick: () => void; children: ReactNode }) {
   return (
-    <button type="button" onClick={onClick} className="text-[11px] text-indigo-400 hover:text-indigo-300">
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded-full bg-white/[0.05] px-2 py-0.5 text-[11px] text-zinc-300 transition-colors hover:bg-indigo-500/15 hover:text-indigo-200"
+    >
       {children}
     </button>
   );
@@ -168,18 +197,21 @@ export function SelectionCounter({
     const hasProfiles = funnel.profiles.length > 0;
     card = (
       <>
-        <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
-          Как отобраны закупки
+        <div className="mb-3">
+          <div className="text-[15px] font-semibold text-white">Как отобраны закупки</div>
+          <div className="text-xs text-zinc-500">Каждый слой сужает список — снимите лишний</div>
         </div>
-        <div className="divide-y divide-white/[0.06]">
-          <Step label="Собрано" hint={feedLabel} value={funnel.collected} />
+        <div>
+          <Step index={1} label="Собрано" hint={feedLabel} value={funnel.collected} total={funnel.collected} />
           <Step
+            index={2}
+            total={funnel.collected}
             label={profilesLabel}
             hint="Ключевые слова и коды ОКПД2 профилей отбора"
             value={funnel.after_profiles}
             delta={profilesCut}
             action={
-              <span className="flex gap-3">
+              <span className="flex flex-wrap gap-1.5">
                 {hasProfiles && onClearProfiles && (
                   <LinkButton onClick={act(onClearProfiles)}>Показать без профилей</LinkButton>
                 )}
@@ -188,6 +220,8 @@ export function SelectionCounter({
             }
           />
           <Step
+            index={3}
+            total={funnel.collected}
             label={funnel.ai_enabled ? "Проверка моделью" : "Проверка моделью выключена"}
             hint={funnel.ai_enabled ? "Скрыты закупки, которые ИИ счёл нерелевантными" : undefined}
             value={funnel.after_ai}
@@ -199,7 +233,10 @@ export function SelectionCounter({
             }
           />
           <Step
-            label="Фильтры"
+            index={4}
+            total={funnel.collected}
+            last
+            label="Фильтры — в списке"
             hint="Срок подачи, площадки, цена, регионы, метки"
             value={funnel.shown}
             delta={filtersCut}
@@ -212,34 +249,44 @@ export function SelectionCounter({
         </div>
 
         {hasProfiles && (
-          <div className="mt-2 border-t border-white/[0.06] pt-2">
-            <div className="mb-1 text-[11px] text-zinc-500">
+          <div className="mt-3 border-t border-white/[0.06] pt-3">
+            <div className="mb-2 text-[11px] text-zinc-500">
               {funnel.profiles.length > 1
                 ? `Что отобрал каждый профиль (на одной площадке — ${
                     funnel.profiles_mode === "any" ? "подошёл любой" : "подошли все"
                   }):`
                 : "Что отобрал профиль:"}
             </div>
-            <div className="max-h-40 space-y-1 overflow-y-auto">
+            <div className="max-h-44 space-y-2 overflow-y-auto pr-1">
               {funnel.profiles.map((item) => (
-                <div key={item.profile_id} className="flex items-baseline gap-2">
-                  <span
-                    className="min-w-0 flex-1 truncate text-zinc-300"
-                    title={item.sources.length === 0 ? "все площадки" : item.sources.join(", ")}
-                  >
-                    {item.name}
-                    <span className="text-zinc-600"> · {item.is_default ? "общий" : "личный"}</span>
-                  </span>
-                  <span className="shrink-0 tabular-nums text-zinc-400">
-                    {item.in_scope === 0 ? (
-                      <span className="text-amber-300">не действует здесь</span>
-                    ) : (
-                      <>
-                        <b className="font-medium text-zinc-200">{fmt(item.matched)}</b> из{" "}
-                        {fmt(item.in_scope)}
-                      </>
-                    )}
-                  </span>
+                <div key={item.profile_id}>
+                  <div className="flex items-baseline gap-2">
+                    <span
+                      className="min-w-0 flex-1 truncate text-zinc-300"
+                      title={item.sources.length === 0 ? "все площадки" : item.sources.join(", ")}
+                    >
+                      {item.name}
+                      <span className="text-zinc-600"> · {item.is_default ? "общий" : "личный"}</span>
+                    </span>
+                    <span className="shrink-0 tabular-nums text-zinc-400">
+                      {item.in_scope === 0 ? (
+                        <span className="text-amber-300">не действует здесь</span>
+                      ) : (
+                        <>
+                          <b className="font-medium text-zinc-200">{fmt(item.matched)}</b> из{" "}
+                          {fmt(item.in_scope)}
+                        </>
+                      )}
+                    </span>
+                  </div>
+                  {item.in_scope > 0 && (
+                    <div className="mt-1 h-0.5 overflow-hidden rounded-full bg-white/[0.05]">
+                      <div
+                        className="h-full rounded-full bg-zinc-400/60"
+                        style={{ width: `${Math.max(1, (item.matched / item.in_scope) * 100)}%` }}
+                      />
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -253,7 +300,7 @@ export function SelectionCounter({
           </div>
         )}
 
-        <div className="mt-2 border-t border-white/[0.06] pt-2">
+        <div className="mt-3 border-t border-white/[0.06] pt-3">
           <button
             type="button"
             onClick={act(onOpenGuide)}
@@ -292,7 +339,7 @@ export function SelectionCounter({
         <div
           role="dialog"
           aria-label="Как отобраны закупки"
-          className="absolute left-0 top-full z-40 mt-2 w-[380px] rounded-xl border border-white/10 bg-zinc-900 p-3 text-xs shadow-[0_20px_60px_rgba(0,0,0,0.35)]"
+          className="nav-popover absolute left-0 top-full z-40 mt-2 w-[400px] rounded-[22px] p-4 text-xs"
         >
           {card}
         </div>

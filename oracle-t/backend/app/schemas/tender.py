@@ -140,6 +140,49 @@ class RequirementOut(BaseModel):
         return item.name if item else None
 
 
+class TenderPositionOut(BaseModel):
+    """Позиция закупки — строка спецификации заказчика (23.10.2026)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    position_no: str | None
+    lot_number: str
+    name: str
+    unit: str | None
+    quantity: Decimal | None
+    quantity_text: str | None
+    document_name: str | None
+    quote: str | None
+
+
+class ComplianceReviewOut(BaseModel):
+    """Оценка вердикта специалистом (23.10.2026): согласие или исправление со снимком того,
+    что ответила модель."""
+
+    id: uuid.UUID
+    requirement_id: uuid.UUID | None
+    manufacturer_id: uuid.UUID
+    user_id: uuid.UUID | None
+    user_name: str | None
+    kind: str
+    corrected_status: str | None
+    reason: str | None
+    comment: str | None
+    model_status: str | None
+    model_explanation: str | None
+    created_at: datetime
+
+
+class ComplianceReviewCreate(BaseModel):
+    requirement_id: uuid.UUID
+    manufacturer_id: uuid.UUID
+    kind: str
+    corrected_status: str | None = None
+    reason: str | None = None
+    comment: str | None = None
+
+
 class ComplianceEntryOut(BaseModel):
     """Ячейка матрицы соответствия. `manufacturer_name`/`brand_name` подставляются сервисом:
     матрица всегда показывается по производителям, и отдавать голые идентификаторы значило бы
@@ -156,6 +199,8 @@ class ComplianceEntryOut(BaseModel):
     source: str
     confidence: Decimal | None
     needs_human_review: bool
+    # Действующие оценки специалистов по ячейке — согласия и исправление.
+    reviews: list[ComplianceReviewOut] = []
 
 
 class WinPercentageOut(BaseModel):
@@ -590,8 +635,14 @@ class AiFeedbackOut(BaseModel):
     before: dict | None
     after: dict | None
     ai_response: str | None
+    # Уходит ли несогласие прецедентом в похожие закупки (23.10.2026).
+    share_as_precedent: bool = True
     created_at: datetime
     processed_at: datetime | None
+
+
+class AiFeedbackPrecedentUpdate(BaseModel):
+    share_as_precedent: bool
 
 
 class AiFeedbackCreated(BaseModel):

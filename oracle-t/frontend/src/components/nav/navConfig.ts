@@ -4,9 +4,10 @@ import {
   BarChart3,
   CheckCircle2,
   Boxes,
+  BrainCircuit,
   Building2,
   KanbanSquare,
-  Plug,
+  LayoutGrid,
   ScrollText,
   Settings,
   Star,
@@ -18,7 +19,7 @@ import type { User } from "../../api/types";
 
 // Разделы приложения — один список на оба вида меню. Боковая панель показывает пункты
 // подряд, шапка — группами с выпадающими подпунктами (`group`). «Что нового?» сюда не
-// входит: это не раздел, а отдельный блок (WhatsNewCard / WhatsNewPill).
+// входит: это не раздел, а отдельный блок (WhatsNewNavItem / WhatsNewPill).
 
 export interface NavItem {
   label: string;
@@ -33,6 +34,9 @@ export interface NavItem {
   /** Вложенный пункт боковой панели: `to` родителя, под которым он раскрывается (06.10.2026 —
    * «Релевантные» и «Неактуальные» под «Тендерами», чтобы меню не разрасталось). */
   parent?: string;
+  /** Пункт нижнего блока боковой панели — рядом с «Что нового?», а не в списке разделов
+   * (23.10.2026, редизайн панели: настройки нужны редко и не должны разрывать группы). */
+  sidebarFooter?: boolean;
 }
 
 export type NavGroupKey = "tenders" | "market" | "company" | "system";
@@ -81,9 +85,11 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Каталог продукции", to: "/catalog", icon: Boxes, hint: "Модели производителей и Госреестр", group: "market" },
   { label: "Моя компания", to: "/company", icon: Building2, hint: "Профиль, участия и реквизиты", group: "company" },
   { label: "Пользователи", to: "/users", icon: UsersIcon, hint: "Учётные записи и роли", group: "company", adminOnly: true },
-  { label: "Интеграции", to: "/integrations", icon: Plug, hint: "Модели ИИ, Bitrix24, почта", group: "system" },
+  // 23.10.2026: «Интеграции» разделены — ИИ отдельным пунктом, внешние сервисы — «Приложения».
+  { label: "Модели ИИ", to: "/ai", icon: BrainCircuit, hint: "Ключи моделей и расход токенов", group: "system", adminOnly: true },
+  { label: "Приложения", to: "/apps", icon: LayoutGrid, hint: "Bitrix24, почта, Rusprofile", group: "system" },
   { label: "Логирование", to: "/logs", icon: ScrollText, hint: "Журнал операций системы", group: "system" },
-  { label: "Настройки", to: "/settings", icon: Settings, hint: "Источники, профиль отбора, вид меню", group: "system" },
+  { label: "Настройки", to: "/settings", icon: Settings, hint: "Источники, профиль отбора, вид меню", group: "system", sidebarFooter: true },
 ];
 
 export function visibleNavItems(user: User | null | undefined): NavItem[] {

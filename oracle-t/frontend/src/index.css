@@ -38,76 +38,6 @@ body {
   border-radius: 8px;
 }
 
-
-/* --- Светящаяся сфера ИИ (см. src/components/AiOrb.tsx) --------------------------------
-   Цветные пятна крутятся внутри круглой маски; кольцо сверху даёт край сферы. Размытие
-   задаётся в процентах от размера, поэтому один и тот же класс одинаково выглядит и на
-   иконке 28px, и на крупной сфере в шапке блока. */
-.ai-orb {
-  position: relative;
-  border-radius: 9999px;
-  overflow: hidden;
-  flex-shrink: 0;
-  background: radial-gradient(circle at 50% 50%, rgba(24, 24, 27, 0.9), rgba(9, 9, 11, 1));
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.08),
-    0 0 18px rgba(129, 140, 248, 0.35),
-    inset 0 0 12px rgba(255, 255, 255, 0.06);
-}
-
-.ai-orb__blob {
-  position: absolute;
-  inset: -30%;
-  border-radius: 9999px;
-  filter: blur(6px);
-  opacity: 0.85;
-  transform-origin: 50% 50%;
-}
-
-.ai-orb__blob--pink {
-  background: radial-gradient(circle at 35% 35%, rgba(244, 114, 182, 0.95), transparent 55%);
-  animation: ai-orb-spin 7s linear infinite;
-}
-
-.ai-orb__blob--blue {
-  background: radial-gradient(circle at 65% 60%, rgba(125, 211, 252, 0.9), transparent 55%);
-  /* Обратное направление и другая длительность: одинаковое вращение читалось бы как один
-     статичный градиент, который просто крутится. */
-  animation: ai-orb-spin 11s linear infinite reverse;
-}
-
-.ai-orb__blob--violet {
-  background: radial-gradient(circle at 50% 75%, rgba(167, 139, 250, 0.85), transparent 60%);
-  animation: ai-orb-spin 15s linear infinite;
-}
-
-.ai-orb__ring {
-  position: absolute;
-  inset: 0;
-  border-radius: 9999px;
-  box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
-    inset 0 0 14px rgba(186, 230, 253, 0.35);
-}
-
-.ai-orb[data-busy="true"] {
-  animation: ai-orb-pulse 1.6s ease-in-out infinite;
-}
-
-.ai-orb[data-busy="true"] .ai-orb__blob--pink { animation-duration: 2.4s; }
-.ai-orb[data-busy="true"] .ai-orb__blob--blue { animation-duration: 3.2s; }
-.ai-orb[data-busy="true"] .ai-orb__blob--violet { animation-duration: 4s; }
-
-@keyframes ai-orb-spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-
-@keyframes ai-orb-pulse {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 0 18px rgba(129,140,248,0.35); }
-  50% { box-shadow: 0 0 0 1px rgba(255,255,255,0.14), 0 0 30px rgba(244,114,182,0.55); }
-}
-
 /* Полоса-волна в шапке ИИ-блока: тот же набор цветов, но растянутый по горизонтали. */
 .ai-wave {
   position: relative;
@@ -129,7 +59,7 @@ body {
 
 /*
  * Раскраска под DeepSeek (28.09.2026) — синяя гамма его знака. Розово-фиолетово-голубая гамма
- * выше — «родная» для YandexGPT; у других моделей блок «Разбор ИИ» и сфера переходят в цвета
+ * выше — «родная» для YandexGPT; у других моделей полоса ИИ-блока переходит в цвета
  * их знака: по цвету видно, какая модель писала разбор.
  */
 .ai-wave--deepseek {
@@ -142,40 +72,6 @@ body {
       rgba(77, 107, 254, 0.22) 100%);
   background-size: 400% 100%;
   animation: ai-wave-slide 9s linear infinite;
-}
-
-.ai-orb--deepseek {
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.08),
-    0 0 18px rgba(77, 107, 254, 0.45),
-    inset 0 0 12px rgba(255, 255, 255, 0.06);
-}
-
-.ai-orb--deepseek .ai-orb__blob--pink {
-  background: radial-gradient(circle at 35% 35%, rgba(77, 107, 254, 0.95), transparent 55%);
-}
-
-.ai-orb--deepseek .ai-orb__blob--blue {
-  background: radial-gradient(circle at 65% 60%, rgba(125, 211, 252, 0.9), transparent 55%);
-}
-
-.ai-orb--deepseek .ai-orb__blob--violet {
-  background: radial-gradient(circle at 50% 75%, rgba(59, 130, 246, 0.9), transparent 60%);
-}
-
-.ai-orb--deepseek .ai-orb__ring {
-  box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
-    inset 0 0 14px rgba(191, 219, 254, 0.35);
-}
-
-.ai-orb--deepseek[data-busy="true"] {
-  animation-name: ai-orb-pulse-deepseek;
-}
-
-@keyframes ai-orb-pulse-deepseek {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 0 18px rgba(77,107,254,0.4); }
-  50% { box-shadow: 0 0 0 1px rgba(255,255,255,0.14), 0 0 30px rgba(125,211,252,0.6); }
 }
 
 /*
@@ -193,43 +89,7 @@ body {
   animation: ai-wave-slide 9s linear infinite;
 }
 
-.ai-orb--qwen {
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.08),
-    0 0 18px rgba(97, 92, 237, 0.45),
-    inset 0 0 12px rgba(255, 255, 255, 0.06);
-}
-
-.ai-orb--qwen .ai-orb__blob--pink {
-  background: radial-gradient(circle at 35% 35%, rgba(97, 92, 237, 0.95), transparent 55%);
-}
-
-.ai-orb--qwen .ai-orb__blob--blue {
-  background: radial-gradient(circle at 65% 60%, rgba(196, 181, 253, 0.9), transparent 55%);
-}
-
-.ai-orb--qwen .ai-orb__blob--violet {
-  background: radial-gradient(circle at 50% 75%, rgba(124, 58, 237, 0.9), transparent 60%);
-}
-
-.ai-orb--qwen .ai-orb__ring {
-  box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
-    inset 0 0 14px rgba(221, 214, 254, 0.35);
-}
-
-.ai-orb--qwen[data-busy="true"] {
-  animation-name: ai-orb-pulse-qwen;
-}
-
-@keyframes ai-orb-pulse-qwen {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 0 18px rgba(97,92,237,0.4); }
-  50% { box-shadow: 0 0 0 1px rgba(255,255,255,0.14), 0 0 30px rgba(196,181,253,0.6); }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .ai-orb__blob,
-  .ai-orb[data-busy="true"],
   .ai-wave {
     animation: none;
   }
@@ -263,7 +123,6 @@ body {
 .letter-body pre,
 .letter-body code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
 .letter-body hr { margin: 0.8em 0; border-color: rgb(var(--c-white) / 0.12); }
-
 
 /* --- Шкалы измерений AI-оценки (см. TenderAiScorePanel.tsx) ----------------------------
    Два состояния. Зелёное (оценка выше порога) — плотная сетка точек, заполненная слева до
@@ -525,11 +384,365 @@ html.theme-switching *::after {
 @media (prefers-reduced-motion: reduce) {
   .brand-gradient, .brand-gradient::after { animation: none; }
 }
-/* В шапке боковой панели блок заливает её целиком — без рамки и ореола, край = граница. */
-.brand-gradient--flush { box-shadow: none; }
+
+/* Боковая панель (редизайн 23.10.2026). Три фактуры: `nav-pill` — активный пункт,
+   приподнятая плашка с бликом по верхней грани; `nav-well` — утопленное поле поиска;
+   `nav-card` — карточка учётной записи. В светлой теме «белый» — это тёмный передний план,
+   поэтому блики и тени там заданы отдельно: плашка становится белой карточкой с тенью. */
+.nav-pill {
+  background: linear-gradient(180deg, rgb(var(--c-white) / 0.085), rgb(var(--c-white) / 0.04));
+  box-shadow:
+    inset 0 1px 0 rgb(var(--c-white) / 0.08),
+    inset 0 0 0 1px rgb(var(--c-white) / 0.07),
+    0 8px 20px -10px rgb(0 0 0 / 0.7);
+}
+.nav-well {
+  background: rgb(0 0 0 / 0.28);
+  box-shadow:
+    inset 0 1px 2px rgb(0 0 0 / 0.35),
+    inset 0 0 0 1px rgb(var(--c-white) / 0.05);
+}
+.nav-card {
+  background: linear-gradient(180deg, rgb(var(--c-white) / 0.05), rgb(var(--c-white) / 0.025));
+  box-shadow:
+    inset 0 1px 0 rgb(var(--c-white) / 0.06),
+    inset 0 0 0 1px rgb(var(--c-white) / 0.06);
+  transition: background-color 0.2s, box-shadow 0.2s, transform 0.2s;
+}
+.nav-card:hover,
+.nav-card--open {
+  box-shadow:
+    inset 0 1px 0 rgb(var(--c-white) / 0.08),
+    inset 0 0 0 1px rgb(var(--c-white) / 0.1),
+    0 8px 20px -10px rgb(0 0 0 / 0.7);
+}
+:root[data-theme="light"] .nav-pill,
+:root[data-theme="light"] .nav-card {
+  background: #ffffff;
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 0.06),
+    0 2px 6px -2px rgb(0 0 0 / 0.12);
+}
+:root[data-theme="light"] .nav-card:hover,
+:root[data-theme="light"] .nav-card--open {
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 0.1),
+    0 4px 12px -4px rgb(0 0 0 / 0.16);
+}
+/* Размеры боковой панели тянутся по высоте окна (23.10.2026): меню должно помещаться
+   целиком, без прокрутки, и на ноутбуке (~770 px), и на большом мониторе. `--nav-item` —
+   высота пункта и поля поиска, `--nav-sub` — вложенного пункта, `--nav-gap` — отступы
+   над подписями групп и у разделителей. На совсем низком окне остаётся прокрутка, но без
+   полосы. */
+.sidebar-fit {
+  --nav-item: clamp(30px, 4.5vh, 42px);
+  --nav-sub: clamp(26px, 3.8vh, 34px);
+  --nav-gap: clamp(4px, 1.1vh, 14px);
+}
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* Всплывающие панели в том же стиле (меню учётной записи, уведомления, быстрый переход):
+   плотная тёмная поверхность с бликом по верхней грани и глубокой тенью. Непрозрачная:
+   уведомления живут в шапке с `backdrop-blur`, а вложенный backdrop-filter браузер не
+   применяет — полупрозрачная панель просвечивала кнопками страницы. */
+.nav-popover {
+  background: linear-gradient(180deg, rgb(var(--c-zinc-900)), rgb(var(--c-zinc-950)));
+  box-shadow:
+    inset 0 1px 0 rgb(var(--c-white) / 0.07),
+    inset 0 0 0 1px rgb(var(--c-white) / 0.08),
+    0 24px 60px -12px rgb(0 0 0 / 0.75);
+}
+:root[data-theme="light"] .nav-popover {
+  background: #ffffff;
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 0.07),
+    0 24px 48px -16px rgb(0 0 0 / 0.25);
+}
+:root[data-theme="light"] .nav-well {
+  background: rgb(0 0 0 / 0.04);
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.06), inset 0 0 0 1px rgb(0 0 0 / 0.05);
+}
 
 /* Шкала без известного хода — центр уведомлений в шапке (14.10.2026). */
 @keyframes activity-indeterminate {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(300%); }
+}
+
+/*
+ * Страница входа (редизайн 23.10.2026). Блики медленно дрейфуют, а сетка точек гаснет к
+ * краям маской — без этого монохромный фон выглядел плоским. Цвета заданы явно: панель
+ * входа тёмная в обеих темах.
+ */
+.login-glow {
+  position: absolute;
+  border-radius: 9999px;
+  pointer-events: none;
+  filter: blur(90px);
+}
+
+.login-glow--a {
+  width: 620px;
+  height: 620px;
+  top: -260px;
+  right: -180px;
+  background: radial-gradient(circle, rgba(142, 142, 147, 0.75), transparent 65%);
+  animation: login-drift 22s ease-in-out infinite alternate;
+}
+
+.login-glow--b {
+  width: 560px;
+  height: 560px;
+  bottom: -280px;
+  left: -200px;
+  background: radial-gradient(circle, rgba(118, 118, 124, 0.6), transparent 65%);
+  /* Другая длительность и обратный ход: синхронный дрейф читался бы как сдвиг всей картинки. */
+  animation: login-drift 28s ease-in-out infinite alternate-reverse;
+}
+
+.login-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.13) 1px, transparent 1px);
+  background-size: 24px 24px;
+  mask-image: radial-gradient(ellipse 55% 50% at 50% 45%, #000 0%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 55% 50% at 50% 45%, #000 0%, transparent 100%);
+}
+
+/* Тонкий световой штрих над кнопкой и по краю полей — «стеклянная» кромка. */
+.login-hairline {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
+}
+
+.login-rise {
+  animation: login-rise 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes login-drift {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to { transform: translate3d(-60px, 50px, 0) scale(1.12); }
+}
+
+@keyframes login-rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-glow--a,
+  .login-glow--b,
+  .login-rise { animation: none; }
+}
+
+/* --- Мира, маскот ИИ (src/components/mira/Mira.tsx, 23.10.2026) -------------------------
+   Пятна внутри капли плывут по кругу с разной скоростью и в разные стороны — так из трёх
+   кругов получается текучий градиент. Свечение вокруг — в цвет главного пятна. */
+.mira__body {
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--mira-glow) 55%, transparent))
+    drop-shadow(0 4px 14px color-mix(in srgb, var(--mira-glow) 35%, transparent));
+  transition: filter 0.5s;
+}
+.mira { cursor: pointer; }
+.mira-tint,
+.mira-flow { transition: fill 0.8s ease; }
+.mira-flow { transform-box: view-box; transform-origin: 50px 50px; }
+.mira-flow--a { animation: mira-orbit 7s linear infinite; }
+.mira-flow--b { animation: mira-orbit 9s linear infinite reverse; }
+.mira-flow--c { animation: mira-orbit 5s linear infinite; }
+.mira[data-busy="true"] .mira-flow--a { animation-duration: 2.6s; }
+.mira[data-busy="true"] .mira-flow--b { animation-duration: 3.4s; }
+.mira[data-busy="true"] .mira-flow--c { animation-duration: 1.9s; }
+@keyframes mira-orbit {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Контур блока Миры: по рамке бежит перелив в цветах её текущего настроения, во время
+   работы — быстрее и ярче; прогресс по шагам рисует SVG поверх (`MiraFrame`). Цвета —
+   переменные `--m1…--m4`, их задаёт `data-mood`. */
+@property --mira-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.mira-frame {
+  --m1: #6d5cff; --m2: #c084fc; --m3: #38bdf8; --m4: #f0abfc;
+  position: relative;
+  isolation: isolate;
+}
+.mira-frame[data-tone="working"] { --m1: #3b4bff; --m2: #ff3b30; --m3: #ff9f0a; --m4: #fff4d6; }
+.mira-frame[data-tone="happy"] { --m1: #14b8a6; --m2: #5ef6ff; --m3: #8cf27a; --m4: #2ee6d6; }
+.mira-frame[data-tone="doubtful"] { --m1: #f59e0b; --m2: #fde047; --m3: #fb923c; --m4: #fbbf24; }
+.mira-frame[data-tone="sad"],
+.mira-frame[data-tone="error"] { --m1: #be185d; --m2: #fb7185; --m3: #a855f7; --m4: #f43f5e; }
+.mira-frame::before,
+.mira-frame::after {
+  content: "";
+  position: absolute;
+  border-radius: inherit;
+  pointer-events: none;
+  background: conic-gradient(from var(--mira-angle), var(--m1), var(--m2), var(--m3), var(--m4), var(--m1));
+  animation: mira-frame-spin 9s linear infinite;
+}
+/* Тонкая кромка: градиент виден только в полосе толщиной 1px по краю. */
+.mira-frame::before {
+  inset: 0;
+  padding: 1px;
+  opacity: 0.5;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  z-index: 2;
+}
+/* Плотная подложка: свечение лежит позади блока и не должно просвечивать сквозь
+   полупрозрачную `.surface` внутрь, на текст. */
+.mira-frame.surface {
+  background:
+    linear-gradient(180deg, rgb(var(--c-white) / 0.035), rgb(var(--c-white) / 0.015)),
+    rgb(var(--c-zinc-950));
+}
+:root[data-theme="light"] .mira-frame.surface { background: #ffffff; }
+/* Мягкое свечение за блоком. */
+.mira-frame::after {
+  inset: 8px;
+  z-index: -1;
+  filter: blur(22px);
+  opacity: 0.12;
+}
+.mira-frame[data-tone="working"]::before { opacity: 0.85; animation-duration: 3s; }
+.mira-frame[data-tone="working"]::after { opacity: 0.22; animation-duration: 3s; }
+@keyframes mira-frame-spin {
+  to { --mira-angle: 360deg; }
+}
+.mira-frame__track,
+.mira-frame__fill,
+.mira-frame__comet {
+  x: 1px;
+  y: 1px;
+  width: calc(100% - 2px);
+  height: calc(100% - 2px);
+  fill: none;
+}
+.mira-frame__fill {
+  stroke-width: 2px;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+  filter: drop-shadow(0 0 4px var(--m2));
+}
+.mira-frame__comet {
+  stroke-width: 2.5px;
+  stroke-linecap: round;
+  stroke-dasharray: 4 96;
+  animation: mira-comet 2.8s linear infinite;
+  filter: drop-shadow(0 0 6px var(--m4));
+}
+@keyframes mira-comet {
+  from { stroke-dashoffset: 100; }
+  to { stroke-dashoffset: 0; }
+}
+:root[data-theme="light"] .mira-frame::before { opacity: 0.7; }
+
+/* Шкала по шагам (src/components/ui/StepProgress.tsx): пройденный сегмент залит,
+   текущий переливается, впереди — пустой желобок. */
+.step-seg {
+  position: relative;
+  flex: 1 1 0;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: rgb(var(--c-white) / 0.07);
+}
+.step-seg[data-state="done"],
+.step-fill {
+  background: linear-gradient(90deg, rgb(var(--c-indigo-400)), rgb(var(--c-violet-400)));
+}
+.step-seg[data-state="active"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, rgb(var(--c-violet-400)), rgb(var(--c-indigo-400)), transparent);
+  background-size: 200% 100%;
+  animation: step-flow 1.6s linear infinite;
+}
+@keyframes step-flow {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+/* Поверхности контента в стиле боковой панели (23.10.2026): тонкая светлая кромка, блик
+   по верхней грани. `surface` — блок на странице, `tender-card` — строка списка закупок:
+   при наведении кромка светлеет и карточка чуть приподнимается, активная — с акцентной
+   кромкой. Тени и кромки в светлой теме заданы отдельно, как у `.nav-pill`. */
+.surface {
+  background: linear-gradient(180deg, rgb(var(--c-white) / 0.035), rgb(var(--c-white) / 0.015));
+  box-shadow:
+    inset 0 1px 0 rgb(var(--c-white) / 0.05),
+    inset 0 0 0 1px rgb(var(--c-white) / 0.07);
+}
+.tender-card {
+  background: rgb(var(--c-white) / 0.02);
+  box-shadow: inset 0 0 0 1px rgb(var(--c-white) / 0.06);
+  transition: background-color 0.2s, box-shadow 0.2s, transform 0.2s;
+}
+.tender-card:hover {
+  background: rgb(var(--c-white) / 0.04);
+  box-shadow:
+    inset 0 1px 0 rgb(var(--c-white) / 0.06),
+    inset 0 0 0 1px rgb(var(--c-white) / 0.12),
+    0 10px 24px -14px rgb(0 0 0 / 0.8);
+  transform: translateY(-1px);
+}
+.tender-card[aria-current="true"] {
+  background: linear-gradient(180deg, rgb(var(--c-indigo-400) / 0.1), rgb(var(--c-indigo-400) / 0.04));
+  box-shadow:
+    inset 0 1px 0 rgb(var(--c-white) / 0.08),
+    inset 0 0 0 1px rgb(var(--c-indigo-400) / 0.35),
+    0 10px 28px -14px rgb(var(--c-indigo-500) / 0.6);
+  transform: none;
+}
+:root[data-theme="light"] .surface,
+:root[data-theme="light"] .tender-card {
+  background: #ffffff;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.06), 0 1px 3px -1px rgb(0 0 0 / 0.08);
+}
+:root[data-theme="light"] .tender-card:hover {
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.1), 0 6px 16px -8px rgb(0 0 0 / 0.18);
+}
+:root[data-theme="light"] .tender-card[aria-current="true"] {
+  background: #ffffff;
+  box-shadow: 0 0 0 1.5px rgb(99 102 241 / 0.6), 0 6px 16px -8px rgb(99 102 241 / 0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mira-flow,
+  .mira-frame::before,
+  .mira-frame::after,
+  .mira-frame__comet,
+  .step-seg::after { animation: none !important; }
+  .tender-card:hover { transform: none; }
+}
+
+/* Свечение под шапкой блока Миры — в цвет её настроения. */
+.mira-glow {
+  background: radial-gradient(60% 100% at 12% 0%, rgb(139 92 246 / 0.16), transparent 70%),
+    radial-gradient(40% 80% at 30% 0%, rgb(236 72 153 / 0.08), transparent 70%);
+  transition: background 0.4s;
+}
+.mira-glow[data-mood="working"] {
+  background: radial-gradient(60% 100% at 12% 0%, rgb(59 75 255 / 0.18), transparent 70%),
+    radial-gradient(40% 80% at 30% 0%, rgb(255 59 48 / 0.1), transparent 70%);
+}
+.mira-glow[data-mood="happy"] {
+  background: radial-gradient(60% 100% at 12% 0%, rgb(16 185 129 / 0.16), transparent 70%);
+}
+.mira-glow[data-mood="doubtful"] {
+  background: radial-gradient(60% 100% at 12% 0%, rgb(245 158 11 / 0.14), transparent 70%);
+}
+.mira-glow[data-mood="sad"],
+.mira-glow[data-mood="error"] {
+  background: radial-gradient(60% 100% at 12% 0%, rgb(239 68 68 / 0.14), transparent 70%);
 }

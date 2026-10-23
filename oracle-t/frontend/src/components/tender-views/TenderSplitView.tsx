@@ -6,11 +6,11 @@ import { DecisionMark } from "../DecisionMark";
 import { RelevanceMark } from "../RelevanceMark";
 import { TenderDetailPanel } from "../TenderDetailPanel";
 import { TagRow } from "../tags/TagChip";
+import { ScoreBadge } from "../ui/ScoreBadge";
 import {
   daysLeft,
   formatPrice,
   percentValue,
-  scoreBadgeClass,
   stageLabel,
 } from "../../utils/format";
 
@@ -36,25 +36,26 @@ function SplitListItem({
   const price = formatPrice(tender.price, tender.currency);
   const score = percentValue(tender.ai_score);
 
-  // Строка списка упрощена 28.09.2026: без рамки, плашки этапа «Новая» (её получает каждая
+  // Строка списка упрощена 28.09.2026: без плашки этапа «Новая» (её получает каждая
   // собранная закупка — это не информация) и крупной метки «Наша тематика». Список — это
   // оглавление; всё подробное живёт в карточке справа.
+  // Редизайн 23.10.2026: строка стала карточкой с тонкой кромкой (`.tender-card`), а мелочь
+  // ушла в одну строку значков — метка «Релевантный · автор» занимала целую строку и
+  // смешивалась с заказчиком. Автор и дата — в подсказке значка.
+  const hasPrice = price && Number(tender.price) > 0;
+  const showStage =
+    tender.stage !== "ai_selected" && tender.stage !== "under_review" && tender.stage !== "rejected";
   return (
     <button
       onClick={onSelect}
       aria-current={isActive}
-      className={`relative w-full rounded-lg px-3 py-2.5 text-left transition-colors ${
-        isActive ? "bg-white/[0.07]" : "hover:bg-white/[0.03]"
-      }`}
+      className="tender-card group w-full rounded-2xl px-3 py-2.5 text-left active:scale-[0.99]"
     >
-      {isActive && (
-        <span className="absolute inset-y-2.5 left-0 w-0.5 rounded-full bg-indigo-400" />
-      )}
-      <div className="flex items-start gap-2">
-        <DecisionMark decision={tender.ai_decision} size="sm" className="mt-0.5" />
+      <div className="flex items-start gap-2.5">
+        <DecisionMark decision={tender.ai_decision} size="sm" className="mt-px" />
         <span
-          className={`line-clamp-2 min-w-0 flex-1 text-[13px] leading-snug ${
-            isActive ? "text-white" : "text-zinc-200"
+          className={`line-clamp-2 min-w-0 flex-1 text-[13px] font-medium leading-snug transition-colors ${
+            isActive ? "text-white" : "text-zinc-200 group-hover:text-white"
           }`}
         >
           {tender.is_bookmarked && (
@@ -67,58 +68,50 @@ function SplitListItem({
           )}
           {tender.title}
         </span>
-        {/* Цветная AI-оценка — раздел 5.6 ТЗ: зелёный ≥80%, жёлтый 50-80%, красный ниже.
-            «—» означает «не считалась», а не ноль. */}
-        <span
-          className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium tabular-nums ${scoreBadgeClass(score)}`}
-          title="AI-оценка по профилю"
-        >
-          {score === null ? "—" : `${score}%`}
-        </span>
+        {/* «—» означает «не считалась», а не ноль. */}
+        <ScoreBadge score={score} />
       </div>
 
-      {tender.relevance_status !== "new" && (
-        <div className="mt-1 flex pl-6">
-          <RelevanceMark tender={tender} />
-        </div>
-      )}
       {tender.customer_name && (
-        <div className="mt-1 truncate pl-6 text-[11px] text-zinc-500" title={tender.customer_name}>
+        <div className="mt-1 truncate pl-[30px] text-[11px] text-zinc-500" title={tender.customer_name}>
           {tender.customer_name}
         </div>
       )}
 
-      <div className="mt-1 flex items-center gap-2 pl-6 text-[11px] text-zinc-500">
+      <div className="mt-2 flex items-center gap-2 pl-[30px] text-[11px] text-zinc-500">
+        {hasPrice && <span className="font-medium tabular-nums text-zinc-300">{price}</span>}
         {left !== null && (
-          <span className={`flex items-center gap-1 ${left <= 5 ? "text-red-400" : ""}`}>
+          <span
+            className={`flex items-center gap-1 ${
+              left >= 0 && left <= 5 ? "text-red-400" : left < 0 ? "text-zinc-600" : ""
+            }`}
+          >
             <Clock size={11} />
             {left >= 0 ? `${left} дн.` : "срок истёк"}
           </span>
         )}
-        {price && <span className="tabular-nums text-zinc-400">{price}</span>}
-        {tender.stage !== "ai_selected" &&
-          tender.stage !== "under_review" &&
-          tender.stage !== "rejected" && (
-            <span className="text-zinc-400">· {stageLabel(tender.stage)}</span>
+        {showStage && <span className="truncate text-zinc-400">{stageLabel(tender.stage)}</span>}
+        <span className="ml-auto flex shrink-0 items-center gap-1.5">
+          <RelevanceMark tender={tender} compact />
+          {/* «Наша тематика» — значком: модель признала предмет профильным. Это не
+              рекомендация участвовать — за неё отвечает знак решения слева от названия. */}
+          {tender.ai_relevant === true && (
+            <span
+              className="text-indigo-400"
+              title={
+                tender.ai_relevance_reason
+                  ? `Наша тематика: ${tender.ai_relevance_reason}`
+                  : "Наша тематика — модель признала предмет закупки профильным"
+              }
+            >
+              <Sparkles size={12} />
+            </span>
           )}
-        {/* «Наша тематика» — иконкой: модель признала предмет профильным. Это не
-            рекомендация участвовать — за неё отвечает знак решения слева от названия. */}
-        {tender.ai_relevant === true && (
-          <span
-            className="ml-auto text-indigo-400"
-            title={
-              tender.ai_relevance_reason
-                ? `Наша тематика: ${tender.ai_relevance_reason}`
-                : "Наша тематика — модель признала предмет закупки профильным"
-            }
-          >
-            <Sparkles size={12} />
-          </span>
-        )}
+        </span>
       </div>
 
       {tender.tags.length > 0 && (
-        <div className="mt-1.5 pl-6">
+        <div className="mt-1.5 pl-[30px]">
           <TagRow tags={tender.tags} max={2} />
         </div>
       )}
@@ -148,7 +141,8 @@ export function TenderSplitView({
     <div className="flex min-h-0 flex-1 gap-3">
       <div className="flex w-[300px] shrink-0 flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-          <div className="flex flex-col gap-0.5">
+          {/* Поля вокруг — чтобы тень приподнятой карточки не обрезалась краем прокрутки. */}
+          <div className="flex flex-col gap-1.5 p-1">
             {tenders.map((tender) => (
               <SplitListItem
                 key={tender.id}
@@ -162,7 +156,7 @@ export function TenderSplitView({
         {footer}
       </div>
 
-      <div className="min-w-0 flex-1 overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.02]">
+      <div className="surface min-w-0 flex-1 overflow-hidden rounded-[22px]">
         {selected ? (
           <TenderDetailPanel key={selected.id} tender={selected} onChanged={onChanged} />
         ) : (

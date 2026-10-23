@@ -243,6 +243,13 @@ confidence 0.8-0.9; в explanation назови код («G — GSM в обоз�
 17. Если в запросе указана ПОЗИЦИЯ СПЕЦИФИКАЦИИ, все требования относятся к этому изделию \
 закупки, а карточка подобрана под него. Другие позиции той же закупки к этому запросу не \
 относятся.
+18. Раздел ИСПРАВЛЕНИЯ СПЕЦИАЛИСТОВ — вердикты по похожим требованиям других закупок, \
+которые тендерный специалист признал ошибочными, с верным статусом и объяснением. Это \
+знание человека, читавшего документацию и паспорта: если требование то же по смыслу, \
+трактуй его так же и не повторяй исправленную ошибку. Исправление с причиной «неверный \
+факт о приборе» относится к названному в нём производителю. Если карточка прямо \
+противоречит исправлению (например, факт обновился), следуй карточке и назови это в \
+explanation.
 """
 
 
@@ -285,6 +292,10 @@ class ComplianceOutcome:
     # (15.10.2026: пересчёт 18 закупок прошёл «успешно» при 112 пакетах без ответа).
     unanswered: int = 0
     manufacturers_unanswered: int = 0
+    # Исправления специалистов (23.10.2026, раздел 70 ARCHITECTURE.md): сколько вердиктов
+    # модели перекрыто исправлением и сколько прецедентов из других закупок ушло в запросы.
+    human_overrides: int = 0
+    precedents_used: int = 0
     messages: list[str] = field(default_factory=list)
 
     def unanswered_text(self) -> str | None:
@@ -323,6 +334,7 @@ _SOURCE_BY_TAG = {
     "astra": ComplianceSource.ASTRA_CATALOG.value,
     "rule": ComplianceSource.EXPERT_RULE.value,
     "tz": ComplianceSource.TZ_REFERENCE.value,
+    "human": ComplianceSource.HUMAN_REVIEW.value,
 }
 _STATUS_VALUES = {s.value for s in ComplianceStatus}
 
@@ -833,6 +845,8 @@ def evaluate_tender(
             outcome.unanswered += unanswered
             outcome.manufacturers_unanswered += 1
         apply_reference_rules(manufacturer, requirements, verdicts, reference, manufacturers)
+        # Исправление специалиста — последнее слово, после всех правил кода.
+        outcome.human_overrides += apply_human_reviews(db, tender, manufacturer, requirements, verdicts)
         _save_entries(db, tender, manufacturer, requirements, verdicts, outcome)
         _calculate_percentage(
             db,
@@ -986,6 +1000,7 @@ def _evaluate_in_parallel(
             manufacturer = by_id[futures[future]]
             outcome.manual_fallback_used += local_outcome.manual_fallback_used
             outcome.prejudged += local_outcome.prejudged
+            outcome.precedents_used += local_outcome.precedents_used
             outcome.messages.extend(local_outcome.messages)
             finish(manufacturer, verdicts)
             done += 1
@@ -1186,7 +1201,7 @@ def _evaluate_group(
     if asked:
         answered = _ask_in_batches(
             db, manufacturer, [requirements[index - 1] for index in asked], context, outcome,
-            position=position,
+            position=position, tender_id=tender.id,
         )
         for number, index in enumerate(asked, start=1):
             if number in answered:
@@ -1203,7 +1218,8 @@ def _evaluate_group(
         if manual_context.strip() and manual_context != context:
             subset = [requirements[index - 1] for index in unresolved]
             fallback = _ask_in_batches(
-                db, manufacturer, subset, manual_context, outcome, position=position
+                db, manufacturer, subset, manual_context, outcome, position=position,
+                tender_id=tender.id,
             )
             for number, index in enumerate(unresolved, start=1):
                 verdict = fallback.get(number)
@@ -2087,6 +2103,7 @@ def _ask_in_batches(
     outcome: ComplianceOutcome,
     *,
     position: str | None = None,
+    tender_id: uuid.UUID | None = None,
 ) -> dict[int, RequirementVerdict]:
     """Спрашивает модель пачками по `REQUIREMENTS_PER_REQUEST` и склеивает вердикты,
     пересчитывая локальные номера пачки в сквозные.
@@ -2100,7 +2117,9 @@ def _ask_in_batches(
         batch = requirements[offset : offset + REQUIREMENTS_PER_REQUEST]
         # Каждой пачке — своя выборка из карточки (14.10.2026, `focus_context`).
         batch_context = focus_context(context, batch, _focus_limit(db, batch))
-        batch_verdicts = _ask_model(db, manufacturer, batch, batch_context, outcome, position=position)
+        batch_verdicts = _ask_model(
+            db, manufacturer, batch, batch_context, outcome, position=position, tender_id=tender_id
+        )
         for local_number, verdict in batch_verdicts.items():
             global_number = offset + local_number
             verdict.number = global_number
@@ -2116,7 +2135,10 @@ def _ask_model(
     outcome: ComplianceOutcome,
     *,
     position: str | None = None,
+    tender_id: uuid.UUID | None = None,
 ) -> dict[int, RequirementVerdict]:
+    from app.services import compliance_review_service
+
     # Карточка — первой, требования — после (06.10.2026): одинаковое начало запроса провайдер
     # берёт из кэша (у DeepSeek — автоматически, в разы дешевле). С 14.10.2026 карточка у
     # пачек своя (`focus_context`), и из кэша идёт системный промпт, а карточка — только
@@ -2130,6 +2152,14 @@ def _ask_model(
         )
         + f"ТРЕБОВАНИЯ ЗАКУПКИ:\n{_requirements_block(requirements)}"
     )
+    # Прецеденты — после требований: начало запроса (системный промпт, карточка) остаётся
+    # общим и берётся из кэша провайдера.
+    precedents, used = compliance_review_service.precedents_block(
+        db, manufacturer, requirements, tender_id=tender_id
+    )
+    if precedents:
+        user_text += f"\n\n{precedents}"
+        outcome.precedents_used += used
     try:
         result = run_structured(
             db,
@@ -2181,16 +2211,19 @@ def _save_entries(
     for index, requirement in enumerate(requirements, start=1):
         verdict = verdicts[index]
         confidence = max(0.0, min(1.0, float(verdict.confidence)))
+        reviewed = verdict.source == "human"
         needs_review = (
-            confidence < LOW_CONFIDENCE_THRESHOLD
+            not reviewed
+            and confidence < LOW_CONFIDENCE_THRESHOLD
             and verdict.status != ComplianceStatus.NO_DATA.value
         )
         explanation = verdict.explanation or ""
         # ПП 719 (параметр 35): «подтягивать с комментарием, чтобы пользователь проверил —
         # много нюансов» (баллы локализации, год соответствия, исполнения). Любой вердикт
-        # по нему уходит на проверку человеком, со ссылкой на реестр.
+        # по нему уходит на проверку человеком, со ссылкой на реестр. Исправленный
+        # специалистом — уже проверен.
         item = PARAMETERS_BY_NO.get(_parameter_of(requirement) or 0)
-        if item is not None and item.rule == RULE_MANUAL_CHECK:
+        if not reviewed and item is not None and item.rule == RULE_MANUAL_CHECK:
             needs_review = True
             explanation = (
                 f"{explanation} Проверьте запись вручную в реестре ГИСП ({GISP_PP719_URL}): "
@@ -2215,6 +2248,83 @@ def _save_entries(
         entry.confidence = Decimal(f"{confidence:.3f}")
         entry.needs_human_review = needs_review
         outcome.entries_saved += 1
+
+
+def apply_human_reviews(
+    db: Session,
+    tender: Tender,
+    manufacturer: Manufacturer,
+    requirements: list[Requirement],
+    verdicts: dict[int, RequirementVerdict],
+) -> int:
+    """Исправления специалистов перекрывают вердикты модели (23.10.2026, раздел 70
+    ARCHITECTURE.md): пересчёт матрицы не должен возвращать ошибку, которую человек уже
+    исправил. Модель при этом спрашивается как обычно — её ответ виден в снимке исправления."""
+
+    from app.services import compliance_review_service
+
+    overrides = compliance_review_service.overrides(db, tender, manufacturer, requirements)
+    for index, review in overrides.items():
+        verdicts[index] = RequirementVerdict(
+            number=index,
+            status=review.corrected_status,
+            source="human",
+            explanation=review.comment or "",
+            confidence=1.0,
+        )
+    return len(overrides)
+
+
+def recalculate_manufacturer(db: Session, tender: Tender, manufacturer: Manufacturer) -> None:
+    """Процент и итог производителя по сохранённым ячейкам — без обращения к модели: после
+    исправления или отзыва одного вердикта пересчитывать всю матрицу незачем."""
+
+    requirements = [
+        item
+        for item in db.scalars(
+            select(Requirement)
+            .where(Requirement.tender_id == tender.id)
+            .order_by(Requirement.created_at)
+        )
+        if item.kind == RequirementKind.PRODUCT.value
+    ]
+    entries = {
+        entry.requirement_id: entry
+        for entry in db.scalars(
+            select(ComplianceMatrixEntry).where(
+                ComplianceMatrixEntry.tender_id == tender.id,
+                ComplianceMatrixEntry.manufacturer_id == manufacturer.id,
+            )
+        )
+    }
+    verdicts: dict[int, RequirementVerdict] = {}
+    for index, requirement in enumerate(requirements, start=1):
+        entry = entries.get(requirement.id)
+        verdicts[index] = (
+            _no_data_verdict(index)
+            if entry is None
+            else RequirementVerdict(
+                number=index,
+                status=entry.status,
+                source="",
+                explanation=entry.explanation or "",
+                confidence=float(entry.confidence or 0),
+            )
+        )
+    manufacturers = list(db.scalars(select(Manufacturer)))
+    reference = find_reference(
+        requirements, manufacturers, db=db, named_text=tender_named_text(db, tender)
+    )
+    _calculate_percentage(
+        db,
+        tender,
+        manufacturer,
+        requirements,
+        verdicts,
+        reference=reference
+        if reference is not None and reference.manufacturer.id == manufacturer.id
+        else None,
+    )
 
 
 def _labelled(requirement: Requirement, limit: int) -> str:
@@ -2415,7 +2525,9 @@ def _log(
         f"{outcome.entries_saved}; требований: {outcome.requirements_total}; "
         f"через руководство: {outcome.manual_fallback_used}; "
         f"решено кодом без модели: {outcome.prejudged}; "
-        f"требуют проверки человеком: {outcome.needs_review}"
+        f"требуют проверки человеком: {outcome.needs_review}; "
+        f"исправлено специалистами: {outcome.human_overrides}; "
+        f"прецедентов в запросах: {outcome.precedents_used}"
     )
     if outcome.unanswered_text():
         details = f"Внимание, {outcome.unanswered_text()}; {details}"

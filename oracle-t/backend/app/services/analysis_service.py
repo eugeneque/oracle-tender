@@ -32,6 +32,7 @@ from app.schemas.tender import (
     RequirementOut,
     WinPercentageOut,
 )
+from app.services import compliance_review_service
 
 
 def list_requirements(db: Session, tender_id: uuid.UUID) -> list[Requirement]:
@@ -84,6 +85,7 @@ def get_compliance_matrix(db: Session, tender: Tender) -> ComplianceMatrixOut:
         for manufacturer in db.scalars(select(Manufacturer).where(Manufacturer.is_mirtek.is_(True)))
     }
 
+    reviews = compliance_review_service.current_for_tender(db, tender.id)
     entries = [
         ComplianceEntryOut(
             id=entry.id,
@@ -95,6 +97,7 @@ def get_compliance_matrix(db: Session, tender: Tender) -> ComplianceMatrixOut:
             source=entry.source,
             confidence=entry.confidence,
             needs_human_review=entry.needs_human_review,
+            reviews=reviews.get((entry.requirement_id, entry.manufacturer_id), []),
         )
         for entry in db.scalars(
             select(ComplianceMatrixEntry).where(ComplianceMatrixEntry.tender_id == tender.id)

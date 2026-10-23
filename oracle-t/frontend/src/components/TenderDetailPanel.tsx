@@ -29,6 +29,7 @@ import type {
   ComplianceMatrix,
   NicheStatistics,
   Requirement,
+  TenderPosition,
   TenderCard,
   TenderExtraSections,
   Tender,
@@ -55,6 +56,8 @@ import { TenderRequirementsTab } from "./tender-detail/TenderRequirementsTab";
 import { TagChip } from "./tags/TagChip";
 import { BitrixUploadButton } from "./tender-detail/BitrixUploadButton";
 import { TagPicker } from "./tags/TagPicker";
+import { Mira, moodFromProgress } from "./mira/Mira";
+import { StepProgress, parseStep } from "./ui/StepProgress";
 import { queueText } from "../utils/jobQueue";
 import {
   percentValue,
@@ -95,6 +98,9 @@ const JOB_KIND_KEYS: Partial<Record<BackgroundJob["kind"], JobKindKey>> = {
   ai_profile_score: "ai-score",
   ai_feedback: "ai-feedback",
 };
+
+/** Задачи, ход которых показывает блок Миры на «Основном» (там же кнопка «Отменить»). */
+const MIRA_ACTIONS = new Set<JobKindKey>(["review", "ai-score", "ai-feedback"]);
 
 /** Ход задачи для строки в карточке. Ожидающая задача хода не пишет — вместо безымянного
  *  «модель разбирает закупку» полчаса (29.09.2026) говорим, сколько задач перед ней. */
@@ -201,6 +207,7 @@ export function TenderDetailPanel({
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const [requirements, setRequirements] = useState<Requirement[] | null>(null);
+  const [positions, setPositions] = useState<TenderPosition[]>([]);
   // Последний запуск анализа документов. Нужен пустой вкладке «Требования»: без него она
   // советует нажать «Анализ документов» и тогда, когда он только что отработал и честно не
   // нашёл ни одного требования. `undefined` — ещё не спрашивали, `null` — не запускался.
@@ -345,7 +352,14 @@ export function TenderDetailPanel({
   }, [loadCard]);
 
   const loadRequirements = useCallback(async () => {
-    setRequirements(await api.get<Requirement[]>(`/tenders/${tender.id}/requirements`));
+    // Позиции закупки извлекаются тем же анализом — грузятся вместе с требованиями; без них
+    // вкладка просто не покажет таблицу позиций.
+    const [loaded, loadedPositions] = await Promise.all([
+      api.get<Requirement[]>(`/tenders/${tender.id}/requirements`),
+      api.get<TenderPosition[]>(`/tenders/${tender.id}/positions`).catch(() => [] as TenderPosition[]),
+    ]);
+    setRequirements(loaded);
+    setPositions(loadedPositions);
   }, [tender.id]);
 
   const loadAnalysisJob = useCallback(async () => {
@@ -1130,34 +1144,66 @@ export function TenderDetailPanel({
             {error}
           </div>
         )}
-        {runningAction !== null && (
-          <div className="mb-4 flex items-center gap-2 rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-3 py-2 text-xs text-indigo-300">
-            <Loader2 size={13} className="animate-spin" />
-            {runningAction === "review"
-              ? "Идёт полный разбор закупки"
-              : runningAction === "analyze"
-                ? "Идёт анализ документов на сервере"
-                : runningAction === "evaluate"
-                  ? "Идёт расчёт соответствия на сервере"
-                  : runningAction === "ai-feedback"
-                    ? "ИИ пересматривает заключение по замечанию специалиста"
-                    : "Идёт разбор ИИ по профилю компании"}
-            {/* Ход задачи от сервера (28.09.2026): «Матрица соответствия: 6 из 17
-                производителей» вместо безымянного индикатора на десять минут. */}
-            {jobProgress ? ` — ${jobProgress.replace(/…$/, "")}.` : "."}
-            <span className="text-indigo-300/60">Можно перейти к другой закупке — работа продолжится.</span>
-            {jobId && (
-              <button
-                type="button"
-                onClick={() => void cancelRunningJob()}
-                disabled={isCancellingJob}
-                title="Убрать из очереди; идущий разбор остановится на ближайшем запросе к модели, сохранённое останется"
-                className="ml-auto flex shrink-0 items-center gap-1 rounded-md border border-indigo-400/20 px-2 py-0.5 text-indigo-200 hover:bg-indigo-500/10 disabled:opacity-50"
-              >
-                <X size={12} />
-                {isCancellingJob ? "Отменяю…" : "Отменить"}
-              </button>
-            )}
+        {/* Ход задачи (редизайн 23.10.2026): карточка с Мирой и шкалой по шагам вместо
+            строки текста — «Шаг 1 из 3» теперь видно глазами, а не читается. */}
+        {/* Заключение, полный разбор и пересмотр на «Основном» показывает сама Мира — второй
+            баннер над ней дублировал ту же задачу (замечание 23.10.2026). */}
+        {runningAction !== null && !(activeTab === "overview" && MIRA_ACTIONS.has(runningAction)) && (
+          <div className="surface relative mb-4 overflow-hidden rounded-2xl px-4 py-3">
+            <div className="flex items-center gap-3">
+              <Mira
+                size={34}
+                busy
+                mood={
+                  runningAction === "ai-feedback"
+                    ? "listening"
+                    : runningAction === "analyze"
+                      ? "reading"
+                      : runningAction === "evaluate"
+                        ? "comparing"
+                        : moodFromProgress(jobProgress)
+                }
+              />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-baseline gap-2">
+                  <span className="truncate text-[13px] font-medium text-zinc-100">
+                    {runningAction === "review"
+                      ? "Полный разбор закупки"
+                      : runningAction === "analyze"
+                        ? "Анализ документов"
+                        : runningAction === "evaluate"
+                          ? "Расчёт соответствия"
+                          : runningAction === "ai-feedback"
+                            ? "Пересмотр по замечанию"
+                            : "Заключение ИИ"}
+                  </span>
+                  {parseStep(jobProgress) && (
+                    <span className="shrink-0 text-xs tabular-nums text-zinc-500">
+                      {parseStep(jobProgress)?.step} / {parseStep(jobProgress)?.total}
+                    </span>
+                  )}
+                </div>
+                {/* Ход задачи от сервера (28.09.2026): «Матрица соответствия: 6 из 17
+                    производителей» вместо безымянного индикатора на десять минут. */}
+                <div className="truncate text-xs text-indigo-300/90">
+                  {parseStep(jobProgress)?.label ?? jobProgress?.replace(/…$/, "") ?? "Ставлю в очередь…"}
+                </div>
+              </div>
+              {jobId && (
+                <button
+                  type="button"
+                  onClick={() => void cancelRunningJob()}
+                  disabled={isCancellingJob}
+                  title="Убрать из очереди; идущий разбор остановится на ближайшем запросе к модели, сохранённое останется"
+                  className="flex shrink-0 items-center gap-1 rounded-full px-2.5 py-1 text-xs text-zinc-400 transition-colors hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50"
+                >
+                  <X size={12} />
+                  {isCancellingJob ? "Отменяю…" : "Отменить"}
+                </button>
+              )}
+            </div>
+            <StepProgress text={jobProgress} className="mt-3" />
+            <p className="mt-2 text-[11px] text-zinc-500">Можно перейти к другой закупке — работа продолжится.</p>
           </div>
         )}
 
@@ -1184,6 +1230,8 @@ export function TenderDetailPanel({
               onRun={() =>
                 void startJob(score || tender.requirements_count > 0 ? "ai-score" : "review")
               }
+              onCancel={jobId ? () => void cancelRunningJob() : undefined}
+              isCancelling={isCancellingJob}
               error={scoreError}
               feedback={feedback}
               onAgree={agreeWithScore}
@@ -1297,6 +1345,7 @@ export function TenderDetailPanel({
           ) : (
             <TenderRequirementsTab
               requirements={requirements}
+              positions={positions}
               analysis={
                 analysisJob === undefined
                   ? null
@@ -1329,7 +1378,9 @@ export function TenderDetailPanel({
               {/* Допуски (ПП 719, ЗАК Россетей, реестр ПО) — по той же причине над матрицей. */}
               <TenderRegistryBlock tenderId={tender.id} />
               <TenderComplianceTab
+                tenderId={tender.id}
                 matrix={matrix}
+                onMatrixChange={setMatrix}
                 requirementsCount={
                   requirements === null
                     ? null
