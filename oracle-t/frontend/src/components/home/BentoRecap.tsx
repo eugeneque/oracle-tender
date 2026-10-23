@@ -2,43 +2,35 @@ import { motion } from "motion/react";
 import type { Variants } from "motion/react";
 import { useCallback, useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { ArrowRight, Check, Clock3, Plus, Search, Star, X, Zap } from "lucide-react";
+import { ArrowRight, Bell, Check, Clock3, Plus, Search, Send, ShieldCheck, Star, ThumbsDown, ThumbsUp, X } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { AiProviderIcon } from "../AiProviderIcon";
 import { EASE_OUT, staggerContainer } from "../../utils/motion";
-import type { Slide, SlideTone } from "../../content/homeSlides";
+import type { Slide } from "../../content/homeSlides";
 
 // Итоговый экран в духе Apple-кейноута: мозаика плиток разного размера вокруг яркой
 // центральной плитки. На плитке — короткое имя и мини-иллюстрация нововведения; полный
 // текст открывается по нажатию. Раскладка задаётся `grid-template-areas` (класс `.bento` в
-// index.css): имя области = `id` плитки, центральная — `hero`.
-
-const TONE_TEXT: Record<SlideTone, string> = {
-  indigo: "text-indigo-300",
-  sky: "text-sky-300",
-  emerald: "text-emerald-300",
-  amber: "text-amber-300",
-  violet: "text-violet-300",
-  rose: "text-rose-300",
-};
-
-const TONE_CHIP: Record<SlideTone, string> = {
-  indigo: "bg-indigo-500/15 text-indigo-300",
-  sky: "bg-sky-500/15 text-sky-300",
-  emerald: "bg-emerald-500/15 text-emerald-300",
-  amber: "bg-amber-500/15 text-amber-300",
-  violet: "bg-violet-500/15 text-violet-300",
-  rose: "bg-rose-500/15 text-rose-300",
-};
+// index.css): имя области = `id` плитки, центральная — `hero`. С 24.10.2026 центральная плитка
+// необязательна: у нововведений её место занял блок Миры над мозаикой (MiraSpotlight.tsx).
 
 // ——— Мини-иллюстрации плиток ————————————————————————————————————————————————
+// Редизайн 24.10.2026 под новый облик: монохром на графите и один акцент — фирменный синий
+// (`indigo`). Цветные точки — только там, где цвет и есть смысл (работает / ошибка).
 
 function Pill({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
     <span className={`inline-flex items-center gap-1.5 rounded-full bg-white/[0.06] px-2.5 py-1 text-[11px] text-zinc-300 ${className}`}>
       {children}
     </span>
+  );
+}
+
+/** Строка-плашка мини-иллюстрации: подпись слева, значение справа. */
+function Row({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return (
+    <div className={`flex items-center gap-2 rounded-lg bg-white/[0.05] px-2.5 py-1.5 text-[10.5px] ${className}`}>{children}</div>
   );
 }
 
@@ -50,7 +42,7 @@ function StepsVisual() {
           {n > 1 && <span className="h-px w-3 bg-indigo-400/40 sm:w-5" />}
           <span
             className={`flex h-8 w-8 items-center justify-center rounded-full text-sm font-semibold ${
-              n === 2 ? "bg-indigo-500 text-snow shadow-[0_0_24px_rgba(99,102,241,0.6)]" : "border border-white/15 text-zinc-400"
+              n === 2 ? "bg-indigo-500 text-snow shadow-[0_0_24px_rgba(24,93,241,0.6)]" : "border border-white/15 text-zinc-400"
             }`}
           >
             {n}
@@ -61,438 +53,340 @@ function StepsVisual() {
   );
 }
 
+/** Шкала «шаг N из M» — как у хода разбора в карточке закупки. */
+function StepBar({ step, total }: { step: number; total: number }) {
+  return (
+    <span className="flex gap-1">
+      {Array.from({ length: total }, (_, n) => (
+        <span key={n} className={`h-1 flex-1 rounded-full ${n < step ? "bg-indigo-400" : "bg-white/10"}`} />
+      ))}
+    </span>
+  );
+}
+
 const VISUALS: Record<string, () => ReactNode> = {
-  "ai-usage": () => (
-    <div className="w-full max-w-[200px] space-y-3">
-      <div className="flex h-16 items-end gap-1">
-        {[35, 55, 30, 80, 45, 100, 60].map((h, n) => (
-          <span
-            key={n}
-            className={`flex-1 rounded-t-[4px] ${n === 5 ? "bg-violet-400" : "bg-violet-500/30"}`}
-            style={{ height: `${h}%` }}
-          />
-        ))}
-      </div>
-      <div className="space-y-1.5 text-[10.5px]">
-        {[
-          ["Разбор документации", "62%"],
-          ["Матрица соответствия", "27%"],
-          ["Каталог", "11%"],
-        ].map(([label, share]) => (
-          <div key={label} className="flex items-center justify-between rounded-lg bg-white/[0.05] px-2.5 py-1.5">
-            <span className="truncate text-zinc-300">{label}</span>
-            <span className="tabular-nums text-violet-300">{share}</span>
-          </div>
-        ))}
-      </div>
-      <div className="text-[10px] text-zinc-500">прогноз на месяц · 4,1 млн токенов</div>
-    </div>
-  ),
-  "ai-errors": () => (
-    <div className="w-full max-w-[210px] space-y-1.5 text-left text-[10.5px]">
+  "tender-list": () => (
+    <div className="w-full max-w-[400px] space-y-2 text-left">
       {[
-        ["Таймаут", "2 из 3", "bg-amber-400"],
-        ["Не по схеме", "повтор", "bg-amber-400"],
-        ["Лимит", "отказ", "bg-rose-400"],
-      ].map(([label, note, dot]) => (
-        <div key={label} className="flex items-center gap-2 rounded-lg bg-white/[0.05] px-2.5 py-1.5">
-          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} />
-          <span className="min-w-0 flex-1 truncate text-zinc-200">{label}</span>
-          <span className="truncate text-[9.5px] text-zinc-500">{note}</span>
+        { title: "Поставка счётчиков электроэнергии", meta: "ПАО «Россети Урал» · 14,2 млн ₽", step: 2, active: true },
+        { title: "Приборы учёта АСКУЭ, 1 200 шт.", meta: "АО «Энергосбыт Плюс» · 6,8 млн ₽", step: 3, active: false },
+      ].map((card) => (
+        <div
+          key={card.title}
+          className={`rounded-xl px-3 py-2.5 ${
+            card.active
+              ? "bg-white/[0.06] shadow-[inset_0_0_0_1px_rgb(var(--c-indigo-400)/0.45),0_10px_24px_-14px_rgb(var(--c-indigo-500)/0.7)]"
+              : "bg-white/[0.03] shadow-[inset_0_0_0_1px_rgb(var(--c-white)/0.07)]"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-zinc-100">{card.title}</span>
+            {card.active ? (
+              <span className="shrink-0 text-[10px] tabular-nums text-indigo-300">Шаг 2 из 3</span>
+            ) : (
+              <Check size={12} className="shrink-0 text-zinc-400" />
+            )}
+          </div>
+          <div className="mt-1 truncate text-[10px] text-zinc-500">{card.meta}</div>
+          <div className="mt-2">
+            <StepBar step={card.step} total={3} />
+          </div>
         </div>
       ))}
     </div>
   ),
-  "analyzed-only": () => (
-    <div className="flex flex-col items-center gap-2.5">
-      <div className="flex items-end gap-4">
-        {[
-          ["128", "в списке", "text-zinc-100"],
-          ["34", "разобрано", "text-emerald-300"],
-        ].map(([count, label, tone]) => (
-          <span key={label} className="flex flex-col items-center">
-            <span className={`text-2xl font-semibold tabular-nums ${tone}`}>{count}</span>
-            <span className="text-[10px] text-zinc-500">{label}</span>
-          </span>
-        ))}
+  sidebar: () => (
+    <div className="flex w-full max-w-[200px] flex-col gap-1.5 text-left text-[10.5px]">
+      <div className="flex items-center gap-2 rounded-lg bg-white/[0.05] px-2.5 py-1.5 text-zinc-500">
+        <Search size={11} />
+        <span className="flex-1">Поиск</span>
+        <kbd className="rounded bg-white/[0.08] px-1.5 py-0.5 font-sans text-[9.5px] text-zinc-300">⌘K</kbd>
       </div>
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-3 py-1 text-[11px] text-emerald-200 ring-1 ring-emerald-400/40">
-        <Check size={11} /> Разобранные
-      </span>
+      <span className="px-2.5 pt-1 text-[9px] uppercase tracking-wider text-zinc-600">Закупки</span>
+      {["Тендеры", "Релевантные", "Аналитика"].map((label, n) => (
+        <span
+          key={label}
+          className={`rounded-lg px-2.5 py-1.5 ${
+            n === 0 ? "bg-white/[0.08] text-zinc-50 shadow-[inset_0_1px_0_rgb(var(--c-white)/0.08)]" : "text-zinc-400"
+          }`}
+        >
+          {label}
+        </span>
+      ))}
     </div>
   ),
-  "model-sources": () => (
+  palette: () => (
+    <div className="flex flex-col items-center gap-3">
+      <div className="flex -space-x-2.5">
+        {[
+          ["bg-[#185DF1]", "z-30"],
+          ["bg-[#2a2d33]", "z-20"],
+          ["bg-[#eef3ff]", "z-10"],
+        ].map(([color, z]) => (
+          <span key={color} className={`h-11 w-11 rounded-full shadow-[inset_0_0_0_1px_rgb(0_0_0/0.08)] ring-2 ring-zinc-950 ${color} ${z}`} />
+        ))}
+      </div>
+      <span className="text-[10px] tabular-nums text-zinc-500">#185DF1 · графит · светлая</span>
+    </div>
+  ),
+  "bitrix-deal": () => (
+    <div className="flex w-full max-w-[420px] items-center gap-3 text-left">
+      <div className="flex-1 space-y-2 rounded-xl bg-white/[0.04] p-2.5 shadow-[inset_0_0_0_1px_rgb(var(--c-white)/0.07)]">
+        <span className="block truncate text-[11px] font-medium text-zinc-100">Поставка ПУ, 1 200 шт.</span>
+        <span className="flex items-center justify-center gap-1.5 rounded-full bg-indigo-500 px-2.5 py-1 text-[10.5px] font-medium text-snow">
+          <Send size={10} /> Отправить в Битрикс
+        </span>
+      </div>
+      <ArrowRight size={14} className="shrink-0 text-zinc-600" />
+      <div className="hidden flex-[1.3] space-y-1 sm:block">
+        <span className="block text-[9.5px] uppercase tracking-wider text-zinc-500">ИИ анализ и решения</span>
+        <Row>
+          <span className="flex-1 truncate text-zinc-200">Краткая выжимка по ТЗ</span>
+        </Row>
+        <Row>
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-rose-400" />
+          <span className="flex-1 truncate text-zinc-300">Не проходит</span>
+          <span className="tabular-nums text-zinc-500">2</span>
+        </Row>
+        <Row>
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-500" />
+          <span className="flex-1 truncate text-zinc-300">Критичные</span>
+          <span className="tabular-nums text-zinc-500">5</span>
+        </Row>
+      </div>
+    </div>
+  ),
+  apps: () => (
+    <div className="w-full max-w-[200px] space-y-1.5 text-left">
+      {[
+        ["B24", "Bitrix24", true],
+        ["@", "Почта", true],
+        ["R", "Rusprofile", false],
+      ].map(([mark, label, on]) => (
+        <Row key={String(label)}>
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-white/[0.08] text-[8.5px] font-semibold text-zinc-200">
+            {mark}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-zinc-200">{label}</span>
+          <span className={`flex h-3.5 w-6 items-center rounded-full p-0.5 ${on ? "justify-end bg-indigo-500" : "bg-white/15"}`}>
+            <span className="h-2.5 w-2.5 rounded-full bg-white" />
+          </span>
+        </Row>
+      ))}
+    </div>
+  ),
+  "ai-models": () => (
+    <div className="w-full max-w-[200px] space-y-2.5">
+      <div className="flex h-14 items-end gap-1">
+        {[35, 55, 30, 80, 45, 100, 60].map((h, n) => (
+          <span
+            key={n}
+            className={`flex-1 rounded-t-[4px] ${n === 5 ? "bg-indigo-400" : "bg-white/[0.1]"}`}
+            style={{ height: `${h}%` }}
+          />
+        ))}
+      </div>
+      <div className="flex justify-between text-[10px] text-zinc-500">
+        <span>прогноз на месяц</span>
+        <span className="tabular-nums text-zinc-300">4,1 млн</span>
+      </div>
+    </div>
+  ),
+  qwen: () => (
+    <div className="flex flex-col items-center gap-2.5">
+      <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white/[0.06] shadow-[inset_0_0_0_1px_rgb(var(--c-white)/0.08)]">
+        <AiProviderIcon provider="qwen" size={30} />
+      </span>
+      <span className="text-[11px] font-medium text-zinc-200">Qwen3.8 27B</span>
+      <span className="text-[10px] text-zinc-600 line-through">Claude · GigaChat</span>
+    </div>
+  ),
+  positions: () => (
+    <div className="w-full max-w-[210px] space-y-1 text-left text-[10.5px]">
+      {[
+        ["1", "Однофазный ПУ", "800"],
+        ["2", "Трёхфазный ПУ", "400"],
+      ].map(([n, label, qty]) => (
+        <Row key={n}>
+          <span className="w-3 text-zinc-500">{n}</span>
+          <span className="min-w-0 flex-1 truncate text-zinc-200">{label}</span>
+          <span className="tabular-nums text-zinc-400">{qty} шт.</span>
+        </Row>
+      ))}
+      <div className="flex items-center justify-between border-t border-white/[0.08] px-2.5 pt-1.5 font-medium">
+        <span className="text-zinc-300">Итого</span>
+        <span className="tabular-nums text-indigo-300">1 200 шт.</span>
+      </div>
+    </div>
+  ),
+  verdicts: () => (
+    <div className="w-full max-w-[210px] space-y-2 text-left">
+      <Row>
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-400" />
+        <span className="min-w-0 flex-1 truncate text-zinc-200">Межповерочный интервал 16 лет</span>
+      </Row>
+      <div className="flex gap-1.5">
+        <span className="flex flex-1 items-center justify-center gap-1 rounded-full bg-white/[0.05] py-1 text-[10.5px] text-zinc-400">
+          <ThumbsUp size={10} /> Согласен
+        </span>
+        <span className="flex flex-1 items-center justify-center gap-1 rounded-full bg-indigo-500/15 py-1 text-[10.5px] text-indigo-200 ring-1 ring-indigo-400/40">
+          <ThumbsDown size={10} /> Не согласен
+        </span>
+      </div>
+      <span className="block text-center text-[10px] text-zinc-500">учитывается в похожих закупках</span>
+    </div>
+  ),
+  matrix: () => (
+    <div className="w-full max-w-[420px] space-y-1 text-left">
+      {[
+        ["Напряжение 3×380 В", "= 3×230/400 В"],
+        ["Срок службы 192 месяца", "= 16 лет"],
+        ["Класс точности 1/2", "сверено без модели"],
+      ].map(([req, note]) => (
+        <Row key={req}>
+          <Check size={11} className="shrink-0 text-indigo-300" />
+          <span className="min-w-0 flex-1 truncate text-zinc-200">{req}</span>
+          <span className="shrink-0 text-[10px] text-zinc-500">{note}</span>
+        </Row>
+      ))}
+    </div>
+  ),
+  pp1875: () => (
+    <div className="flex flex-col items-center gap-2.5">
+      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.06] text-zinc-100">
+        <ShieldCheck size={24} />
+      </span>
+      <Pill>
+        <span className="h-1.5 w-1.5 rounded-full bg-indigo-400" /> реестр российской продукции
+      </Pill>
+    </div>
+  ),
+  activity: () => (
+    <div className="flex w-full max-w-[400px] items-start gap-3 text-left">
+      <span className="relative mt-1 hidden h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/[0.06] text-zinc-200 sm:flex">
+        <Bell size={17} />
+        <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-indigo-400 ring-2 ring-zinc-950" />
+      </span>
+      <div className="flex-1 space-y-1.5">
+        {[
+          ["Разбор закупки", "Шаг 2 из 3", 2],
+          ["Опрос площадок", "7 из 12", 7],
+        ].map(([label, note, done]) => (
+          <div key={String(label)} className="space-y-1.5 rounded-lg bg-white/[0.05] px-2.5 py-2 text-[10.5px]">
+            <div className="flex justify-between">
+              <span className="text-zinc-200">{label}</span>
+              <span className="tabular-nums text-zinc-500">{note}</span>
+            </div>
+            <span className="block h-1 overflow-hidden rounded-full bg-white/10">
+              <span
+                className="block h-full rounded-full bg-indigo-400"
+                style={{ width: `${(Number(done) / (label === "Опрос площадок" ? 12 : 3)) * 100}%` }}
+              />
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  ),
+  "catalog-sources": () => (
     <div className="flex w-full max-w-[420px] gap-2.5 text-left text-[10.5px]">
       <div className="flex-1 space-y-1">
         {[
-          ["Ток макс.", "80 А", "сайт", false],
-          ["Класс точности", "1/1", "ГРСИ", false],
-          ["Степень защиты", "IP54", "ИИ", true],
-          ["Интерфейсы", "RS-485, NB-IoT", "сайт", false],
-        ].map(([label, value, source, unchecked]) => (
-          <div key={String(label)} className="flex items-center gap-2 rounded-lg bg-white/[0.05] px-2.5 py-1.5">
+          ["Ток макс.", "80 А", false],
+          ["Класс точности", "1/1", false],
+          ["Степень защиты", "IP54", true],
+        ].map(([label, value, unchecked]) => (
+          <Row key={String(label)}>
             <span className="min-w-0 flex-1 truncate text-zinc-500">{label}</span>
             <span className="flex items-center gap-1 text-zinc-100">
               {value}
               {unchecked && <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />}
             </span>
-            <span className="w-9 shrink-0 text-right text-[9.5px] text-amber-300/80">{source}</span>
-          </div>
+          </Row>
         ))}
       </div>
-      <div className="hidden w-[42%] flex-col gap-1.5 rounded-xl bg-white/[0.04] p-2.5 ring-1 ring-amber-400/25 sm:flex">
+      <div className="hidden w-[44%] flex-col gap-1.5 rounded-xl bg-white/[0.03] p-2.5 shadow-[inset_0_0_0_1px_rgb(var(--c-white)/0.08)] sm:flex">
         <span className="text-[10px] font-medium text-zinc-300">Источники данных</span>
-        <span className="flex items-center gap-1.5 text-zinc-400"><Check size={10} className="text-emerald-300" />Сайт производителя</span>
-        <span className="flex items-center gap-1.5 text-zinc-400"><Check size={10} className="text-emerald-300" />Описание типа</span>
-        <span className="flex items-center gap-1.5 text-zinc-500"><X size={10} className="text-rose-300" />Руководство — загрузите PDF</span>
+        <span className="flex items-center gap-1.5 text-zinc-400"><Check size={10} className="text-indigo-300" />Сайт производителя</span>
+        <span className="flex items-center gap-1.5 text-zinc-400"><Check size={10} className="text-indigo-300" />Описание типа</span>
+        <span className="flex items-center gap-1.5 text-zinc-500"><X size={10} />Руководство — PDF</span>
       </div>
     </div>
   ),
-  "top-search": () => (
+  deadline: () => (
+    <div className="flex flex-col items-center gap-1.5">
+      <span className="text-[10px] uppercase tracking-wider text-zinc-500">окончание подачи</span>
+      <span className="text-2xl font-semibold tabular-nums tracking-tight text-zinc-50">
+        28 окт · <span className="text-indigo-300">09:00</span>
+      </span>
+      <span className="text-[10px] text-zinc-500">по времени заказчика · UTC+5</span>
+    </div>
+  ),
+  search: () => (
     <div className="w-full max-w-[200px] space-y-2 text-left">
-      <div className="flex items-center gap-2 rounded-full bg-white/[0.08] px-3 py-1.5 text-[11px] text-zinc-200 ring-1 ring-sky-400/40">
-        <Search size={12} className="text-sky-300" />
+      <div className="flex items-center gap-2 rounded-full bg-white/[0.07] px-3 py-1.5 text-[11px] text-zinc-200 ring-1 ring-indigo-400/40">
+        <Search size={12} className="text-indigo-300" />
         счетчик
       </div>
       {["Поставка счётчиков ЭЭ", "Счётчики АСКУЭ, монтаж"].map((title) => (
         <div key={title} className="truncate rounded-lg bg-white/[0.05] px-2.5 py-1.5 text-[10.5px] text-zinc-400">
           {title.split(/(Счётчик|счётчик)/).map((part, n) =>
-            /ётчик/.test(part) ? <mark key={n} className="rounded-sm bg-sky-400/25 text-sky-100">{part}</mark> : part,
+            /ётчик/.test(part) ? <mark key={n} className="rounded-sm bg-indigo-400/25 text-zinc-50">{part}</mark> : part,
           )}
         </div>
       ))}
     </div>
   ),
-  schedule: () => (
-    <div className="flex w-full max-w-[200px] flex-col items-center gap-2.5">
-      <div className="flex gap-2">
-        {["06:00", "20:00"].map((time) => (
-          <span key={time} className="flex items-center gap-1.5 rounded-xl bg-indigo-500/15 px-2.5 py-1.5 text-sm font-semibold tabular-nums text-indigo-200">
-            <Clock3 size={13} /> {time}
-          </span>
+  roseltorg: () => (
+    <div className="flex w-full max-w-[210px] flex-col items-center gap-2.5">
+      <div className="flex flex-wrap justify-center gap-1.5">
+        {["Россети", "РусГидро", "Ростелеком", "Интер РАО"].map((name) => (
+          <Pill key={name}>{name}</Pill>
         ))}
       </div>
-      <div className="relative h-1.5 w-full rounded-full bg-white/[0.07]">
-        <span className="absolute -top-0.5 h-2.5 w-2.5 rounded-full bg-indigo-400" style={{ left: "25%" }} />
-        <span className="absolute -top-0.5 h-2.5 w-2.5 rounded-full bg-indigo-400" style={{ left: "83%" }} />
-      </div>
-      <span className="text-[10px] text-zinc-500">по Москве · запуск и итог — в журнале</span>
+      <span className="flex items-center gap-1.5 text-[10px] tabular-nums text-zinc-500">
+        <Clock3 size={11} /> опрос в 06:00 и 20:00 МСК
+      </span>
     </div>
   ),
-  "requirements-view": () => (
-    <div className="flex w-full max-w-[420px] gap-2.5 text-left text-[10.5px]">
-      <div className="flex-1 space-y-1">
-        <span className="block text-[9.5px] uppercase tracking-wider text-sky-300/80">Метрология</span>
-        {["Класс точности 1/2", "Межповерочный интервал 16 лет"].map((text, n) => (
-          <div key={text} className="flex items-center gap-2 rounded-lg bg-white/[0.05] px-2 py-1.5">
-            <span className="w-3 text-right tabular-nums text-zinc-500">{n + 1}</span>
-            <span className="truncate text-zinc-200">{text}</span>
-          </div>
-        ))}
-        <span className="block pt-0.5 text-[9.5px] uppercase tracking-wider text-sky-300/80">Связь</span>
-        <div className="flex items-center gap-2 rounded-lg bg-white/[0.05] px-2 py-1.5">
-          <span className="w-3 text-right tabular-nums text-zinc-500">3</span>
-          <span className="truncate text-zinc-200">RS-485, оптопорт</span>
-        </div>
-      </div>
-      <div className="hidden flex-1 overflow-hidden rounded-xl bg-white/[0.04] sm:block">
-        <div className="grid grid-cols-[1fr_auto_auto] gap-x-2 gap-y-1 p-2 text-[10px]">
-          <span className="text-zinc-500">Требование</span>
-          <span className="text-zinc-300">МИРТЕК</span>
-          <span className="text-zinc-300">Энергомера</span>
-          {[
-            ["1", "bg-emerald-400", "bg-emerald-400"],
-            ["2", "bg-emerald-400", "bg-amber-400"],
-            ["3", "bg-emerald-400", "bg-rose-400"],
-          ].map(([n, a, b]) => (
-            <div key={n} className="contents">
-              <span className="text-zinc-500">№ {n}</span>
-              <span className="flex justify-center"><span className={`mt-1 h-1.5 w-1.5 rounded-full ${a}`} /></span>
-              <span className="flex justify-center"><span className={`mt-1 h-1.5 w-1.5 rounded-full ${b}`} /></span>
-            </div>
-          ))}
-          <span className="pt-1 text-zinc-500">Итог</span>
-          <span className="pt-1 text-center tabular-nums text-emerald-300">100%</span>
-          <span className="pt-1 text-center tabular-nums text-amber-300">67%</span>
-        </div>
-      </div>
-    </div>
-  ),
-  registries: () => (
-    <div className="flex flex-col items-center gap-1.5">
-      {["ГИСП · ПП 719", "ЗАК Россетей"].map((label) => (
-        <span key={label} className="flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1.5 text-[11px] text-emerald-200 ring-1 ring-emerald-400/30">
-          <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-emerald-400 text-snow"><Check size={9} /></span>
-          {label}
-        </span>
-      ))}
-      <span className="pt-1 text-[10px] text-zinc-500">сверка раз в неделю</span>
-    </div>
-  ),
-  "catalog-lean": () => (
-    <div className="w-full max-w-[190px] space-y-2 text-left text-[10px]">
-      <div>
-        <div className="mb-1 flex justify-between text-zinc-500"><span>было</span><span className="tabular-nums">≈ 900 тыс.</span></div>
-        <span className="block h-2 w-full rounded-full bg-white/15" />
-      </div>
-      <div>
-        <div className="mb-1 flex justify-between text-zinc-300"><span>стало</span><span className="tabular-nums text-emerald-300">≈ 90 тыс.</span></div>
-        <span className="block h-2 w-[12%] rounded-full bg-emerald-400" />
-      </div>
-      <span className="block pt-0.5 text-zinc-500">токенов в неделю на каталог</span>
-    </div>
-  ),
-  "marked-lists": () => (
-    <div className="grid w-full max-w-[400px] grid-cols-2 gap-2.5 text-left text-[10.5px]">
+  sberbank: () => (
+    <div className="relative w-full max-w-[200px] space-y-2.5 pl-4 text-left text-[10.5px]">
+      <span className="absolute bottom-1.5 left-[3px] top-1.5 w-px bg-white/10" />
       {[
-        { label: "Релевантные", count: 12, dot: "bg-emerald-400", ring: "ring-emerald-400/30" },
-        { label: "Неактуальные", count: 5, dot: "bg-zinc-500", ring: "ring-white/10" },
-      ].map((list) => (
-        <div key={list.label} className={`rounded-xl bg-white/[0.04] p-2.5 ring-1 ${list.ring}`}>
-          <div className="mb-1.5 flex items-center justify-between">
-            <span className="text-zinc-200">{list.label}</span>
-            <span className="tabular-nums text-zinc-500">{list.count}</span>
-          </div>
-          {[80, 62, 70].map((w) => (
-            <div key={w} className="flex items-center gap-1.5 py-1">
-              <span className={`h-1.5 w-1.5 rounded-full ${list.dot}`} />
-              <span className="h-1.5 rounded-full bg-white/15" style={{ width: `${w}%` }} />
-            </div>
-          ))}
-        </div>
-      ))}
-    </div>
-  ),
-  "tz-reference": () => (
-    <div className="w-full max-w-[380px] space-y-1.5 text-left text-[10.5px]">
-      {[
-        { name: "МИРТЕК-32-РУ", note: "эталон ТЗ", pct: "100%", cls: "bg-emerald-500/15 ring-1 ring-emerald-400/40", tone: "text-emerald-300" },
-        { name: "Энергомера CE308", note: "эквивалент · с оговорками", pct: "74%", cls: "bg-white/[0.05]", tone: "text-amber-300" },
-        { name: "Матрица NP73", note: "не проходит", pct: "41%", cls: "bg-white/[0.05]", tone: "text-rose-300" },
-      ].map((row) => (
-        <div key={row.name} className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 ${row.cls}`}>
-          <span className="min-w-0 flex-1 truncate text-zinc-200">{row.name}</span>
-          <span className="truncate text-[9.5px] text-zinc-500">{row.note}</span>
-          <span className={`w-9 text-right tabular-nums ${row.tone}`}>{row.pct}</span>
+        ["Запрос разъяснений", "21 окт"],
+        ["Ответ заказчика", "22 окт"],
+        ["Протокол рассмотрения", "сегодня"],
+      ].map(([label, date], n) => (
+        <div key={label} className="relative flex items-center gap-2">
+          <span className={`absolute -left-4 h-[7px] w-[7px] rounded-full ${n === 2 ? "bg-indigo-400" : "bg-zinc-600"}`} />
+          <span className="min-w-0 flex-1 truncate text-zinc-200">{label}</span>
+          <span className="shrink-0 text-[10px] text-zinc-500">{date}</span>
         </div>
       ))}
     </div>
   ),
   selection: () => (
-    <div className="w-full max-w-[380px] space-y-1.5 text-left text-[10.5px]">
+    <div className="w-full max-w-[400px] space-y-1.5 text-left text-[10.5px]">
       {[
-        ["Собрано", "2 140", 100],
-        ["Профили", "312", 46],
-        ["Модель", "96", 24],
-        ["В списке", "41", 12],
-      ].map(([label, count, w], n) => (
-        <div key={String(label)} className="flex items-center gap-2">
-          <span className="w-16 shrink-0 text-zinc-500">{label}</span>
-          <span className="h-4 flex-1">
+        ["Собрано", 1240, 100],
+        ["Профили", 310, 46],
+        ["Модель", 96, 24],
+        ["Фильтры = в списке", 42, 12],
+      ].map(([label, count, width], n, all) => (
+        <div key={String(label)} className="flex items-center gap-2.5">
+          <span className="w-[42%] shrink-0 truncate text-zinc-400">{label}</span>
+          <span className="flex-1">
             <span
-              className={`flex h-full items-center justify-end rounded-md pr-1.5 text-[9.5px] tabular-nums ${n === 3 ? "bg-indigo-400 text-snow" : "bg-indigo-500/25 text-indigo-200"}`}
-              style={{ width: `${Math.max(Number(w), 14)}%` }}
-            >
-              {count}
-            </span>
+              className={`block h-2 rounded-full ${n === all.length - 1 ? "bg-indigo-400" : "bg-white/[0.12]"}`}
+              style={{ width: `${width}%` }}
+            />
           </span>
+          <span className="w-9 shrink-0 text-right tabular-nums text-zinc-300">{Number(count).toLocaleString("ru-RU")}</span>
         </div>
       ))}
     </div>
   ),
-  "brand-lock": () => (
-    <div className="w-full max-w-[360px] space-y-2 text-left">
-      <div className="rounded-xl bg-white/[0.05] p-2.5 text-[10.5px] leading-relaxed text-zinc-400">
-        Счётчик <span className="rounded bg-rose-400/20 px-1 text-rose-200">Энергомера CE208</span> — 450 шт.,{" "}
-        <span className="rounded bg-rose-400/20 px-1 text-rose-200">эквивалент не допускается</span>
-      </div>
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-500/15 px-2.5 py-1 text-[10.5px] text-rose-200">
-        <X size={11} /> ТЗ под чужой товарный знак
-      </span>
-    </div>
-  ),
-  feeds: () => (
-    <div className="w-full max-w-[180px] space-y-1.5 text-left text-[11px]">
-      {[
-        ["ЕИС", false],
-        ["Сбербанк-АСТ", false],
-        ["Госплан", false],
-        ["Тендерплан", true],
-      ].map(([name, isNew]) => (
-        <div
-          key={String(name)}
-          className={`flex items-center justify-between rounded-lg px-2.5 py-1.5 ${isNew ? "bg-sky-500/15 ring-1 ring-sky-400/40" : "bg-white/[0.05]"}`}
-        >
-          <span className={isNew ? "text-sky-100" : "text-zinc-400"}>{name}</span>
-          {isNew ? <span className="text-[9.5px] text-sky-300">новый</span> : <span className="h-1.5 w-1.5 rounded-full bg-emerald-400/70" />}
-        </div>
-      ))}
-    </div>
-  ),
-  "no-auto-analysis": () => (
-    <div className="w-full max-w-[180px] space-y-1.5 text-[10.5px]">
-      {["Документы", "Карточка площадки"].map((label) => (
-        <div key={label} className="flex items-center gap-2 rounded-lg bg-white/[0.05] px-2.5 py-1.5 text-zinc-300">
-          <Check size={11} className="text-emerald-300" /> {label}
-        </div>
-      ))}
-      <div className="rounded-full border border-dashed border-white/20 py-1.5 text-center text-zinc-400">Разобрать — по кнопке</div>
-    </div>
-  ),
-  "job-queue": () => (
-    <div className="w-full max-w-[190px] space-y-1.5 text-left text-[10.5px]">
-      {[
-        ["0373100…41", 70],
-        ["3245000…07", 25],
-      ].map(([id, progress]) => (
-        <div key={String(id)} className="rounded-lg bg-white/[0.05] px-2.5 py-1.5">
-          <div className="flex items-center justify-between">
-            <span className="font-mono text-zinc-300">{id}</span>
-            <span className="text-[9.5px] text-rose-300">Отменить</span>
-          </div>
-          <span className="mt-1 block h-1 rounded-full bg-white/10">
-            <span className="block h-full rounded-full bg-amber-400" style={{ width: `${progress}%` }} />
-          </span>
-        </div>
-      ))}
-    </div>
-  ),
-  "meter-vpu": () => (
-    <div className="flex flex-col items-center gap-2 text-[11px]">
-      <span className="rounded-full bg-white/[0.06] px-3 py-1 text-zinc-500 line-through decoration-rose-400/70">Счётчик ЭЭ</span>
-      <span className="rounded-full bg-amber-500/15 px-3 py-1 text-amber-200 ring-1 ring-amber-400/40">ВПУ · 6–10 кВ</span>
-    </div>
-  ),
-  "deepseek-fast": () => (
-    <div className="flex flex-col items-center gap-2">
-      <div className="flex items-center gap-2 tabular-nums">
-        <span className="text-sm text-zinc-500 line-through">18 мин</span>
-        <ArrowRight size={13} className="text-zinc-600" />
-        <span className="text-2xl font-semibold text-sky-200">3,5 мин</span>
-      </div>
-      <span className="flex items-center gap-1.5 text-[10.5px] text-zinc-500">
-        <AiProviderIcon provider="deepseek" size={14} /> полный разбор <Zap size={11} className="text-sky-300" />
-      </span>
-    </div>
-  ),
-  "catalog-hide-eol": () => (
-    <div className="w-full max-w-[180px] space-y-2 text-[10.5px]">
-      <div className="flex rounded-full bg-white/[0.06] p-0.5">
-        <span className="flex-1 rounded-full bg-rose-500/25 py-1 text-center text-rose-100">В выпуске</span>
-        <span className="flex-1 py-1 text-center text-zinc-500">Все</span>
-      </div>
-      {[
-        ["МИРТЕК-12-РУ", true],
-        ["МИРТЕК-1-РУ", false],
-      ].map(([name, active]) => (
-        <div key={String(name)} className={`flex items-center justify-between rounded-lg bg-white/[0.05] px-2.5 py-1.5 ${active ? "text-zinc-200" : "text-zinc-600"}`}>
-          <span className={active ? "" : "line-through"}>{name}</span>
-          {!active && <span className="text-[9px]">снят</span>}
-        </div>
-      ))}
-    </div>
-  ),
-  bitrix: () => (
-    <div className="w-full max-w-[250px] space-y-2">
-      <div className="flex gap-1">
-        {["Новый тендер", "Подготовка", "Подана"].map((stage, n) => (
-          <span
-            key={stage}
-            className={`flex-1 truncate rounded-md px-1.5 py-1 text-[9.5px] ${n === 0 ? "bg-sky-500/25 text-sky-200" : "bg-white/[0.06] text-zinc-500"}`}
-          >
-            {stage}
-          </span>
-        ))}
-      </div>
-      <div className="rounded-xl bg-white/[0.05] p-2.5 text-left ring-1 ring-sky-400/30">
-        <div className="truncate text-[11px] text-zinc-200">Поставка ПУ · 0373100…</div>
-        <div className="mt-1 flex items-center justify-between text-[10px] text-zinc-500">
-          <span>4,8 млн ₽</span>
-          <span className="rounded-full bg-amber-500/15 px-1.5 text-amber-300">только чтение</span>
-        </div>
-      </div>
-    </div>
-  ),
-  qwen: () => (
-    <div className="grid grid-cols-3 gap-1.5 text-[10.5px]">
-      {(["yandex", "deepseek", "qwen"] as const).map((provider) => (
-        <span
-          key={provider}
-          className={`flex items-center justify-center rounded-xl p-2 ${provider === "qwen" ? "bg-violet-500/15 ring-1 ring-violet-400/40" : "bg-white/[0.05] opacity-60"}`}
-        >
-          <AiProviderIcon provider={provider} size={20} />
-        </span>
-      ))}
-    </div>
-  ),
-  "integrations-tabs": () => (
-    <div className="w-full max-w-[200px]">
-      <div className="flex gap-2 border-b border-white/10 text-[9.5px]">
-        {["Модели ИИ", "Почта", "Bitrix24"].map((label, n) => (
-          <span key={label} className={`pb-1 ${n === 0 ? "border-b-2 border-violet-400 text-zinc-100" : "text-zinc-500"}`}>
-            {label}
-          </span>
-        ))}
-      </div>
-      <div className="mt-2 flex gap-1.5">
-        <div className="flex-1 space-y-1">
-          {[true, false, false].map((on, n) => (
-            <span key={n} className={`block h-3 rounded ${on ? "bg-violet-500/40" : "bg-white/[0.07]"}`} />
-          ))}
-        </div>
-        <span className="w-1/2 rounded bg-white/[0.05]" />
-      </div>
-    </div>
-  ),
-  profiles: () => (
-    <div className="w-full max-w-[210px] space-y-1.5 text-[11px]">
-      {[
-        { name: "Щитовые приборы", scope: "ЕИС · Сбербанк-АСТ", on: true },
-        { name: "Поверка и монтаж", scope: "ЕИС", on: true },
-        { name: "Все площадки", scope: "без привязки", on: false },
-      ].map((row) => (
-        <div
-          key={row.name}
-          className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 ${row.on ? "bg-indigo-500/15 ring-1 ring-indigo-400/40" : "bg-white/[0.05]"}`}
-        >
-          <span className={`flex h-3.5 w-3.5 items-center justify-center rounded ${row.on ? "bg-indigo-400 text-snow" : "ring-1 ring-white/20"}`}>
-            {row.on && <Check size={10} />}
-          </span>
-          <span className="min-w-0 flex-1 truncate text-left text-zinc-200">{row.name}</span>
-          <span className="truncate text-[10px] text-zinc-500">{row.scope}</span>
-        </div>
-      ))}
-    </div>
-  ),
-  "okpd2-tree": () => (
-    <div className="w-full max-w-[190px] space-y-1 text-left font-mono text-[10.5px] text-zinc-300">
-      <div className="flex items-center gap-1.5"><span className="h-3 w-3 rounded ring-1 ring-white/25" />26</div>
-      <div className="flex items-center gap-1.5 pl-3"><span className="flex h-3 w-3 items-center justify-center rounded bg-violet-400/60 text-snow"><span className="h-0.5 w-1.5 bg-snow" /></span>26.5</div>
-      <div className="flex items-center gap-1.5 pl-6"><span className="flex h-3 w-3 items-center justify-center rounded bg-violet-400 text-snow"><Check size={9} /></span>26.51</div>
-      <div className="flex items-center gap-1.5 pl-6"><span className="h-3 w-3 rounded ring-1 ring-white/25" />26.52</div>
-    </div>
-  ),
-  "tenders-header": () => (
-    <div className="w-full max-w-[220px] space-y-1.5">
-      <div className="flex gap-1.5">
-        <span className="h-5 flex-1 rounded-md bg-white/[0.08]" />
-        <span className="h-5 w-10 rounded-md bg-sky-500/40" />
-      </div>
-      <div className="flex gap-1.5">
-        {["Ресурсы", "Профиль", "Фильтры"].map((label) => (
-          <span key={label} className="rounded-md bg-white/[0.06] px-1.5 py-1 text-[9.5px] text-zinc-400">{label}</span>
-        ))}
-      </div>
-    </div>
-  ),
-  minutes: () => (
-    <div className="flex flex-col items-center gap-2">
-      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-rose-500/15 text-rose-300">
-        <span className="text-lg font-semibold tabular-nums">0 д</span>
-      </span>
-      <span className="text-[11px] text-zinc-500">срок = день размещения</span>
-    </div>
-  ),
+  // ——— Гайд «С чего начать» ———
   "catalog-steps": StepsVisual,
   catalog: StepsVisual,
   manual: () => (
@@ -573,7 +467,7 @@ const VISUALS: Record<string, () => ReactNode> = {
 
 // ——— Описание по нажатию ————————————————————————————————————————————————————
 
-function SlideDetails({ slide, onClose }: { slide: Slide; onClose: () => void }) {
+export function SlideDetails({ slide, onClose }: { slide: Slide; onClose: () => void }) {
   const Icon = slide.icon;
 
   useEffect(() => {
@@ -598,11 +492,11 @@ function SlideDetails({ slide, onClose }: { slide: Slide; onClose: () => void })
         >
           <X size={18} />
         </button>
-        <div className={`mb-5 flex h-11 w-11 items-center justify-center rounded-2xl ${TONE_CHIP[slide.tone]}`}>
-          <Icon size={22} />
+        <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-2xl bg-white/[0.06] text-zinc-100">
+          <Icon size={21} />
         </div>
-        <div className={`text-xs font-medium uppercase tracking-wider ${TONE_TEXT[slide.tone]}`}>{slide.kicker}</div>
-        <h2 className="mt-2 text-2xl font-semibold tracking-tight text-zinc-50">{slide.title}</h2>
+        <div className="text-xs font-medium text-zinc-500">{slide.kicker}</div>
+        <h2 className="mt-1.5 text-2xl font-semibold tracking-tight text-zinc-50">{slide.title}</h2>
         <p className="mt-2 text-[15px] text-zinc-400">{slide.lead}</p>
         <div className="mt-5 space-y-3 text-[15px] leading-relaxed text-zinc-300">
           {slide.details.map((paragraph) => (
@@ -634,6 +528,9 @@ const heroVariants: Variants = {
   animate: { opacity: 1, scale: 1, transition: { type: "spring", bounce: 0.2, duration: 0.7 } },
 };
 
+// Плитка в новом стиле (24.10.2026): поверхность `.surface`, как у блоков на страницах, текст
+// слева — имя и дата, под ними одна фраза, ниже мини-иллюстрация. Без цветной заливки и
+// цветных значков: на тёмном графите акцент — только синий в самой иллюстрации.
 function Tile({ slide, onOpen }: { slide: Slide; onOpen: (slide: Slide) => void }) {
   const Visual = VISUALS[slide.id];
   const Icon = slide.icon;
@@ -645,14 +542,18 @@ function Tile({ slide, onOpen }: { slide: Slide; onOpen: (slide: Slide) => void 
       onClick={() => onOpen(slide)}
       style={{ "--area": slide.id } as CSSProperties}
       aria-label={`${slide.tile}. Открыть описание`}
-      className="bento-tile group relative flex min-h-[180px] flex-col items-center overflow-hidden rounded-[28px] border border-white/[0.07] bg-zinc-900/70 px-5 pb-5 pt-5 text-center transition-colors duration-300 hover:border-white/15 hover:bg-zinc-900"
+      className="bento-tile bento-card surface group relative flex min-h-[200px] flex-col overflow-hidden rounded-[22px] p-5 text-left"
     >
-      <span className="text-[15px] font-semibold leading-snug tracking-tight text-zinc-100">{slide.tile}</span>
-      <span className="flex w-full flex-1 items-center justify-center pt-3">
+      <span className="flex w-full items-baseline justify-between gap-3">
+        <span className="text-[15px] font-semibold leading-snug tracking-tight text-zinc-100">{slide.tile}</span>
+        <span className="shrink-0 text-[11px] text-zinc-500">{slide.kicker}</span>
+      </span>
+      <span className="mt-1 line-clamp-2 text-[12.5px] leading-snug text-zinc-500">{slide.lead}</span>
+      <span className="flex w-full flex-1 items-center justify-center pb-1 pt-4">
         {Visual ? (
           <Visual />
         ) : (
-          <span className={`flex h-14 w-14 items-center justify-center rounded-2xl ${TONE_CHIP[slide.tone]}`}>
+          <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white/[0.06] text-zinc-200">
             <Icon size={26} />
           </span>
         )}
@@ -670,7 +571,8 @@ export function BentoRecap({
   slides,
   areas,
 }: {
-  hero: { title: string; subtitle: string };
+  /** Центральная плитка с градиентом (гайд); без неё мозаика — только из плиток. */
+  hero?: { title: string; subtitle: string };
   /** Что открывается по нажатию на центральную плитку; без него она не нажимается. */
   heroSlide?: Slide;
   slides: Slide[];
@@ -680,7 +582,7 @@ export function BentoRecap({
   const [openSlide, setOpenSlide] = useState<Slide | null>(null);
   const closeDetails = useCallback(() => setOpenSlide(null), []);
 
-  const heroContent = (
+  const heroContent = hero && (
     <>
       {/* Переливающийся градиент, как у центральной плитки итогов WWDC */}
       <span className="bento-hero-gradient absolute inset-0" />
@@ -706,23 +608,24 @@ export function BentoRecap({
         className="bento grid grid-cols-1 gap-3 sm:max-lg:grid-cols-2"
         style={{ "--bento-areas": areas.map((row) => `"${row}"`).join(" ") } as CSSProperties}
       >
-        {heroSlide ? (
-          <motion.button
-            variants={heroVariants}
-            whileHover={{ y: -3 }}
-            whileTap={{ scale: 0.99 }}
-            onClick={() => setOpenSlide(heroSlide)}
-            aria-label={`${hero.title}. Открыть описание`}
-            style={{ "--area": "hero" } as CSSProperties}
-            className={heroClass}
-          >
-            {heroContent}
-          </motion.button>
-        ) : (
-          <motion.div variants={heroVariants} style={{ "--area": "hero" } as CSSProperties} className={heroClass}>
-            {heroContent}
-          </motion.div>
-        )}
+        {hero &&
+          (heroSlide ? (
+            <motion.button
+              variants={heroVariants}
+              whileHover={{ y: -3 }}
+              whileTap={{ scale: 0.99 }}
+              onClick={() => setOpenSlide(heroSlide)}
+              aria-label={`${hero.title}. Открыть описание`}
+              style={{ "--area": "hero" } as CSSProperties}
+              className={heroClass}
+            >
+              {heroContent}
+            </motion.button>
+          ) : (
+            <motion.div variants={heroVariants} style={{ "--area": "hero" } as CSSProperties} className={heroClass}>
+              {heroContent}
+            </motion.div>
+          ))}
         {slides.map((slide) => (
           <Tile key={slide.id} slide={slide} onOpen={setOpenSlide} />
         ))}

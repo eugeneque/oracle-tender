@@ -4,7 +4,12 @@ import { ArrowLeft, ChevronRight } from "lucide-react";
 import { motion } from "motion/react";
 
 import { AppShell } from "../components/AppShell";
-import type { AppDef, AppStatus, AppStatusInfo } from "../components/apps/appsCatalog";
+import type {
+  AppDef,
+  AppStatus,
+  AppStatusInfo,
+} from "../components/apps/appsCatalog";
+import { APP_STATUS_EVENT } from "../components/apps/AppKit";
 import { APP_STATUS_LABELS, visibleApps } from "../components/apps/appsCatalog";
 import { SegmentedControl } from "../components/ui/SegmentedControl";
 import { useAuth } from "../context/useAuth";
@@ -31,7 +36,10 @@ function useAppStatuses(apps: AppDef[], enabled: boolean): StatusMap {
       if (!app.loadStatus) continue;
       app
         .loadStatus()
-        .then((info) => alive && setStatuses((prev) => ({ ...prev, [app.key]: info })))
+        .then(
+          (info) =>
+            alive && setStatuses((prev) => ({ ...prev, [app.key]: info })),
+        )
         .catch(() => undefined);
     }
     return () => {
@@ -45,6 +53,7 @@ function useAppStatuses(apps: AppDef[], enabled: boolean): StatusMap {
 
 const STATUS_PILL: Record<AppStatus, string> = {
   connected: "border-indigo-400/40 bg-indigo-500/10 text-indigo-300",
+  paused: "border-white/[0.12] text-zinc-300",
   error: "border-rose-400/40 bg-rose-500/10 text-rose-300",
   off: "border-white/[0.12] text-zinc-400",
 };
@@ -57,7 +66,13 @@ function StatusPill({ info }: { info: AppStatusInfo | undefined }) {
     >
       {info.status !== "off" && (
         <span
-          className={`h-1.5 w-1.5 rounded-full ${info.status === "connected" ? "bg-indigo-400" : "bg-rose-400"}`}
+          className={`h-1.5 w-1.5 rounded-full ${
+            info.status === "connected"
+              ? "bg-indigo-400"
+              : info.status === "paused"
+                ? "bg-amber-400"
+                : "bg-rose-400"
+          }`}
         />
       )}
       {info.status === "off" ? "Подключить" : APP_STATUS_LABELS[info.status]}
@@ -69,7 +84,9 @@ function AppLogo({ app, size }: { app: AppDef; size: "md" | "lg" }) {
   return (
     <span
       className={`block shrink-0 overflow-hidden shadow-sm ring-1 ring-black/5 ${
-        size === "lg" ? "h-14 w-14 rounded-2xl text-2xl" : "h-11 w-11 rounded-xl text-lg"
+        size === "lg"
+          ? "h-14 w-14 rounded-2xl text-2xl"
+          : "h-11 w-11 rounded-xl text-lg"
       }`}
     >
       {app.logo}
@@ -89,14 +106,18 @@ export function AppsPage() {
   const shown = apps.filter((app) => {
     if (filter === "all") return true;
     const status = statuses[app.key]?.status;
-    return filter === "connected" ? status === "connected" : status !== undefined && status !== "connected";
+    // «Выключено» — подключено, просто на паузе: в списке подключённых.
+    const linked = status === "connected" || status === "paused";
+    return filter === "connected" ? linked : status !== undefined && !linked;
   });
 
   return (
     <AppShell>
       <div className="mx-auto max-w-6xl px-6 py-8 sm:px-8">
         <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
-          <h1 className="text-4xl font-bold tracking-tight text-white">Приложения</h1>
+          <h1 className="text-4xl font-bold tracking-tight text-white">
+            Приложения
+          </h1>
           {isAdmin && (
             <SegmentedControl<Filter>
               value={filter}
@@ -114,7 +135,9 @@ export function AppsPage() {
 
         {shown.length === 0 ? (
           <p className="rounded-2xl border border-dashed border-white/[0.1] px-6 py-12 text-center text-sm text-zinc-500">
-            {filter === "connected" ? "Ни одно приложение пока не подключено" : "Все приложения подключены"}
+            {filter === "connected"
+              ? "Ни одно приложение пока не подключено"
+              : "Все приложения подключены"}
           </p>
         ) : (
           <div className="grid gap-4 pb-16 sm:grid-cols-2 lg:grid-cols-3">
@@ -143,10 +166,16 @@ export function AppsPage() {
                       )}
                     </div>
                     <div className="mb-1.5 flex items-baseline gap-2">
-                      <h2 className="text-[15px] font-semibold text-zinc-100">{app.name}</h2>
-                      <span className="text-xs text-zinc-500">{app.category}</span>
+                      <h2 className="text-[15px] font-semibold text-zinc-100">
+                        {app.name}
+                      </h2>
+                      <span className="text-xs text-zinc-500">
+                        {app.category}
+                      </span>
                     </div>
-                    <p className="text-sm leading-relaxed text-zinc-400">{app.description}</p>
+                    <p className="text-sm leading-relaxed text-zinc-400">
+                      {app.description}
+                    </p>
                     {info?.detail && (
                       <p
                         className={`mt-auto truncate pt-4 text-xs ${info.status === "error" ? "text-rose-300/80" : "text-zinc-500"}`}
@@ -178,12 +207,16 @@ export function AppDetailPage() {
     setInfo(undefined);
     if (!isAdmin || !app?.loadStatus) return;
     let alive = true;
-    app
-      .loadStatus()
-      .then((next) => alive && setInfo(next))
-      .catch(() => undefined);
+    const refresh = () =>
+      app
+        .loadStatus?.()
+        .then((next) => alive && setInfo(next))
+        .catch(() => undefined);
+    void refresh();
+    window.addEventListener(APP_STATUS_EVENT, refresh);
     return () => {
       alive = false;
+      window.removeEventListener(APP_STATUS_EVENT, refresh);
     };
   }, [app, isAdmin]);
 
@@ -204,7 +237,9 @@ export function AppDetailPage() {
           <AppLogo app={app} size="lg" />
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-3xl font-bold tracking-tight text-white">{app.name}</h1>
+              <h1 className="text-3xl font-bold tracking-tight text-white">
+                {app.name}
+              </h1>
               {info && (
                 <span
                   className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium ${STATUS_PILL[info.status]}`}
@@ -240,4 +275,3 @@ export function LegacyIntegrationsRedirect() {
   const fallback = user?.role === "admin" ? "/ai" : "/apps";
   return <Navigate to={(tab && LEGACY_TABS[tab]) || fallback} replace />;
 }
-

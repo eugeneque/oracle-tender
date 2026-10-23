@@ -18,6 +18,7 @@ from app.models.ai_profile import AiProfileScore, Verdict
 from app.models.notification import Notification, NotificationStatus, NotificationTrigger
 from app.models.source import Source
 from app.models.tender import Tender
+from app.models.user import User
 from app.schemas.notification import NotificationSettingsUpdate
 from app.services import notification_service
 
@@ -102,7 +103,7 @@ def test_unconfigured_channel_still_records_the_event(db_session, monkeypatch):
 
     assert entry is not None
     assert entry.status == NotificationStatus.SKIPPED.value
-    assert "выключены" in (entry.error or "")
+    assert "выключена" in (entry.error or "")
 
 
 def test_failed_send_is_recorded_but_does_not_raise(db_session, monkeypatch):
@@ -463,3 +464,31 @@ def test_deadline_check_writes_nothing_while_channel_is_unconfigured(db_session,
     _tender(db_session, application_end=datetime.now(timezone.utc) + timedelta(days=2))
 
     assert notification_service.notify_deadlines_soon(db_session) == []
+
+
+def test_test_letter_ignores_disabled_flag_and_uses_login_as_sender(db_session, monkeypatch):
+    """Проверочное письмо (24.10.2026) уходит и при снятом «рассылка включена», а пустой
+    адрес отправителя заменяется логином ящика — оба случая раньше давали отказ."""
+
+    settings = notification_service.get_or_create(db_session)
+    settings.is_enabled = False
+    settings.smtp_host = "smtp.example.test"
+    settings.smtp_username = "noreply@example.test"
+    settings.from_address = None
+    settings.admin_recipients = "admin@example.test"
+    db_session.flush()
+
+    sent: list[str] = []
+    monkeypatch.setattr(
+        notification_service,
+        "_send_email",
+        lambda s, recipients, *a, **k: sent.append(notification_service.sender_address(s)),
+    )
+    actor = User(username="mail-admin", password_hash="x", full_name="Админ", role="admin")
+    db_session.add(actor)
+    db_session.flush()
+
+    entry = notification_service.send_test_notification(db_session, actor=actor)
+
+    assert entry.status == NotificationStatus.SENT.value
+    assert sent == ["noreply@example.test"]

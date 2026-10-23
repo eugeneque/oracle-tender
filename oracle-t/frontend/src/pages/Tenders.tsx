@@ -340,7 +340,7 @@ function ResourcesModal({
           </button>
           <button
             onClick={() => onSave(Array.from(selected))}
-            className="rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-2 text-sm font-medium text-snow hover:opacity-90"
+            className="rounded-lg bg-gradient-to-r from-indigo-500 to-indigo-400 px-3.5 py-2 text-sm font-medium text-snow hover:opacity-90"
           >
             Сохранить
           </button>

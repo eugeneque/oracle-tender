@@ -88,12 +88,118 @@ function formatQuantity(position: TenderPosition): string {
   return Number.isFinite(value) ? value.toLocaleString("ru-RU", { maximumFractionDigits: 3 }) : String(position.quantity);
 }
 
+/** Итог количества по единицам измерения: «1 200 шт.», «15 компл.». Складываются только
+ * числовые количества и только в одной единице — «шт.» с «компл.» не суммируются. Позиции
+ * «по заявкам» в итог не входят, их число отдаётся отдельно (`textual`). */
+function quantityTotals(positions: TenderPosition[]): {
+  totals: { unit: string; value: number }[];
+  textual: number;
+} {
+  const byUnit = new Map<string, { unit: string; value: number }>();
+  let textual = 0;
+  for (const position of positions) {
+    const value = position.quantity === null || position.quantity === undefined ? NaN : Number(position.quantity);
+    if (!Number.isFinite(value)) {
+      if (position.quantity_text) textual += 1;
+      continue;
+    }
+    const unit = (position.unit ?? "").trim() || "ед.";
+    const key = unit.toLowerCase().replace(/\.$/, "");
+    const entry = byUnit.get(key) ?? { unit, value: 0 };
+    entry.value += value;
+    byUnit.set(key, entry);
+  }
+  return { totals: [...byUnit.values()].sort((a, b) => b.value - a.value), textual };
+}
+
+function formatTotal({ unit, value }: { unit: string; value: number }): string {
+  return `${value.toLocaleString("ru-RU", { maximumFractionDigits: 3 })} ${unit}`;
+}
+
+/** Сводка «Что закупается» на вкладке «Основное» (24.10.2026). Замечание тендерного отдела:
+ * «анализ не сообщает, сколько приборов нужно» — таблица позиций была, но на вкладке
+ * «Требования», куда при решении об участии заглядывают не первым делом. Здесь — итог
+ * количества и первые позиции; полная таблица — по ссылке. */
+export function PositionsSummary({
+  positions,
+  analyzed,
+  onShowAll,
+}: {
+  positions: TenderPosition[] | null;
+  /** Документация уже разбиралась — тогда пустой перечень значит «не нашли», а не «не искали». */
+  analyzed: boolean;
+  onShowAll: () => void;
+}) {
+  if (positions === null) return null;
+  if (positions.length === 0) {
+    if (!analyzed) return null;
+    return (
+      <div className="rounded-xl border border-dashed border-white/10 px-4 py-3 text-xs text-zinc-500">
+        <span className="text-zinc-400">Количество приборов не найдено.</span> В документации не нашлась
+        таблица спецификации, или закупку разбирали до 23.10.2026 — запустите «Разобрать закупку» заново.
+      </div>
+    );
+  }
+  const { totals, textual } = quantityTotals(positions);
+  const shown = positions.slice(0, 5);
+  return (
+    <section className="rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-3">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <h3 className="text-[13px] font-semibold text-zinc-200">Что закупается</h3>
+        {totals.length > 0 && (
+          <span className="text-lg font-semibold tabular-nums text-zinc-100">
+            {totals.map(formatTotal).join(" · ")}
+          </span>
+        )}
+        <span className="text-xs text-zinc-500">
+          {positions.length} {positions.length % 10 === 1 && positions.length % 100 !== 11 ? "позиция" : [2, 3, 4].includes(positions.length % 10) && ![12, 13, 14].includes(positions.length % 100) ? "позиции" : "позиций"}
+          {textual > 0 && ` · ${textual} без числа (по заявкам)`}
+        </span>
+      </div>
+      <ul className="mt-2 space-y-1 text-sm">
+        {shown.map((position) => (
+          <li key={position.id} className="flex gap-3">
+            <span className="min-w-0 flex-1 truncate text-zinc-300" title={position.name}>
+              {position.position_no ? <span className="tabular-nums text-zinc-500">{position.position_no}. </span> : null}
+              {position.name}
+            </span>
+            <span className="shrink-0 tabular-nums text-zinc-100">
+              {formatQuantity(position)}
+              {position.unit && position.quantity !== null ? <span className="text-zinc-500"> {position.unit}</span> : null}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <button
+        type="button"
+        onClick={onShowAll}
+        className="mt-2 text-xs font-medium text-indigo-300 hover:text-indigo-200"
+      >
+        {positions.length > shown.length ? `Все позиции (${positions.length}) →` : "Таблица позиций →"}
+      </button>
+    </section>
+  );
+}
+
+/** Позиции не найдены, а требования есть — значит документация разобрана, и пустота
+ * таблицы что-то значит. Раньше таблица просто не показывалась, и тендерщики решали, что
+ * количества система не извлекает вовсе (24.10.2026). */
+function PositionsMissing() {
+  return (
+    <div className="rounded-xl border border-dashed border-white/10 px-4 py-3 text-xs text-zinc-500">
+      <span className="text-zinc-400">Позиции закупки и количество не найдены.</span> В документации не нашлась
+      таблица спецификации, или закупку разбирали до 23.10.2026 — запустите «Разобрать закупку» заново.
+    </div>
+  );
+}
+
 /** Позиции закупки (23.10.2026) — таблица спецификации заказчика: что и сколько закупается.
  * Тендерный отдел смотрит её первой; она же уходит в Bitrix24 строками позиций. Колонка лота —
  * только когда лотов несколько. */
 function PositionsTable({ positions }: { positions: TenderPosition[] }) {
   if (positions.length === 0) return null;
   const lots = new Set(positions.map((item) => item.lot_number));
+  const { totals } = quantityTotals(positions);
   return (
     <section>
       <div className="mb-2 flex items-baseline gap-2 px-1">
@@ -127,6 +233,18 @@ function PositionsTable({ positions }: { positions: TenderPosition[] }) {
               </tr>
             ))}
           </tbody>
+          {totals.length > 0 && positions.length > 1 && (
+            <tfoot>
+              <tr className="border-t border-white/[0.08]">
+                <td colSpan={lots.size > 1 ? 3 : 2} className="px-4 py-2 text-xs font-medium text-zinc-400">
+                  Итого
+                </td>
+                <td colSpan={2} className="px-4 py-2 text-right font-semibold tabular-nums text-zinc-100">
+                  {totals.map(formatTotal).join(" · ")}
+                </td>
+              </tr>
+            </tfoot>
+          )}
         </table>
       </div>
     </section>
@@ -282,7 +400,7 @@ export function TenderRequirementsTab({
         </span>
       </div>
 
-      <PositionsTable positions={positions} />
+      {positions.length > 0 ? <PositionsTable positions={positions} /> : <PositionsMissing />}
 
       <PositionsLegend requirements={requirements} />
 

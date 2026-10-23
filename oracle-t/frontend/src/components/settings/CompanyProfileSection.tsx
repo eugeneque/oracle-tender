@@ -1,16 +1,14 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import {
-  Briefcase,
   ChevronDown,
-  ChevronRight,
-  FileText,
-  Globe,
+  ExternalLink,
   Loader2,
+  MoreHorizontal,
   Pencil,
   Plus,
   RefreshCw,
   Search,
-  ShieldCheck,
   Star,
   Trash2,
   X,
@@ -26,7 +24,11 @@ import type {
   RusprofileDossier,
   RusprofileSyncResult,
 } from "../../api/types";
+import { DropdownMenu } from "../DropdownMenu";
+import { SegmentedControl } from "../ui/SegmentedControl";
+import { Tooltip } from "../ui/Tooltip";
 import { formatDateTime, plural } from "../../utils/format";
+import { SettingsNotice } from "./ui";
 
 /**
  * Профили компаний (раздел 5.6 «Моя компания», раздел 7 ТЗ).
@@ -36,33 +38,36 @@ import { formatDateTime, plural } from "../../utils/format";
  * допусками, стажем и выполненными проектами. Пока раздел пуст, оценка не считается вовсе,
  * и карточка тендера прямо об этом говорит.
  *
- * Компаний с 07.09.2026 может быть несколько, ограничения на количество нет: работа с
- * закупками идёт от разных юрлиц, и разложить участие по ним без отдельных карточек нельзя.
- * Одна компания помечена основной — с ней и считается оценка, по её ИНН синхронизируется
- * история участий. Остальные пока только хранятся: аналитика по юрлицам появится позже, но
- * данные для неё копятся с этого момента.
+ * Компаний с 07.09.2026 может быть несколько, ограничения на количество нет. Одна помечена
+ * основной — с ней и считается оценка, по её ИНН синхронизируется история участий. Остальные
+ * пока только копят данные для будущей аналитики по юрлицам.
  *
- * Список — свёрнутые строки, правка — модальное окно. Форма профиля длинная (реквизиты,
- * стаж, допуски, проекты), и держать её раскрытой для каждой компании значило бы прятать сам
- * список за экранами полей.
+ * Редизайн 24.10.2026 (замечание заказчика: «слишком цветасто, много текста, всё в куче»).
+ * Было: у каждой компании пять цветных плиток цифр и четыре блока в своих оттенках, открытых
+ * разом, плюс абзацы пояснений над и под каждым. Стало — как в остальном приложении:
+ * монохромные карточки с hairline-рамкой, один акцент. Основная компания раскрыта сразу —
+ * ряд ключевых цифр и вкладки «Реквизиты / Допуски / Проекты / Досье», в каждый момент виден
+ * один блок. Прочие компании — свёрнутые строки, редкие действия (сделать основной, удалить)
+ * убраны в меню «⋯». Пояснения, нужные не всем и не всегда, ушли в подсказки по наведению.
  *
  * Юридические данные ищутся автопоиском, но **не сохраняются сами**: найденное подставляется
  * в поля, а записывает его человек кнопкой «Сохранить». Профиль подаётся в обоснования
  * AI-оценки, и непроверенный результат внешнего сервиса там неотличим от подтверждённого
- * факта.
+ * факта. Ссылка на карточку rusprofile.ru разбирается напрямую (единственный путь, дающий
+ * КПП), всё остальное — ИНН, ОГРН, название — уходит в ЕГРЮЛ.
  *
- * Источников автопоиска два, и выбираются они по виду запроса: ссылка на карточку
- * rusprofile.ru разбирается напрямую (единственный путь, дающий КПП, — в выдаче ЕГРЮЛ его
- * нет), всё остальное — ИНН, ОГРН, название — уходит в ЕГРЮЛ как в первоисточник.
- *
- * С 18.09.2026 есть и третий путь — «Обновить из rusprofile»: под учётной записью из
- * «Интеграций» сайт отдаёт карточку целиком, и допуски, реализованные проекты (из
- * выигранных закупок) и историю участий заполняет синхронизация, а не человек. Она
- * заполняет только пустые и свои же поля: подтверждённое человеком и ручные записи остаются.
+ * «Обновить из rusprofile» (с 18.09.2026) под учётной записью из «Приложений» заполняет
+ * допуски, реализованные проекты и историю участий; трогает только пустые и свои же поля.
  */
 
 const inputClass =
-  "mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none";
+  "mt-1.5 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none disabled:opacity-60";
+
+const primaryButton =
+  "flex items-center gap-2 rounded-lg bg-indigo-500 px-3.5 py-2 text-sm font-medium text-snow hover:bg-indigo-400 disabled:opacity-50";
+
+const secondaryButton =
+  "flex items-center gap-2 rounded-lg border border-white/10 px-3.5 py-2 text-sm text-zinc-300 transition-colors hover:bg-white/5 hover:text-zinc-100 disabled:opacity-50";
 
 export function CompanyProfilesPanel({
   isAdmin,
@@ -79,15 +84,15 @@ export function CompanyProfilesPanel({
 }) {
   const [profiles, setProfiles] = useState<CompanyProfile[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  // Раскрытые неосновные компании; основная раскрыта всегда.
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  // null — модалка закрыта, undefined-профиль внутри — режим добавления новой компании.
+  // null — модалка закрыта, null-профиль внутри — режим добавления новой компании.
   const [editing, setEditing] = useState<{ profile: CompanyProfile | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  // Подтверждение удаления живёт в самой строке, а не в системном `confirm`: карточка
-  // компании — не мелочь, которую сносят не глядя, а спрашивать о ней окном браузера поверх
-  // тёмного интерфейса значит выдёргивать человека из страницы.
+  // Подтверждение удаления живёт в самой карточке, а не в системном `confirm`: спрашивать
+  // окном браузера поверх тёмного интерфейса значит выдёргивать человека из страницы.
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
 
   const publish = (list: CompanyProfile[]) => {
@@ -118,8 +123,7 @@ export function CompanyProfilesPanel({
       await api.post<CompanyProfile>(`/company-profiles/${profile.id}/primary`);
       await load();
       setNotice(
-        `Основная компания — «${companyTitle(profile)}». Уже посчитанные оценки не ` +
-          "пересчитываются: каждая хранит снимок профиля и остаётся объяснимой.",
+        `Основная компания — «${companyShortTitle(profile)}». Уже посчитанные оценки не пересчитываются.`,
       );
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Не удалось сменить основную компанию");
@@ -137,12 +141,10 @@ export function CompanyProfilesPanel({
         `/company-profiles/${profile.id}/rusprofile-sync`,
       );
       await load();
-      setExpandedId(profile.id);
+      if (!profile.is_primary) setExpandedId(profile.id);
       setNotice(
         `Обновлено из rusprofile. ${result.message}` +
-          (result.data_hidden
-            ? " Проверьте подписку учётной записи: часть данных на сайте скрыта."
-            : ""),
+          (result.data_hidden ? " Часть данных на сайте скрыта — проверьте подписку." : ""),
       );
       if (profile.is_primary) onRusprofileSynced?.();
     } catch (err) {
@@ -169,73 +171,107 @@ export function CompanyProfilesPanel({
     }
   };
 
-  return (
-    <div>
-      {error && (
-        <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
-          {error}
-        </div>
-      )}
-      {notice && (
-        <div className="mb-4 rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-4 py-2.5 text-sm text-indigo-300">
-          {notice}
-        </div>
-      )}
+  const primary = profiles.find((item) => item.is_primary) ?? null;
+  const others = profiles.filter((item) => !item.is_primary);
 
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <p className="text-[11px] leading-relaxed text-zinc-600">
-          Компаний может быть сколько угодно. Оценку тендеров и историю участий питает
-          основная — остальные карточки копят данные для аналитики по юрлицам.
-        </p>
-        {isAdmin && (
-          <button
-            onClick={() => setEditing({ profile: null })}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-1.5 text-xs font-medium text-snow hover:opacity-90"
-          >
-            <Plus size={13} />
-            Добавить компанию
-          </button>
-        )}
-      </div>
+  const cardProps = (profile: CompanyProfile) => ({
+    profile,
+    isAdmin,
+    isBusy: busyId === profile.id,
+    isConfirmingDelete: confirmingId === profile.id,
+    onEdit: () => setEditing({ profile }),
+    onSyncRusprofile: () => void syncRusprofile(profile),
+    onMakePrimary: () => void makePrimary(profile),
+    onAskDelete: () => setConfirmingId(profile.id),
+    onCancelDelete: () => setConfirmingId(null),
+    onConfirmDelete: () => void remove(profile),
+  });
+
+  return (
+    <div className="space-y-8">
+      {(error || notice) && (
+        <div className="space-y-2">
+          {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
+          {notice && <SettingsNotice tone="success">{notice}</SettingsNotice>}
+        </div>
+      )}
 
       {isLoading ? (
-        <div className="flex items-center gap-2 py-6 text-xs text-zinc-500">
-          <Loader2 size={14} className="animate-spin" />
+        <div className="flex items-center gap-2 py-10 text-sm text-zinc-500">
+          <Loader2 size={15} className="animate-spin" />
           Загружаем компании…
         </div>
       ) : profiles.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-white/10 px-4 py-8 text-center text-xs text-zinc-600">
-          Компаний пока нет. Без профиля не считаются измерения «Задача» и «Компетенции» —
-          {isAdmin ? " добавьте первую компанию." : " попросите администратора завести профиль."}
+        <div className="rounded-2xl border border-dashed border-white/[0.1] px-6 py-14 text-center">
+          <p className="text-sm text-zinc-300">Компаний пока нет</p>
+          <p className="mt-1 text-sm text-zinc-500">
+            Без профиля AI-оценка не считает «Задачу» и «Компетенции».
+          </p>
+          {isAdmin && (
+            <button
+              onClick={() => setEditing({ profile: null })}
+              className={`${primaryButton} mx-auto mt-5`}
+            >
+              <Plus size={15} />
+              Добавить компанию
+            </button>
+          )}
         </div>
       ) : (
-        <div className="space-y-4">
-          {profiles.map((profile) => (
-            <CompanyRow
-              key={profile.id}
-              profile={profile}
-              isAdmin={isAdmin}
-              isExpanded={expandedId === profile.id}
-              isBusy={busyId === profile.id}
-              isConfirmingDelete={confirmingId === profile.id}
-              onToggle={() =>
-                setExpandedId((prev) => (prev === profile.id ? null : profile.id))
-              }
-              onEdit={() => setEditing({ profile })}
-              onSyncRusprofile={() => void syncRusprofile(profile)}
-              onMakePrimary={() => void makePrimary(profile)}
-              onAskDelete={() => setConfirmingId(profile.id)}
-              onCancelDelete={() => setConfirmingId(null)}
-              onConfirmDelete={() => void remove(profile)}
-            />
-          ))}
-        </div>
-      )}
+        <>
+          {primary && <CompanyCard {...cardProps(primary)} isExpanded />}
 
-      {!isAdmin && profiles.length > 0 && (
-        <p className="mt-3 text-[11px] text-zinc-600">
-          Компании правит администратор: они влияют на оценку всех тендеров сразу.
-        </p>
+          {(others.length > 0 || isAdmin) && (
+            <section>
+              <div className="mb-3 flex items-end justify-between gap-3 px-1">
+                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400">
+                  Другие компании
+                  {others.length > 0 && (
+                    <span className="font-normal tabular-nums text-zinc-600">{others.length}</span>
+                  )}
+                  <Tooltip content="Оценку тендеров и историю участий считает основная компания. Остальные копят данные для аналитики по юрлицам.">
+                    <span className="cursor-help font-normal normal-case tracking-normal text-zinc-600">
+                      ?
+                    </span>
+                  </Tooltip>
+                </div>
+                {isAdmin && (
+                  <button
+                    onClick={() => setEditing({ profile: null })}
+                    className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-100"
+                  >
+                    <Plus size={15} />
+                    Добавить
+                  </button>
+                )}
+              </div>
+              {others.length === 0 ? (
+                <p className="rounded-2xl border border-dashed border-white/[0.08] px-5 py-6 text-center text-sm text-zinc-600">
+                  Других компаний нет
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {others.map((profile) => (
+                    <CompanyCard
+                      key={profile.id}
+                      {...cardProps(profile)}
+                      isExpanded={expandedId === profile.id}
+                      onToggle={() =>
+                        setExpandedId((prev) => (prev === profile.id ? null : profile.id))
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {!isAdmin && (
+            <p className="px-1 text-xs text-zinc-600">
+              Компании правит администратор — они влияют на оценку всех тендеров.
+            </p>
+          )}
+        </>
       )}
 
       {editing && (
@@ -245,12 +281,11 @@ export function CompanyProfilesPanel({
           onClose={() => setEditing(null)}
           onSaved={(saved) => {
             setEditing(null);
-            setExpandedId(saved.id);
+            if (!saved.is_primary) setExpandedId(saved.id);
             setNotice(
               saved.is_filled
-                ? `Компания «${companyTitle(saved)}» сохранена.`
-                : `Компания «${companyTitle(saved)}» сохранена, но профиль пуст: без стажа, ` +
-                    "допусков и проектов оценка по ней не считается.",
+                ? `Компания «${companyShortTitle(saved)}» сохранена.`
+                : `Компания «${companyShortTitle(saved)}» сохранена. Без стажа, допусков и проектов оценка по ней не считается.`,
             );
             void load();
           }}
@@ -279,14 +314,21 @@ function companyInitial(profile: CompanyProfile): string {
   return (word ?? short).charAt(0).toUpperCase() || "К";
 }
 
+function stripRub(value: string): string {
+  return value.replace(/\s*руб\.?$/, "");
+}
+
+function formatRuDate(value: string | null): string | null {
+  return value ? new Date(value).toLocaleDateString("ru-RU") : null;
+}
+
+type DetailTab = "requisites" | "licenses" | "projects" | "dossier";
+
 /**
- * Одна компания — отдельная карточка. Свёрнутая показывает шапку и ряд ключевых цифр (стаж,
- * допуски, проекты, история, выручка), раскрытая — четыре самостоятельных блока, каждый в
- * своём оттенке: реквизиты, допуски, проекты и досье с сайта. Так видно, что реально уходит
- * в AI-оценку, без открытия формы; блоки различимы с первого взгляда, а не сливаются в один
- * список «ключ — значение».
+ * Карточка компании: шапка (имя, ИНН, состояние, действия), под ней в раскрытом виде — ряд
+ * ключевых цифр и вкладки с данными, которые уходят в AI-оценку.
  */
-function CompanyRow({
+function CompanyCard({
   profile,
   isAdmin,
   isExpanded,
@@ -305,7 +347,8 @@ function CompanyRow({
   isExpanded: boolean;
   isBusy: boolean;
   isConfirmingDelete: boolean;
-  onToggle: () => void;
+  /** Нет у основной — она раскрыта всегда. */
+  onToggle?: () => void;
   onEdit: () => void;
   onSyncRusprofile: () => void;
   onMakePrimary: () => void;
@@ -313,468 +356,402 @@ function CompanyRow({
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
 }) {
+  const [tab, setTab] = useState<DetailTab>("requisites");
   const dossier = profile.rusprofile_data;
-  const purchases = dossier?.purchases;
-  const finance = dossier?.finance ?? {};
   const canSync = Boolean(profile.inn || profile.rusprofile_card_id);
+  const isPrimary = profile.is_primary;
+
+  const subtitle = [
+    profile.inn ? `ИНН ${profile.inn}` : "ИНН не указан",
+    profile.kpp ? `КПП ${profile.kpp}` : null,
+    dossier?.status ?? null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const syncHint = canSync
+    ? profile.rusprofile_synced_at
+      ? `Последнее обновление: ${formatDateTime(profile.rusprofile_synced_at)}`
+      : "Заполнить допуски, проекты и историю участий с rusprofile.ru"
+    : "Укажите ИНН — по нему компания ищется на rusprofile.ru";
+
+  // У основной компании обновление и правка — кнопки на виду; у прочих всё в меню «⋯»,
+  // иначе список одинаковых строк превращается в столбец одинаковых кнопок.
+  const menuItems = [
+    ...(!isPrimary
+      ? [
+          {
+            key: "sync",
+            label: "Обновить из rusprofile",
+            icon: <RefreshCw size={15} />,
+            hint: syncHint,
+            disabled: isBusy || !canSync,
+            onSelect: onSyncRusprofile,
+          },
+          { key: "edit", label: "Изменить", icon: <Pencil size={15} />, onSelect: onEdit },
+          {
+            key: "primary",
+            label: "Сделать основной",
+            icon: <Star size={15} />,
+            hint: "С неё будет считаться AI-оценка",
+            disabled: isBusy,
+            onSelect: onMakePrimary,
+          },
+          {
+            key: "delete",
+            label: "Удалить",
+            icon: <Trash2 size={15} />,
+            disabled: isBusy,
+            onSelect: onAskDelete,
+          },
+        ]
+      : []),
+  ];
+
+  const heading = (
+    <span className="flex min-w-0 flex-1 items-center gap-4 text-left">
+      <span
+        className={`flex shrink-0 items-center justify-center rounded-xl font-semibold ${
+          isPrimary
+            ? "h-12 w-12 bg-white/[0.08] text-lg text-zinc-100"
+            : "h-10 w-10 bg-white/[0.05] text-base text-zinc-400"
+        }`}
+      >
+        {companyInitial(profile)}
+      </span>
+      <span className="min-w-0">
+        <span className="flex flex-wrap items-center gap-2">
+          <span
+            className={`truncate font-semibold text-zinc-100 ${isPrimary ? "text-lg" : "text-[15px]"}`}
+          >
+            {companyShortTitle(profile)}
+          </span>
+          {isPrimary && (
+            <span className="rounded-full bg-white/[0.06] px-2.5 py-0.5 text-xs text-zinc-300">
+              Основная
+            </span>
+          )}
+          {!profile.is_filled && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-zinc-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+              Не заполнен
+            </span>
+          )}
+        </span>
+        <span className="mt-0.5 block truncate text-sm text-zinc-500">{subtitle}</span>
+      </span>
+    </span>
+  );
 
   return (
-    <div
-      className={`relative overflow-hidden rounded-2xl border ${
-        profile.is_primary
-          ? "border-indigo-500/30 bg-gradient-to-br from-indigo-500/[0.08] via-white/[0.03] to-transparent shadow-[0_0_60px_-20px_rgba(99,102,241,0.45)]"
-          : "border-white/[0.08] bg-gradient-to-br from-white/[0.04] to-transparent"
-      }`}
-    >
-      {profile.is_primary && (
-        <div
-          aria-hidden
-          className="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-indigo-500/20 blur-3xl"
-        />
-      )}
-
-      {/* Шапка */}
-      <div className="relative flex flex-wrap items-center gap-3 px-5 py-4">
-        <button
-          onClick={onToggle}
-          className="flex min-w-0 flex-1 items-center gap-3.5 text-left"
-          title={isExpanded ? "Свернуть" : "Развернуть"}
-        >
-          <span
-            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-base font-semibold ${
-              profile.is_primary
-                ? "bg-gradient-to-br from-indigo-500 to-violet-600 text-snow shadow-lg shadow-indigo-500/30"
-                : "bg-white/[0.06] text-zinc-300"
-            }`}
+    <section className="overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03]">
+      <header className={`flex flex-wrap items-center gap-3 px-5 ${isPrimary ? "py-5" : "py-4"}`}>
+        {onToggle ? (
+          <button
+            onClick={onToggle}
+            className="flex min-w-0 flex-1 items-center gap-3"
+            aria-expanded={isExpanded}
           >
-            {companyInitial(profile)}
-          </span>
-          <span className="min-w-0">
-            <span className="flex items-center gap-2">
-              <span className="truncate text-[15px] font-semibold text-zinc-100">
-                {companyShortTitle(profile)}
-              </span>
-              <span className="text-zinc-600">
-                {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              </span>
-            </span>
-            <span className="block truncate text-[11px] text-zinc-500">
-              {[
-                profile.inn ? `ИНН ${profile.inn}` : "ИНН не указан",
-                profile.kpp ? `КПП ${profile.kpp}` : null,
-                dossier?.status ?? null,
-                profile.rusprofile_synced_at
-                  ? `rusprofile · ${formatDateTime(profile.rusprofile_synced_at)}`
-                  : null,
-              ]
-                .filter(Boolean)
-                .join(" · ")}
-            </span>
-          </span>
-        </button>
+            {heading}
+            <ChevronDown
+              size={16}
+              className={`shrink-0 text-zinc-600 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+            />
+          </button>
+        ) : (
+          heading
+        )}
 
         {isConfirmingDelete ? (
-          <div className="flex shrink-0 items-center gap-2 text-[11px] text-zinc-400">
+          <div className="flex shrink-0 items-center gap-2 text-sm text-zinc-400">
             Удалить компанию?
             <button
               onClick={onConfirmDelete}
-              className="rounded-lg border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-red-300 hover:bg-red-500/20"
+              className="rounded-lg bg-red-500/15 px-3 py-1.5 text-red-300 hover:bg-red-500/25"
             >
               Удалить
             </button>
-            <button
-              onClick={onCancelDelete}
-              className="rounded-lg border border-white/10 px-2.5 py-1 text-zinc-300 hover:bg-white/5"
-            >
+            <button onClick={onCancelDelete} className={`${secondaryButton} !py-1.5`}>
               Отмена
             </button>
           </div>
         ) : (
-          <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-            {profile.is_primary && (
-              <span className="rounded-full border border-indigo-400/30 bg-indigo-500/15 px-2.5 py-0.5 text-[11px] font-medium text-indigo-200">
-                основная
-              </span>
-            )}
-            {!profile.is_filled && (
-              <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] text-amber-300">
-                не заполнен
-              </span>
-            )}
-            {isBusy && <Loader2 size={13} className="animate-spin text-zinc-500" />}
-            {isAdmin && (
-              <button
-                onClick={onSyncRusprofile}
-                disabled={isBusy || !canSync}
-                className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-[11px] text-zinc-300 hover:border-indigo-400/40 hover:text-indigo-200 disabled:opacity-50"
-                title={
-                  canSync
-                    ? "Заполнить реквизиты, допуски, проекты и историю участий с rusprofile.ru"
-                    : "Укажите ИНН — по нему компания ищется на rusprofile.ru"
-                }
-              >
-                <RefreshCw size={12} className={isBusy ? "animate-spin" : ""} />
-                Обновить из rusprofile
-              </button>
-            )}
-            {isAdmin && !profile.is_primary && (
-              <button
-                onClick={onMakePrimary}
-                disabled={isBusy}
-                className="rounded-full border border-white/10 p-1.5 text-zinc-500 hover:bg-white/5 hover:text-indigo-300 disabled:opacity-50"
-                title="Сделать основной — с неё будет считаться AI-оценка"
-              >
-                <Star size={13} />
-              </button>
-            )}
-            {isAdmin && (
-              <button
-                onClick={onEdit}
-                className="rounded-full border border-white/10 p-1.5 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
-                title="Изменить"
-              >
-                <Pencil size={13} />
-              </button>
-            )}
-            {isAdmin && !profile.is_primary && (
-              <button
-                onClick={onAskDelete}
-                disabled={isBusy}
-                className="rounded-full border border-white/10 p-1.5 text-zinc-500 hover:bg-white/5 hover:text-red-400 disabled:opacity-50"
-                title="Удалить"
-              >
-                <Trash2 size={13} />
-              </button>
-            )}
-          </div>
+          isAdmin && (
+            <div className="flex shrink-0 items-center gap-1.5">
+              {isBusy && !isPrimary && <Loader2 size={15} className="animate-spin text-zinc-500" />}
+              {isPrimary && (
+                <>
+                  <Tooltip content={syncHint}>
+                    <button
+                      onClick={onSyncRusprofile}
+                      disabled={isBusy || !canSync}
+                      className={secondaryButton}
+                    >
+                      <RefreshCw size={14} className={isBusy ? "animate-spin" : ""} />
+                      <span className="hidden sm:inline">Обновить из rusprofile</span>
+                    </button>
+                  </Tooltip>
+                  <button onClick={onEdit} className={secondaryButton}>
+                    <Pencil size={14} />
+                    <span className="hidden sm:inline">Изменить</span>
+                  </button>
+                </>
+              )}
+              {menuItems.length > 0 && (
+                <DropdownMenu
+                  trigger={<MoreHorizontal size={16} />}
+                  title="Ещё"
+                  items={menuItems}
+                />
+              )}
+            </div>
+          )
         )}
-      </div>
-
-      {/* Ключевые цифры — видны и в свёрнутом состоянии */}
-      <div className="relative grid grid-cols-2 gap-2 px-5 pb-4 sm:grid-cols-3 lg:grid-cols-5">
-        <Kpi
-          label="Стаж"
-          value={profile.years_of_experience ? String(profile.years_of_experience) : "—"}
-          unit={profile.years_of_experience ? plural(profile.years_of_experience, "год", "года", "лет") : undefined}
-          hint={
-            profile.registration_date
-              ? `с ${new Date(profile.registration_date).toLocaleDateString("ru-RU")}`
-              : "дата регистрации не указана"
-          }
-        />
-        <Kpi
-          label="Допуски"
-          value={String(profile.licenses.length)}
-          hint={profile.licenses.length ? "лицензии и сертификаты" : "не указаны"}
-          tone={profile.licenses.length ? "emerald" : undefined}
-        />
-        <Kpi
-          label="Проекты"
-          value={String(profile.past_projects.length)}
-          hint={profile.past_projects.length ? "реализованных" : "не указаны"}
-          tone={profile.past_projects.length ? "amber" : undefined}
-        />
-        <Kpi
-          label="Госзакупки"
-          value={purchases ? `${purchases.wins}` : "—"}
-          unit={purchases ? `побед · ${purchases.losses} проигр.` : undefined}
-          hint={
-            purchases
-              ? `${purchases.fetched} ${plural(purchases.fetched, "закупка", "закупки", "закупок")} на rusprofile`
-              : "обновите из rusprofile"
-          }
-          tone={purchases ? "sky" : undefined}
-        />
-        <Kpi
-          label={`Выручка${finance.year ? ` ${finance.year}` : ""}`}
-          value={finance.revenue ? finance.revenue.replace(/\s*руб\.?$/, "") : "—"}
-          unit={finance.revenue ? "руб." : undefined}
-          hint={finance.revenue_change ? `${finance.revenue_change} к прошлому году` : "нет данных"}
-          tone={finance.revenue ? "violet" : undefined}
-        />
-      </div>
+      </header>
 
       {isExpanded && (
-        <div className="relative grid gap-3 border-t border-white/[0.06] bg-black/20 px-5 py-4 lg:grid-cols-2">
-          <SectionCard tone="indigo" icon={<FileText size={13} />} title="Реквизиты">
-            <dl className="grid gap-x-6 gap-y-2.5 text-xs sm:grid-cols-2">
-              <div className="sm:col-span-2">
-                <Detail label="Юридическое наименование" value={profile.legal_name} />
+        <>
+          <KeyFigures profile={profile} />
+          <div className="border-t border-white/[0.06] px-5 pb-5 pt-4">
+            <div className="mb-4 overflow-x-auto">
+              <div className="inline-flex">
+                <SegmentedControl<DetailTab>
+                  value={tab}
+                  onChange={setTab}
+                  size="sm"
+                  ariaLabel="Данные компании"
+                  segments={[
+                    { value: "requisites", label: "Реквизиты" },
+                    { value: "licenses", label: <TabLabel text="Допуски" count={profile.licenses.length} /> },
+                    { value: "projects", label: <TabLabel text="Проекты" count={profile.past_projects.length} /> },
+                    { value: "dossier", label: "Досье" },
+                  ]}
+                />
               </div>
-              <Detail label="ИНН" value={profile.inn} mono />
-              <Detail label="КПП" value={profile.kpp} mono />
-              <Detail label="ОГРН" value={profile.ogrn} mono />
-              <Detail
-                label="Дата регистрации"
-                value={
-                  profile.registration_date
-                    ? new Date(profile.registration_date).toLocaleDateString("ru-RU")
-                    : null
-                }
-              />
-              <div className="sm:col-span-2">
-                <Detail label="Юридический адрес" value={profile.legal_address} />
-              </div>
-              {dossier?.codes && Object.keys(dossier.codes).length > 0 && (
-                <div className="sm:col-span-2">
-                  <dt className="text-[11px] text-zinc-500">Коды статистики</dt>
-                  <dd className="mt-1 flex flex-wrap gap-1.5">
-                    {Object.entries(dossier.codes).map(([key, value]) => (
-                      <span
-                        key={key}
-                        className="rounded-md border border-white/[0.08] bg-black/30 px-2 py-0.5 font-mono text-[10px] text-zinc-400"
-                      >
-                        {key.toUpperCase()} {value}
-                      </span>
-                    ))}
-                  </dd>
-                </div>
-              )}
-            </dl>
-          </SectionCard>
-
-          <SectionCard
-            tone="emerald"
-            icon={<ShieldCheck size={13} />}
-            title="Допуски и лицензии"
-            count={profile.licenses.length}
-          >
-            {profile.licenses.length === 0 ? (
-              <EmptyNote>
-                Не указаны — «Компетенции» посчитают, что формальных подтверждений нет.
-              </EmptyNote>
-            ) : (
-              <ul className="space-y-1.5">
-                {profile.licenses.map((license, index) => (
-                  <li
-                    key={index}
-                    className="rounded-lg border border-white/[0.06] bg-black/25 px-3 py-2 text-xs"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="line-clamp-2 text-zinc-200">{license.name}</span>
-                      {license.source === "rusprofile" && <SourceMark />}
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-zinc-500">
-                      {license.number && <span className="font-mono">№ {license.number}</span>}
-                      {license.valid_until && <span>до {license.valid_until}</span>}
-                      {license.issuer && (
-                        <span className="line-clamp-1 max-w-[60%]">{license.issuer}</span>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
+            </div>
+            {tab === "requisites" && <Requisites profile={profile} />}
+            {tab === "licenses" && <Licenses licenses={profile.licenses} />}
+            {tab === "projects" && <Projects projects={profile.past_projects} />}
+            {tab === "dossier" && (
+              <Dossier dossier={dossier} syncedAt={profile.rusprofile_synced_at} />
             )}
-          </SectionCard>
-
-          <SectionCard
-            tone="amber"
-            icon={<Briefcase size={13} />}
-            title="Реализованные проекты"
-            count={profile.past_projects.length}
-          >
-            {profile.past_projects.length === 0 ? (
-              <EmptyNote>Не указаны — «Задаче» не с чем сопоставлять предмет закупки.</EmptyNote>
-            ) : (
-              <ul className="space-y-1.5">
-                {profile.past_projects.map((project, index) => (
-                  <li
-                    key={index}
-                    className="rounded-lg border border-white/[0.06] bg-black/25 px-3 py-2 text-xs"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="line-clamp-2 text-zinc-200">{project.work_type}</span>
-                      {project.year && (
-                        <span className="shrink-0 rounded-md bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] text-amber-300">
-                          {project.year}
-                        </span>
-                      )}
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-zinc-500">
-                      {project.customer && <span className="truncate">{project.customer}</span>}
-                      {project.volume && <span className="text-zinc-300">{project.volume}</span>}
-                      {project.source === "rusprofile" && <SourceMark />}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </SectionCard>
-
-          <SectionCard
-            tone="sky"
-            icon={<Globe size={13} />}
-            title="Досье rusprofile"
-            extra={
-              dossier ? (
-                <span className="text-[10px] text-zinc-500">
-                  {profile.rusprofile_synced_at
-                    ? `обновлено ${formatDateTime(profile.rusprofile_synced_at)} · `
-                    : ""}
-                  <a
-                    href={dossier.source_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-sky-300 hover:underline"
-                  >
-                    карточка на сайте
-                  </a>
-                </span>
-              ) : undefined
-            }
-          >
-            {dossier ? (
-              <RusprofileDossierBlock dossier={dossier} />
-            ) : (
-              <EmptyNote>
-                Досье ещё не загружалось. Нажмите «Обновить из rusprofile» — сайт отдаст
-                руководителя, численность, финансы, учредителей и историю госзакупок.
-              </EmptyNote>
-            )}
-          </SectionCard>
-        </div>
+          </div>
+        </>
       )}
-    </div>
-  );
-}
-
-type Tone = "indigo" | "emerald" | "amber" | "sky" | "violet";
-
-const TONE_CARD: Record<Tone, string> = {
-  indigo: "border-indigo-500/20 bg-indigo-500/[0.05]",
-  emerald: "border-emerald-500/20 bg-emerald-500/[0.05]",
-  amber: "border-amber-500/20 bg-amber-500/[0.05]",
-  sky: "border-sky-500/20 bg-sky-500/[0.05]",
-  violet: "border-violet-500/20 bg-violet-500/[0.05]",
-};
-
-const TONE_ICON: Record<Tone, string> = {
-  indigo: "bg-indigo-500/15 text-indigo-300",
-  emerald: "bg-emerald-500/15 text-emerald-300",
-  amber: "bg-amber-500/15 text-amber-300",
-  sky: "bg-sky-500/15 text-sky-300",
-  violet: "bg-violet-500/15 text-violet-300",
-};
-
-const TONE_VALUE: Record<Tone, string> = {
-  indigo: "text-indigo-200",
-  emerald: "text-emerald-200",
-  amber: "text-amber-200",
-  sky: "text-sky-200",
-  violet: "text-violet-200",
-};
-
-/** Плитка с одной цифрой — как в сводках дашбордов: подпись, крупное число, пояснение. */
-function Kpi({
-  label,
-  value,
-  unit,
-  hint,
-  tone,
-}: {
-  label: string;
-  value: string;
-  unit?: string;
-  hint?: string;
-  tone?: Tone;
-}) {
-  return (
-    <div className="rounded-xl border border-white/[0.06] bg-black/30 px-3.5 py-2.5">
-      <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
-      <div className="mt-0.5 flex items-baseline gap-1.5">
-        <span className={`text-xl font-semibold leading-tight ${tone ? TONE_VALUE[tone] : "text-zinc-100"}`}>
-          {value}
-        </span>
-        {unit && <span className="text-[11px] text-zinc-500">{unit}</span>}
-      </div>
-      {hint && <div className="mt-0.5 truncate text-[10px] text-zinc-600">{hint}</div>}
-    </div>
-  );
-}
-
-/** Информационный блок компании в своём оттенке — чтобы блоки читались как разные сущности. */
-function SectionCard({
-  tone,
-  icon,
-  title,
-  count,
-  extra,
-  children,
-}: {
-  tone: Tone;
-  icon: React.ReactNode;
-  title: string;
-  count?: number;
-  extra?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className={`rounded-xl border p-4 ${TONE_CARD[tone]}`}>
-      <header className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h4 className="flex items-center gap-2 text-xs font-semibold text-zinc-100">
-          <span className={`flex h-6 w-6 items-center justify-center rounded-md ${TONE_ICON[tone]}`}>
-            {icon}
-          </span>
-          {title}
-          {typeof count === "number" && count > 0 && (
-            <span className="rounded-full bg-white/[0.06] px-1.5 py-px text-[10px] font-normal text-zinc-400">
-              {count}
-            </span>
-          )}
-        </h4>
-        {extra}
-      </header>
-      {children}
     </section>
   );
 }
 
-function EmptyNote({ children }: { children: React.ReactNode }) {
-  return <p className="text-[11px] leading-relaxed text-zinc-500">{children}</p>;
+function TabLabel({ text, count }: { text: string; count: number }) {
+  return (
+    <>
+      {text}
+      {count > 0 && <span className="ml-1.5 tabular-nums text-zinc-500">{count}</span>}
+    </>
+  );
 }
 
-/** Пометка «с rusprofile» у допуска или проекта: такие записи ведёт синхронизация, а не человек. */
+/** Ряд ключевых цифр: одна строка, монохром, разделители — без цветных плиток. */
+function KeyFigures({ profile }: { profile: CompanyProfile }) {
+  const purchases = profile.rusprofile_data?.purchases;
+  const finance = profile.rusprofile_data?.finance ?? {};
+  const years = profile.years_of_experience;
+
+  const figures: Array<{ label: string; value: string; unit?: string; hint?: string }> = [
+    {
+      label: "Стаж",
+      value: years ? String(years) : "—",
+      unit: years ? plural(years, "год", "года", "лет") : undefined,
+      hint: profile.registration_date ? `с ${formatRuDate(profile.registration_date)}` : undefined,
+    },
+    { label: "Допуски", value: String(profile.licenses.length) },
+    { label: "Проекты", value: String(profile.past_projects.length) },
+    {
+      label: "Победы",
+      value: purchases ? String(purchases.wins) : "—",
+      hint: purchases
+        ? `из ${purchases.fetched} ${plural(purchases.fetched, "закупки", "закупок", "закупок")}`
+        : undefined,
+    },
+    {
+      label: `Выручка${finance.year ? ` ${finance.year}` : ""}`,
+      value: finance.revenue ? stripRub(finance.revenue) : "—",
+      unit: finance.revenue ? "₽" : undefined,
+      hint: finance.revenue_change ? `${finance.revenue_change} к прошлому году` : undefined,
+    },
+  ];
+
+  return (
+    <div className="grid grid-cols-2 border-t border-white/[0.06] sm:grid-cols-3 lg:grid-cols-5">
+      {figures.map((figure, index) => (
+        <div
+          key={figure.label}
+          className={`px-5 py-4 ${index > 0 ? "lg:border-l lg:border-white/[0.06]" : ""}`}
+        >
+          <div className="text-xs text-zinc-500">{figure.label}</div>
+          <div className="mt-1 flex items-baseline gap-1.5">
+            <span className="text-2xl font-semibold tabular-nums tracking-tight text-zinc-100">
+              {figure.value}
+            </span>
+            {figure.unit && <span className="text-sm text-zinc-500">{figure.unit}</span>}
+          </div>
+          {figure.hint && <div className="mt-0.5 truncate text-xs text-zinc-600">{figure.hint}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Список «подпись — значение» строками с тонкими разделителями. */
+function FactList({ rows }: { rows: Array<[string, ReactNode]> }) {
+  return (
+    <dl className="divide-y divide-white/[0.06]">
+      {rows.map(([label, value]) => (
+        <div key={label} className="grid gap-1 py-2.5 sm:grid-cols-[200px_1fr] sm:gap-4">
+          <dt className="text-sm text-zinc-500">{label}</dt>
+          <dd className="min-w-0 text-sm text-zinc-200">{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function Empty({ children }: { children: ReactNode }) {
+  return <p className="py-6 text-center text-sm text-zinc-500">{children}</p>;
+}
+
+function Requisites({ profile }: { profile: CompanyProfile }) {
+  const codes = profile.rusprofile_data?.codes ?? {};
+  const dash = <span className="text-zinc-600">—</span>;
+  const rows: Array<[string, ReactNode]> = [
+    ["Наименование", profile.legal_name?.trim() || dash],
+    ["ИНН", profile.inn ? <span className="tabular-nums">{profile.inn}</span> : dash],
+    ["КПП", profile.kpp ? <span className="tabular-nums">{profile.kpp}</span> : dash],
+    ["ОГРН", profile.ogrn ? <span className="tabular-nums">{profile.ogrn}</span> : dash],
+    ["Дата регистрации", formatRuDate(profile.registration_date) ?? dash],
+    ["Юридический адрес", profile.legal_address?.trim() || dash],
+  ];
+  if (Object.keys(codes).length > 0) {
+    rows.push([
+      "Коды статистики",
+      <span className="text-zinc-400 tabular-nums">
+        {Object.entries(codes)
+          .map(([key, value]) => `${key.toUpperCase()} ${value}`)
+          .join(" · ")}
+      </span>,
+    ]);
+  }
+  return <FactList rows={rows} />;
+}
+
+/** Пометка у записи, которую ведёт синхронизация с rusprofile, а не человек. */
 function SourceMark() {
   return (
-    <span
-      className="shrink-0 rounded border border-sky-500/20 bg-sky-500/[0.08] px-1 py-px text-[10px] text-sky-300/90"
-      title="Запись получена с rusprofile.ru и обновляется синхронизацией"
-    >
-      rusprofile
-    </span>
+    <Tooltip content="Запись с rusprofile.ru — обновляется синхронизацией">
+      <span className="shrink-0 text-xs text-zinc-600">rusprofile</span>
+    </Tooltip>
+  );
+}
+
+function Licenses({ licenses }: { licenses: CompanyLicense[] }) {
+  if (licenses.length === 0) {
+    return <Empty>Допуски не указаны — «Компетенции» сочтут, что подтверждений нет.</Empty>;
+  }
+  return (
+    <ul className="divide-y divide-white/[0.06]">
+      {licenses.map((license, index) => {
+        const meta = [
+          license.number ? `№ ${license.number}` : null,
+          license.valid_until ? `до ${license.valid_until}` : null,
+          license.issuer,
+        ].filter(Boolean);
+        return (
+          <li key={index} className="flex items-start justify-between gap-4 py-3">
+            <div className="min-w-0">
+              <div className="text-sm text-zinc-200">{license.name}</div>
+              {meta.length > 0 && (
+                <div className="mt-0.5 truncate text-xs text-zinc-500">{meta.join(" · ")}</div>
+              )}
+            </div>
+            {license.source === "rusprofile" && <SourceMark />}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function Projects({ projects }: { projects: CompanyPastProject[] }) {
+  if (projects.length === 0) {
+    return <Empty>Проекты не указаны — «Задаче» не с чем сопоставить предмет закупки.</Empty>;
+  }
+  return (
+    <ul className="divide-y divide-white/[0.06]">
+      {projects.map((project, index) => {
+        const meta = [project.customer, project.volume].filter(Boolean);
+        return (
+          <li key={index} className="flex items-start gap-4 py-3">
+            <span className="w-12 shrink-0 pt-px text-sm tabular-nums text-zinc-500">
+              {project.year ?? "—"}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm text-zinc-200">{project.work_type}</div>
+              {meta.length > 0 && (
+                <div className="mt-0.5 truncate text-xs text-zinc-500">{meta.join(" · ")}</div>
+              )}
+            </div>
+            {project.source === "rusprofile" && <SourceMark />}
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
 /**
- * Содержимое блока «Досье rusprofile»: цифры плитками (численность, прибыль, капитал,
- * заказчики), ниже — факты списком. Те же факты уходят в промпт AI-оценки: «Компетенции»
- * сверяют с ними требования к участнику.
+ * Досье rusprofile: несколько цифр строкой и факты списком. Те же факты уходят в промпт
+ * AI-оценки — «Компетенции» сверяют с ними требования к участнику.
  */
-function RusprofileDossierBlock({ dossier }: { dossier: RusprofileDossier }) {
+function Dossier({
+  dossier,
+  syncedAt,
+}: {
+  dossier: RusprofileDossier | null;
+  syncedAt: string | null;
+}) {
+  if (!dossier) {
+    return (
+      <Empty>
+        Досье ещё не загружалось — нажмите «Обновить из rusprofile».
+      </Empty>
+    );
+  }
   const finance = dossier.finance ?? {};
   const summary = dossier.purchases_summary ?? {};
-  const tiles: Array<{ label: string; value: string; hint?: string }> = [];
+
+  const figures: Array<{ label: string; value: string; hint?: string }> = [];
   if (dossier.headcount) {
-    tiles.push({
+    figures.push({
       label: "Численность",
-      value: `${dossier.headcount}`,
-      hint: dossier.headcount_year ? `чел. в ${dossier.headcount_year}` : "чел.",
+      value: String(dossier.headcount),
+      hint: dossier.headcount_year ? `чел., ${dossier.headcount_year}` : "чел.",
     });
   }
   if (finance.profit) {
-    tiles.push({ label: "Прибыль", value: finance.profit.replace(/\s*руб\.?$/, ""), hint: finance.profit_change ? `${finance.profit_change} к прошлому году` : "руб." });
+    figures.push({ label: "Прибыль", value: stripRub(finance.profit), hint: finance.profit_change ?? "₽" });
   }
   if (dossier.authorized_capital) {
-    tiles.push({ label: "Уставный капитал", value: dossier.authorized_capital.replace(/\s*руб\.?$/, ""), hint: "руб." });
+    figures.push({ label: "Уставный капитал", value: stripRub(dossier.authorized_capital), hint: "₽" });
   }
   if (summary.contracts_count) {
-    tiles.push({
+    figures.push({
       label: "Контрактов",
       value: String(summary.contracts_count),
       hint: summary.contracts_sum ? `на ${summary.contracts_sum}` : undefined,
     });
   }
 
+  const ratings = Object.entries(finance.ratings ?? {}).filter(([, v]) => v);
   const facts: Array<[string, string | null | undefined]> = [
     [
       "Руководитель",
@@ -793,101 +770,122 @@ function RusprofileDossierBlock({ dossier }: { dossier: RusprofileDossier }) {
     [
       "Основной ОКВЭД",
       dossier.main_okved_code
-        ? `${dossier.main_okved_code} ${dossier.main_okved_name ?? ""}${dossier.okved_count ? ` (всего ${dossier.okved_count})` : ""}`
+        ? `${dossier.main_okved_code} ${dossier.main_okved_name ?? ""}`.trim()
         : null,
     ],
     ["Реестр МСП", dossier.msp_status],
     ["Налоговый режим", dossier.tax_regime],
-    ["Контакты", [...(dossier.phones ?? []), ...(dossier.emails ?? []), dossier.website].filter(Boolean).join(" · ") || null],
+    [
+      "Крупные заказчики",
+      summary.top_customers?.length ? summary.top_customers.map((c) => c.name).join(", ") : null,
+    ],
+    ["Рейтинги", ratings.length ? ratings.map(([k, v]) => `${k}: ${v}`).join(" · ") : null],
+    [
+      "Контакты",
+      [...(dossier.phones ?? []), ...(dossier.emails ?? []), dossier.website].filter(Boolean).join(" · ") ||
+        null,
+    ],
     ["Исполнительные производства", dossier.enforcement],
     ["Проверки", dossier.inspections],
-    ["Лицензии на сайте", dossier.licenses_note],
   ];
-  const visible = facts.filter(([, value]) => value);
-  const ratings = Object.entries(finance.ratings ?? {}).filter(([, v]) => v);
+  const visible = facts.filter((row): row is [string, string] => Boolean(row[1]));
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       {dossier.data_hidden && (
-        <div className="rounded-lg border border-amber-500/25 bg-amber-500/[0.07] px-3 py-2 text-[11px] text-amber-200/90">
-          Часть данных на сайте скрыта подпиской — проверьте, действует ли учётная запись.
-        </div>
+        <p className="flex items-center gap-2 text-sm text-zinc-400">
+          <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+          Часть данных скрыта подпиской — проверьте учётную запись rusprofile.
+        </p>
       )}
 
-      {tiles.length > 0 && (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {tiles.map((tile) => (
-            <div key={tile.label} className="rounded-lg border border-white/[0.06] bg-black/30 px-3 py-2">
-              <div className="text-[10px] uppercase tracking-wider text-zinc-500">{tile.label}</div>
-              <div className="mt-0.5 text-base font-semibold text-sky-100">{tile.value}</div>
-              {tile.hint && <div className="text-[10px] text-zinc-600">{tile.hint}</div>}
+      {figures.length > 0 && (
+        <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-4">
+          {figures.map((figure) => (
+            <div key={figure.label}>
+              <div className="text-xs text-zinc-500">{figure.label}</div>
+              <div className="mt-0.5 text-lg font-semibold tabular-nums text-zinc-100">
+                {figure.value}
+              </div>
+              {figure.hint && <div className="truncate text-xs text-zinc-600">{figure.hint}</div>}
             </div>
           ))}
-        </div>
-      )}
-
-      {ratings.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {ratings.map(([label, value]) => (
-            <span
-              key={label}
-              className="rounded-full border border-white/[0.08] bg-black/30 px-2.5 py-0.5 text-[10px] text-zinc-400"
-            >
-              {label}: <span className="text-zinc-200">{value}</span>
-            </span>
-          ))}
-        </div>
-      )}
-
-      {summary.top_customers && summary.top_customers.length > 0 && (
-        <div>
-          <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">Крупные заказчики</div>
-          <div className="flex flex-wrap gap-1.5">
-            {summary.top_customers.map((customer) => (
-              <span
-                key={customer.name}
-                className="rounded-lg border border-sky-500/20 bg-sky-500/[0.08] px-2.5 py-1 text-[11px] text-sky-100"
-                title={customer.sum ?? undefined}
-              >
-                {customer.name}
-                {customer.purchases ? (
-                  <span className="ml-1.5 text-[10px] text-sky-300/70">{customer.purchases}</span>
-                ) : null}
-              </span>
-            ))}
-          </div>
         </div>
       )}
 
       {visible.length > 0 && (
-        <dl className="grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
-          {visible.map(([label, value]) => (
-            <div key={label}>
-              <dt className="text-[11px] text-zinc-500">{label}</dt>
-              <dd className="line-clamp-3 text-zinc-300">{value}</dd>
-            </div>
-          ))}
-        </dl>
+        <FactList
+          rows={visible.map(([label, value]) => [label, <span className="line-clamp-3">{value}</span>])}
+        />
       )}
 
-      {dossier.summary_text && (
-        <p
-          className="line-clamp-4 border-t border-white/[0.06] pt-2 text-[11px] leading-relaxed text-zinc-500"
-          title={dossier.summary_text}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
+        {syncedAt && <span>Обновлено {formatDateTime(syncedAt)}</span>}
+        <a
+          href={dossier.source_url}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-1 text-indigo-300 hover:underline"
         >
-          {dossier.summary_text}
-        </p>
-      )}
+          Карточка на rusprofile
+          <ExternalLink size={12} />
+        </a>
+      </div>
     </div>
   );
 }
 
-function Detail({ label, value, mono }: { label: string; value: string | null; mono?: boolean }) {
+/** Заголовок раздела формы — как группы в «Настройках». */
+function FormSection({
+  title,
+  hint,
+  action,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
   return (
-    <div>
-      <dt className="text-[11px] text-zinc-500">{label}</dt>
-      <dd className={`text-zinc-200 ${mono ? "font-mono" : ""}`}>{value?.trim() ? value : "—"}</dd>
-    </div>
+    <section>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400">
+          {title}
+          {hint && (
+            <Tooltip content={hint}>
+              <span className="cursor-help font-normal normal-case tracking-normal text-zinc-600">?</span>
+            </Tooltip>
+          )}
+        </div>
+        {action}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function AddRowButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-1 rounded-lg px-2 py-1 text-sm text-zinc-400 hover:bg-white/5 hover:text-zinc-100"
+    >
+      <Plus size={14} />
+      Добавить
+    </button>
+  );
+}
+
+function RemoveRowButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="mt-1.5 flex h-[38px] w-9 items-center justify-center rounded-lg text-zinc-600 hover:bg-white/5 hover:text-red-400"
+      title="Удалить"
+    >
+      <Trash2 size={14} />
+    </button>
   );
 }
 
@@ -899,7 +897,7 @@ function Detail({ label, value, mono }: { label: string; value: string | null; m
  *
  * Новая компания создаётся POST-ом, существующая правится PUT-ом по своему id — основной
  * от этого никто не становится: смена основной компании меняет входы оценки по всем
- * тендерам сразу и делается отдельной кнопкой в списке.
+ * тендерам сразу и делается отдельным действием в списке.
  */
 export function CompanyProfileModal({
   profile,
@@ -942,10 +940,7 @@ export function CompanyProfileModal({
   const lookup = async () => {
     const query = lookupQuery.trim() || inn.trim() || legalName.trim();
     if (!query) {
-      setError(
-        "Укажите ИНН, наименование или вставьте ссылку на карточку rusprofile — по пустому " +
-          "запросу реестр ничего не найдёт.",
-      );
+      setError("Укажите ИНН, название или ссылку на карточку rusprofile.");
       return;
     }
     setIsLookingUp(true);
@@ -976,8 +971,7 @@ export function CompanyProfileModal({
     setRegistrationDate(candidate.registration_date ?? "");
     setLegalAddress(candidate.legal_address ?? "");
     setNotice(
-      `Данные подставлены из источника «${candidate.source === "rusprofile" ? "rusprofile.ru" : "ЕГРЮЛ"}». ` +
-        "Проверьте их и нажмите «Сохранить» — до этого они никуда не записаны.",
+      `Данные из ${candidate.source === "rusprofile" ? "rusprofile.ru" : "ЕГРЮЛ"} подставлены — проверьте и сохраните.`,
     );
   };
 
@@ -1016,342 +1010,236 @@ export function CompanyProfileModal({
   const updateProject = (index: number, patch: Partial<CompanyPastProject>) =>
     setProjects((prev) => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)));
 
+  const field = (
+    label: string,
+    value: string,
+    onChange: (value: string) => void,
+    options: { placeholder?: string; type?: string; className?: string } = {},
+  ) => (
+    <label className={`block text-sm text-zinc-400 ${options.className ?? ""}`}>
+      {label}
+      <input
+        type={options.type ?? "text"}
+        value={value}
+        disabled={!isAdmin}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={options.placeholder}
+        className={inputClass}
+      />
+    </label>
+  );
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/60 px-4 py-8"
       onClick={onClose}
     >
       <div
-        className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-white/10 bg-zinc-900 shadow-xl"
+        className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-zinc-900 shadow-[0_20px_60px_rgba(0,0,0,0.35)]"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-white/[0.08] px-5 py-3">
-          <h2 className="text-sm text-zinc-200">
-            {profile ? "Компания" : "Новая компания"}
-            {profile?.is_primary && (
-              <span className="ml-2 rounded-md border border-indigo-500/30 bg-indigo-500/10 px-2 py-0.5 text-[11px] text-indigo-300">
-                основная
-              </span>
-            )}
+        <div className="flex items-center justify-between px-6 pb-2 pt-5">
+          <h2 className="text-lg font-semibold tracking-tight text-zinc-100">
+            {profile ? companyShortTitle(profile) : "Новая компания"}
           </h2>
           <button
             onClick={onClose}
-            className="rounded-lg p-1 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
+            className="rounded-lg p-1.5 text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
             title="Закрыть"
           >
-            <X size={16} />
+            <X size={18} />
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-5 py-4">
-          {error && (
-            <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
-              {error}
-            </div>
-          )}
-          {notice && (
-            <div className="mb-4 rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] px-4 py-2.5 text-sm text-indigo-300">
-              {notice}
+        <div className="flex-1 space-y-8 overflow-y-auto px-6 py-4">
+          {(error || notice) && (
+            <div className="space-y-2">
+              {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
+              {notice && <SettingsNotice tone="info">{notice}</SettingsNotice>}
             </div>
           )}
 
-          <div className="mb-5">
-            <h3 className="mb-2 text-xs font-medium text-zinc-300">Юридические данные</h3>
+          {isAdmin && (
+            <div>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Search
+                    size={15}
+                    className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"
+                  />
+                  <input
+                    value={lookupQuery}
+                    onChange={(e) => setLookupQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void lookup();
+                    }}
+                    placeholder="Найти по ИНН, названию или ссылке rusprofile"
+                    className={`${inputClass} !mt-0 pl-9`}
+                  />
+                </div>
+                <button onClick={() => void lookup()} disabled={isLookingUp} className={secondaryButton}>
+                  {isLookingUp && <Loader2 size={14} className="animate-spin" />}
+                  Найти
+                </button>
+              </div>
+              <p className="mt-1.5 text-xs text-zinc-600">
+                Найденное подставится в поля и запишется только после «Сохранить». КПП даёт
+                только ссылка rusprofile.
+              </p>
+              {candidates && candidates.length > 1 && (
+                <div className="mt-3 divide-y divide-white/[0.06] rounded-xl border border-white/[0.08]">
+                  {candidates.map((candidate, index) => (
+                    <button
+                      key={`${candidate.inn}-${index}`}
+                      onClick={() => applyCandidate(candidate)}
+                      className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm text-zinc-300 hover:bg-white/5"
+                    >
+                      <span className="truncate">{candidate.legal_name ?? "Без наименования"}</span>
+                      <span className="shrink-0 tabular-nums text-zinc-600">
+                        {candidate.inn ?? "—"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
-            {isAdmin && (
-              <div className="mb-3 rounded-lg border border-white/10 bg-black/20 p-3">
-                <div className="flex flex-wrap items-end gap-2">
-                  <label className="min-w-[240px] flex-1 text-xs text-zinc-400">
-                    Автопоиск
+          <FormSection
+            title="Реквизиты"
+            hint="По ИНН основной компании синхронизируется история участий. КПП нужен в заявке — в ЕГРЮЛ его нет."
+          >
+            <div className="grid gap-4 sm:grid-cols-2">
+              {field("Юридическое наименование", legalName, setLegalName, {
+                placeholder: "ООО «МИРТЕК»",
+                className: "sm:col-span-2",
+              })}
+              {field("ИНН", inn, setInn, { placeholder: "6167102308" })}
+              {field("КПП", kpp, setKpp, { placeholder: "263501001" })}
+              {field("ОГРН", ogrn, setOgrn, { placeholder: "1086167002204" })}
+              {field("Дата регистрации", registrationDate, setRegistrationDate, { type: "date" })}
+              {field("Юридический адрес", legalAddress, setLegalAddress, {
+                placeholder: "г. Ростов-на-Дону, …",
+                className: "sm:col-span-2",
+              })}
+              {field("Стаж, лет", years, setYears, { type: "number", placeholder: "18" })}
+            </div>
+          </FormSection>
+
+          <FormSection
+            title="Допуски и лицензии"
+            hint="Без допусков «Компетенции» считают, что формальных подтверждений нет."
+            action={isAdmin && <AddRowButton onClick={() => setLicenses((prev) => [...prev, { name: "" }])} />}
+          >
+            {licenses.length === 0 ? (
+              <p className="text-sm text-zinc-600">Не указаны</p>
+            ) : (
+              <div className="space-y-2">
+                {licenses.map((license, index) => (
+                  <div key={index} className="grid gap-2 sm:grid-cols-[2fr_1fr_1fr_auto]">
                     <input
-                      value={lookupQuery}
-                      onChange={(e) => setLookupQuery(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") void lookup();
-                      }}
-                      placeholder="ИНН, название или ссылка https://www.rusprofile.ru/id/…"
+                      value={license.name}
+                      disabled={!isAdmin}
+                      onChange={(e) => updateLicense(index, { name: e.target.value })}
+                      placeholder="СРО, лицензия ФСБ, ISO 9001"
                       className={inputClass}
                     />
-                  </label>
-                  <button
-                    onClick={() => void lookup()}
-                    disabled={isLookingUp}
-                    className="flex items-center gap-1 rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-50"
-                  >
-                    {isLookingUp ? (
-                      <Loader2 size={12} className="animate-spin" />
-                    ) : (
-                      <Search size={12} />
+                    <input
+                      value={license.number ?? ""}
+                      disabled={!isAdmin}
+                      onChange={(e) => updateLicense(index, { number: e.target.value })}
+                      placeholder="Номер"
+                      className={inputClass}
+                    />
+                    <input
+                      value={license.valid_until ?? ""}
+                      disabled={!isAdmin}
+                      onChange={(e) => updateLicense(index, { valid_until: e.target.value })}
+                      placeholder="Действует до"
+                      className={inputClass}
+                    />
+                    {isAdmin && (
+                      <RemoveRowButton
+                        onClick={() => setLicenses((prev) => prev.filter((_, i) => i !== index))}
+                      />
                     )}
-                    Найти
-                  </button>
-                </div>
-                <p className="mt-2 text-[11px] leading-relaxed text-zinc-600">
-                  ИНН, ОГРН или название ищутся в ЕГРЮЛ. Ссылка на карточку rusprofile
-                  разбирается напрямую — только этот путь даёт КПП, в выдаче ЕГРЮЛ его нет.
-                  Найденное подставляется в поля и никуда не записывается, пока вы не нажмёте
-                  «Сохранить».
-                </p>
-              </div>
-            )}
-
-            {candidates && candidates.length > 1 && (
-              <div className="mb-3 space-y-1 rounded-lg border border-white/10 bg-black/20 p-2">
-                <p className="text-[11px] text-zinc-500">
-                  Найдено несколько организаций — выберите свою:
-                </p>
-                {candidates.map((candidate, index) => (
-                  <button
-                    key={`${candidate.inn}-${index}`}
-                    onClick={() => applyCandidate(candidate)}
-                    className="block w-full rounded-md px-2 py-1 text-left text-xs text-zinc-300 hover:bg-white/5"
-                  >
-                    {candidate.legal_name ?? "Без наименования"}
-                    <span className="text-zinc-600"> — ИНН {candidate.inn ?? "—"}</span>
-                  </button>
+                  </div>
                 ))}
               </div>
             )}
+          </FormSection>
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className="block text-xs text-zinc-400">
-                Юридическое наименование
-                <input
-                  value={legalName}
-                  disabled={!isAdmin}
-                  onChange={(e) => setLegalName(e.target.value)}
-                  placeholder="ООО «МИРТЕК»"
-                  className={inputClass}
-                />
-              </label>
-              <label className="block text-xs text-zinc-400">
-                ИНН
-                <input
-                  value={inn}
-                  disabled={!isAdmin}
-                  onChange={(e) => setInn(e.target.value)}
-                  placeholder="6167102308"
-                  className={inputClass}
-                />
-                <span className="mt-1 block text-[11px] text-zinc-600">
-                  По ИНН основной компании синхронизируется история участий — без него
-                  измерение «История» не считается.
-                </span>
-              </label>
-              <label className="block text-xs text-zinc-400">
-                КПП
-                <input
-                  value={kpp}
-                  disabled={!isAdmin}
-                  onChange={(e) => setKpp(e.target.value)}
-                  placeholder="263501001"
-                  className={inputClass}
-                />
-                <span className="mt-1 block text-[11px] text-zinc-600">
-                  Нужен в реквизитах заявки. В ЕГРЮЛ его нет — берётся с rusprofile или
-                  вводится вручную.
-                </span>
-              </label>
-              <label className="block text-xs text-zinc-400">
-                ОГРН
-                <input
-                  value={ogrn}
-                  disabled={!isAdmin}
-                  onChange={(e) => setOgrn(e.target.value)}
-                  placeholder="1086167002204"
-                  className={inputClass}
-                />
-              </label>
-              <label className="block text-xs text-zinc-400">
-                Дата регистрации
-                <input
-                  type="date"
-                  value={registrationDate}
-                  disabled={!isAdmin}
-                  onChange={(e) => setRegistrationDate(e.target.value)}
-                  className={inputClass}
-                />
-              </label>
-              <label className="block text-xs text-zinc-400 sm:col-span-2">
-                Юридический адрес
-                <input
-                  value={legalAddress}
-                  disabled={!isAdmin}
-                  onChange={(e) => setLegalAddress(e.target.value)}
-                  placeholder="г. Ростов-на-Дону, ..."
-                  className={inputClass}
-                />
-              </label>
-            </div>
-          </div>
-
-          <label className="mb-5 block max-w-xs text-xs text-zinc-400">
-            Стаж работы компании, лет
-            <input
-              type="number"
-              min={0}
-              max={200}
-              value={years}
-              disabled={!isAdmin}
-              onChange={(e) => setYears(e.target.value)}
-              placeholder="18"
-              className={inputClass}
-            />
-          </label>
-
-          <div className="mb-5">
-            <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-xs font-medium text-zinc-300">Допуски и лицензии</h3>
-              {isAdmin && (
-                <button
-                  onClick={() => setLicenses((prev) => [...prev, { name: "" }])}
-                  className="flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1 text-xs text-zinc-300 hover:bg-white/5"
-                >
-                  <Plus size={12} />
-                  Добавить
-                </button>
-              )}
-            </div>
-            {licenses.length === 0 && (
-              <p className="text-xs text-zinc-600">
-                Допуски не указаны — измерение «Компетенции» будет считать, что формальных
-                подтверждений у компании нет.
-              </p>
-            )}
-            <div className="space-y-2">
-              {licenses.map((license, index) => (
-                <div key={index} className="grid gap-2 sm:grid-cols-[2fr_1fr_1fr_auto]">
-                  <input
-                    value={license.name}
-                    disabled={!isAdmin}
-                    onChange={(e) => updateLicense(index, { name: e.target.value })}
-                    placeholder="Наименование (СРО, лицензия ФСБ, ISO 9001)"
-                    className={inputClass}
-                  />
-                  <input
-                    value={license.number ?? ""}
-                    disabled={!isAdmin}
-                    onChange={(e) => updateLicense(index, { number: e.target.value })}
-                    placeholder="Номер"
-                    className={inputClass}
-                  />
-                  <input
-                    value={license.valid_until ?? ""}
-                    disabled={!isAdmin}
-                    onChange={(e) => updateLicense(index, { valid_until: e.target.value })}
-                    placeholder="Действует до"
-                    className={inputClass}
-                  />
-                  {isAdmin && (
-                    <button
-                      onClick={() =>
-                        setLicenses((prev) => prev.filter((_, i) => i !== index))
+          <FormSection
+            title="Реализованные проекты"
+            hint="С проектами «Задача» сопоставляет предмет закупки."
+            action={isAdmin && <AddRowButton onClick={() => setProjects((prev) => [...prev, { work_type: "" }])} />}
+          >
+            {projects.length === 0 ? (
+              <p className="text-sm text-zinc-600">Не указаны</p>
+            ) : (
+              <div className="space-y-2">
+                {projects.map((project, index) => (
+                  <div key={index} className="grid gap-2 sm:grid-cols-[2fr_2fr_1fr_80px_auto]">
+                    <input
+                      value={project.work_type}
+                      disabled={!isAdmin}
+                      onChange={(e) => updateProject(index, { work_type: e.target.value })}
+                      placeholder="Поставка ПУ, монтаж, АСКУЭ"
+                      className={inputClass}
+                    />
+                    <input
+                      value={project.customer ?? ""}
+                      disabled={!isAdmin}
+                      onChange={(e) => updateProject(index, { customer: e.target.value })}
+                      placeholder="Заказчик"
+                      className={inputClass}
+                    />
+                    <input
+                      value={project.volume ?? ""}
+                      disabled={!isAdmin}
+                      onChange={(e) => updateProject(index, { volume: e.target.value })}
+                      placeholder="Объём"
+                      className={inputClass}
+                    />
+                    <input
+                      type="number"
+                      value={project.year ?? ""}
+                      disabled={!isAdmin}
+                      onChange={(e) =>
+                        updateProject(index, {
+                          year: e.target.value === "" ? null : Number(e.target.value),
+                        })
                       }
-                      className="mt-1.5 rounded-lg border border-white/10 px-2 text-zinc-500 hover:bg-white/5 hover:text-red-400"
-                      title="Удалить"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="mb-5">
-            <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-xs font-medium text-zinc-300">Реализованные проекты</h3>
-              {isAdmin && (
-                <button
-                  onClick={() => setProjects((prev) => [...prev, { work_type: "" }])}
-                  className="flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1 text-xs text-zinc-300 hover:bg-white/5"
-                >
-                  <Plus size={12} />
-                  Добавить
-                </button>
-              )}
-            </div>
-            {projects.length === 0 && (
-              <p className="text-xs text-zinc-600">
-                Проекты не указаны — измерению «Задача» не с чем сопоставлять предмет закупки.
-              </p>
+                      placeholder="Год"
+                      className={inputClass}
+                    />
+                    {isAdmin && (
+                      <RemoveRowButton
+                        onClick={() => setProjects((prev) => prev.filter((_, i) => i !== index))}
+                      />
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
-            <div className="space-y-2">
-              {projects.map((project, index) => (
-                <div key={index} className="grid gap-2 sm:grid-cols-[2fr_2fr_1fr_1fr_auto]">
-                  <input
-                    value={project.work_type}
-                    disabled={!isAdmin}
-                    onChange={(e) => updateProject(index, { work_type: e.target.value })}
-                    placeholder="Тип работ (поставка ПУ, монтаж, АСКУЭ)"
-                    className={inputClass}
-                  />
-                  <input
-                    value={project.customer ?? ""}
-                    disabled={!isAdmin}
-                    onChange={(e) => updateProject(index, { customer: e.target.value })}
-                    placeholder="Заказчик"
-                    className={inputClass}
-                  />
-                  <input
-                    value={project.volume ?? ""}
-                    disabled={!isAdmin}
-                    onChange={(e) => updateProject(index, { volume: e.target.value })}
-                    placeholder="Объём"
-                    className={inputClass}
-                  />
-                  <input
-                    type="number"
-                    value={project.year ?? ""}
-                    disabled={!isAdmin}
-                    onChange={(e) =>
-                      updateProject(index, {
-                        year: e.target.value === "" ? null : Number(e.target.value),
-                      })
-                    }
-                    placeholder="Год"
-                    className={inputClass}
-                  />
-                  {isAdmin && (
-                    <button
-                      onClick={() =>
-                        setProjects((prev) => prev.filter((_, i) => i !== index))
-                      }
-                      className="mt-1.5 rounded-lg border border-white/10 px-2 text-zinc-500 hover:bg-white/5 hover:text-red-400"
-                      title="Удалить"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <p className="text-[11px] leading-relaxed text-zinc-600">
-            Уже посчитанные оценки после правки профиля не пересчитываются автоматически —
-            каждая хранит снимок профиля на момент расчёта и остаётся объяснимой. Нужные
-            тендеры пересчитываются кнопкой в карточке.
-          </p>
+          </FormSection>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t border-white/[0.08] px-5 py-3">
-          <button
-            onClick={onClose}
-            className="rounded-lg border border-white/10 px-3 py-2 text-sm text-zinc-300 hover:bg-white/5"
-          >
-            {isAdmin ? "Отмена" : "Закрыть"}
-          </button>
-          {isAdmin && (
-            <button
-              onClick={() => void save()}
-              disabled={isSaving}
-              className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-sm font-medium text-snow hover:opacity-90 disabled:opacity-50"
-            >
-              {isSaving && <Loader2 size={14} className="animate-spin" />}
-              Сохранить
+        <div className="flex items-center justify-between gap-3 border-t border-white/[0.06] px-6 py-4">
+          <p className="text-xs text-zinc-600">
+            {isAdmin ? "Посчитанные оценки не пересчитываются автоматически." : ""}
+          </p>
+          <div className="flex shrink-0 items-center gap-2">
+            <button onClick={onClose} className={secondaryButton}>
+              {isAdmin ? "Отмена" : "Закрыть"}
             </button>
-          )}
+            {isAdmin && (
+              <button onClick={() => void save()} disabled={isSaving} className={primaryButton}>
+                {isSaving && <Loader2 size={14} className="animate-spin" />}
+                Сохранить
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

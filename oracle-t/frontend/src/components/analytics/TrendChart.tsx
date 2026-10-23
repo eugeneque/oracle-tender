@@ -20,7 +20,7 @@ type MetricKey = "count" | "amount" | "ai" | "win";
 const METRICS: { key: MetricKey; label: string; color: string; unit: string }[] = [
   { key: "count", label: "Количество тендеров", color: "#22c55e", unit: "шт." },
   { key: "amount", label: "Сумма НМЦК", color: "#3b82f6", unit: "₽" },
-  { key: "ai", label: "AI-оценка по профилю", color: "#818cf8", unit: "%" },
+  { key: "ai", label: "AI-оценка по профилю", color: "#4a82f5", unit: "%" },
   { key: "win", label: "% соответствия МИРТЕК", color: "#a78bfa", unit: "%" },
 ];
 

@@ -31,7 +31,7 @@ export function RankingList({
           </div>
           <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.05]">
             <div
-              className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500"
+              className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-indigo-400"
               style={{ width: `${Math.max(2, Math.round(row.ratio * 100))}%` }}
             />
           </div>

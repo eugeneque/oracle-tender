@@ -296,7 +296,7 @@ export function NewRequestModal({
           <button
             type="submit"
             disabled={isSubmitting}
-            className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-2 text-sm font-medium text-snow hover:opacity-90 disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-indigo-400 px-3.5 py-2 text-sm font-medium text-snow hover:opacity-90 disabled:opacity-50"
           >
             {isSubmitting ? (
               <>

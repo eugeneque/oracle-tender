@@ -1,6 +1,6 @@
 import {
   ArrowRight,
-  Clock,
+  ChevronRight,
   History,
   LogOut,
   MoreVertical,
@@ -20,15 +20,26 @@ import type { Tender, TenderPage } from "../api/types";
 import { useAuth } from "../context/useAuth";
 import { daysLeft, percentValue } from "../utils/format";
 import { dropdownVariants, dropupVariants, scrimVariants } from "../utils/motion";
-import { DecisionMark } from "./DecisionMark";
 import { ThemeToggle } from "./ThemeToggle";
 import { UserAvatar } from "./UserAvatar";
-import { ScoreBadge } from "./ui/ScoreBadge";
 import { WhatsNewBadge, WhatsNewMenuBlock } from "./nav/WhatsNew";
 
 // Сколько отложенных закупок показывать в меню: это напоминание «к чему вернуться»,
 // а не список — за списком есть раздел «Избранное» на странице тендеров.
 const FAVOURITES_PREVIEW = 5;
+
+// Решение модели в строке избранного — точкой, а не кольцом со значком: в меню это подсказка,
+// а не главный сигнал.
+const DECISION_DOT: Record<string, string> = {
+  true: "bg-emerald-400",
+  false: "bg-red-400",
+  null: "bg-zinc-600",
+};
+const DECISION_TITLE: Record<string, string> = {
+  true: "Модель: стоит смотреть",
+  false: "Модель: не стоит смотреть",
+  null: "Модель решения не выносила",
+};
 
 const ROLE_LABELS: Record<string, string> = {
   admin: "Администратор",
@@ -221,61 +232,73 @@ export function AccountMenu({
 
               {divider}
 
-              {/* Избранное: то, к чему обещали вернуться, — ближе всего к руке. */}
+              {/* Избранное: то, к чему обещали вернуться, — ближе всего к руке. Редизайн
+                  24.10.2026: строки в ритме остальных пунктов меню — одна строка названия,
+                  решение модели точкой, балл и срок приглушённым текстом; без цветных колец,
+                  плашек и акцентной ссылки, которые делали блок самым ярким в меню. */}
               <div>
-                <div className="flex items-center justify-between px-3 pb-1.5">
-                  <span className="flex items-center gap-1.5 text-xs font-medium text-zinc-500">
-                    <Star size={12} className="text-amber-400" fill="currentColor" />
+                <div className="flex h-8 items-center justify-between px-3">
+                  <span className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
                     Избранное
-                    {favouritesTotal > 0 && <span className="text-zinc-600">{favouritesTotal}</span>}
+                    {favouritesTotal > 0 && <span className="ml-1.5 text-zinc-600">{favouritesTotal}</span>}
                   </span>
-                  {favouritesTotal > 0 && (
+                  {favouritesTotal > FAVOURITES_PREVIEW && (
                     <Link
                       to="/tenders?favourites=1"
                       onClick={() => setIsOpen(false)}
-                      className="group flex items-center gap-1 text-xs font-medium text-indigo-400 hover:text-indigo-300"
+                      className="group flex items-center gap-0.5 text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-200"
                     >
                       Все
-                      <ArrowRight size={12} className="transition-transform group-hover:translate-x-0.5" />
+                      <ChevronRight size={12} className="transition-transform group-hover:translate-x-0.5" />
                     </Link>
                   )}
                 </div>
                 {favourites === null ? (
-                  <div className="px-3 py-1.5 text-xs text-zinc-600">Загрузка…</div>
+                  <div className="flex h-10 items-center px-3 text-sm text-zinc-600">Загрузка…</div>
                 ) : favourites.length === 0 ? (
-                  <div className="px-3 py-1.5 text-xs leading-relaxed text-zinc-600">
-                    Пока пусто. Отметьте закупку звёздочкой в карточке — и она появится здесь.
+                  <div className="flex items-center gap-3 px-3 py-2 text-xs leading-relaxed text-zinc-500">
+                    <Star size={17} className="shrink-0 text-zinc-600" />
+                    Отметьте закупку звёздочкой в карточке — и она появится здесь.
                   </div>
                 ) : (
                   <ul className="flex flex-col gap-0.5">
                     {favourites.map((tender) => {
                       const left = daysLeft(tender.application_end);
                       const score = percentValue(tender.ai_score);
+                      const urgent = left !== null && left >= 0 && left <= 5;
                       return (
                         <li key={tender.id}>
                           <Link
                             to={`/tenders/${tender.id}`}
                             onClick={() => setIsOpen(false)}
-                            className="group block rounded-2xl px-3 py-2.5 transition-[background-color,transform] duration-200 hover:bg-white/[0.05] active:scale-[0.98]"
+                            title={tender.title}
+                            className="group/item flex items-center gap-3 rounded-xl px-3 py-2 transition-[background-color,transform] duration-200 hover:bg-white/[0.05] active:scale-[0.98]"
                           >
-                            <div className="flex items-start gap-2">
-                              <DecisionMark decision={tender.ai_decision} size="sm" />
-                              <span className="line-clamp-2 flex-1 text-[13px] font-medium leading-snug text-zinc-200 group-hover:text-white">
+                            <span className="flex w-[17px] shrink-0 justify-center">
+                              <span
+                                className={`h-1.5 w-1.5 rounded-full ${DECISION_DOT[String(tender.ai_decision)] ?? DECISION_DOT.null}`}
+                                title={DECISION_TITLE[String(tender.ai_decision)] ?? DECISION_TITLE.null}
+                              />
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-sm font-medium text-zinc-300 transition-colors group-hover/item:text-white">
                                 {tender.title}
                               </span>
-                              <ScoreBadge score={score} size="xs" />
-                            </div>
-                            <div className="mt-1 flex items-center gap-2 pl-7 text-[11px] text-zinc-500">
-                              <span className="truncate">{tender.customer_name ?? tender.source.name}</span>
-                              {left !== null && (
-                                <span
-                                  className={`flex shrink-0 items-center gap-1 ${left <= 5 && left >= 0 ? "text-red-400" : ""}`}
-                                >
-                                  <Clock size={10} />
-                                  {left >= 0 ? `${left} дн.` : "срок истёк"}
-                                </span>
-                              )}
-                            </div>
+                              <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-zinc-500">
+                                <span className="truncate">{tender.customer_name ?? tender.source.name}</span>
+                                {left !== null && (
+                                  <>
+                                    <span className="text-zinc-700">·</span>
+                                    <span className={`shrink-0 ${urgent ? "text-red-400" : left < 0 ? "text-zinc-600" : ""}`}>
+                                      {left >= 0 ? `${left} дн.` : "срок истёк"}
+                                    </span>
+                                  </>
+                                )}
+                              </span>
+                            </span>
+                            {score !== null && (
+                              <span className="shrink-0 text-xs font-medium tabular-nums text-zinc-500">{score}%</span>
+                            )}
                           </Link>
                         </li>
                       );

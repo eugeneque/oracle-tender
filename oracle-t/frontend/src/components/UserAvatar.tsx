@@ -30,7 +30,7 @@ export function UserAvatar({
     );
   }
   return (
-    <span className={`${base} bg-gradient-to-br from-indigo-500 to-violet-600`}>
+    <span className={`${base} bg-gradient-to-br from-indigo-500 to-indigo-400`}>
       {initials(user?.full_name)}
     </span>
   );
