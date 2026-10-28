@@ -38,7 +38,7 @@ import httpx
 from bs4 import BeautifulSoup
 from loguru import logger
 
-from app.adapters.http_utils import DEFAULT_USER_AGENT, resolve_verify
+from app.adapters.http_utils import resolve_verify, user_agent_for
 
 # Страница реестра ГИСП и JSON-запрос её грида.
 GISP_PP719_PAGE = "https://gisp.gov.ru/pp719v2/pub/prod/"
@@ -96,7 +96,7 @@ class RegistryFile:
 
 def _client(url: str, timeout: float = REQUEST_TIMEOUT_SECONDS) -> httpx.Client:
     return httpx.Client(
-        headers={"User-Agent": DEFAULT_USER_AGENT, "Accept-Language": "ru-RU,ru;q=0.9"},
+        headers={"User-Agent": user_agent_for(url), "Accept-Language": "ru-RU,ru;q=0.9"},
         timeout=timeout,
         follow_redirects=True,
         verify=resolve_verify(url),
@@ -183,7 +183,7 @@ def _gisp_post(client: httpx.Client, body: dict) -> dict:
         else:
             if response.status_code == 403:
                 raise RegistryUnavailable(
-                    "ГИСП отказал серверу (403) — доступ к реестру открыт только из российских сетей. "
+                    "ГИСП отказал серверу (403). "
                     "Скачайте в браузере «Скачать только действующие» и загрузите XLSX."
                 )
             if response.status_code < 400:
