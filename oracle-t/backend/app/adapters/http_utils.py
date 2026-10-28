@@ -20,6 +20,25 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (compatible; SovaScannerBot/1.0; +tender collection for Sova Scanner)"
 )
 
+# ГИСП (28.10.2026): на запрос с ботовым User-Agent (наш, curl) сразу отвечает 403, на
+# браузерный — 307 на тот же адрес с cookie `spid`/`spsc`, повтор с ними отдаёт JSON грида.
+# Проверено с сервера: без браузерного User-Agent реестр недоступен вовсе. Только для
+# перечисленных доменов — остальным площадкам представляемся своим именем.
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0 Safari/537.36"
+)
+_BROWSER_UA_HOSTS = ("gisp.gov.ru",)
+
+
+def user_agent_for(url: str) -> str:
+    """User-Agent для запроса к URL: браузерный для доменов из `_BROWSER_UA_HOSTS`, иначе свой."""
+
+    host = urlparse(url).hostname or ""
+    if any(host == h or host.endswith(f".{h}") for h in _BROWSER_UA_HOSTS):
+        return BROWSER_USER_AGENT
+    return DEFAULT_USER_AGENT
+
 _CERTS_DIR = Path(__file__).resolve().parent.parent / "certs"
 
 # Бандл Russian Trusted CA (Минцифры России): сертификаты *.zakupki.gov.ru и *.etp.gpb.ru

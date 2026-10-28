@@ -14,7 +14,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.adapters.http_utils import DEFAULT_USER_AGENT, resolve_verify
+from app.adapters.http_utils import resolve_verify, user_agent_for
 from app.models.log import LogLevel
 from app.models.source import AvailabilityStatus, Source, SourceType
 from app.services.audit import log_action
@@ -56,7 +56,7 @@ def _describe_error(exc: Exception) -> str:
 
 def _ping_once(source: Source) -> int:
     with httpx.Client(
-        headers={"User-Agent": DEFAULT_USER_AGENT},
+        headers={"User-Agent": user_agent_for(source.url)},
         timeout=PING_TIMEOUT_SECONDS,
         verify=resolve_verify(source.url),
         follow_redirects=True,
