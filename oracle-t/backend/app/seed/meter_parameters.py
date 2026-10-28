@@ -53,10 +53,12 @@ RULE_ASTRA = "astra"
 THREE_POSITION_RELAY_BRANDS = ("энергомера", "тайпит", "пульсар")
 
 GISP_PP719_URL = "https://gisp.gov.ru/pp719v2/pub/prod/"
+# Последняя известная редакция перечня (раздел II, на 22.10.2026). Опрос сначала ищет свежую
+# ссылку на странице «Проверка качества оборудования», этот адрес — запасной.
 ROSSETI_ZAK_URL = (
-    "https://www.rosseti.ru/upload/iblock/642/3q562j11vvfwxitqbajzn1bv0cdrsxuj/"
+    "https://www.rosseti.ru/upload/iblock/049/4kspl921icmhakqfdnm3hbhgfcie0cio/"
     "Раздел%20II.%20Вторичное%20оборудование,%20материалы%20и%20системы,%20допущенные%20к%20"
-    "применению%20на%20объектах%20ПАО%20«Россети»%20на%2016.09.2026.pdf"
+    "применению%20на%20объектах%20ПАО%20«Россети»%20на%2022.10.2026.pdf"
 )
 ASTRA_COMPATIBLE_URL = "https://astra.ru/ready-for-astra/compatible-software/"
 

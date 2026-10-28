@@ -28,6 +28,8 @@ class RegistryRecordOut(BaseModel):
     valid_to: date | None
     url: str | None
     note: str | None
+    # Баллы записи ГИСП по ПП 719 (28.10.2026); у остальных реестров пусто.
+    score: float | None = None
     verified_by_user: bool
     verified_at: datetime | None
     # Запись заведена автоматическим опросом реестра (13.10.2026); `None` — человеком.

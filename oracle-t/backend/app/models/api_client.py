@@ -35,7 +35,7 @@ class ApiClient(Base):
         DateTime(timezone=True), server_default=func.clock_timestamp(), nullable=False
     )
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     # Когда ключом пользовались в последний раз: единственный способ понять, что интеграция
     # жива, и безопасно ли отзывать старый ключ.

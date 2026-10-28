@@ -55,6 +55,9 @@ function summariseManual(outcome: ManualIngestOutcome): string {
 }
 
 function summarisePoll(poll: RegistryPoll): string {
+  // Итог опроса сервер формулирует сам: у ГИСП — сколько записей по нашим ОКПД2, у
+  // Россетей — сколько записей в перечне (28.10.2026).
+  if (poll.message) return poll.message;
   return (
     `${poll.file_name ?? "Выгрузка"}: строк ${poll.rows_total}, по счётчикам ${poll.rows_relevant}, ` +
     `моделей найдено ${poll.products_found} из ${poll.products_checked}.`
@@ -105,7 +108,11 @@ export function DataSourcesPanel({
         return summariseManual(await uploadFile<ManualIngestOutcome>(`/products/${productId}/manual-upload`, file!));
       case "poll_registry":
         await api.post<RegistryPoll>(`/catalog/registries/${source.registry}/poll`);
-        return "Опрос реестра запущен в фоне — обычно несколько минут. Найденные записи появятся в «Реестрах допуска».";
+        return source.key === "gisp"
+          ? "Опрос ГИСП запущен в фоне. Днём реестр отвечает очень медленно: на ответ даётся до 5 минут " +
+              "и до 3 попыток, поэтому опрос может занять до 15 минут. Плановый опрос идёт ночью — " +
+              "время указано в строке ГИСП. Найденные записи появятся в «Реестрах допуска»."
+          : "Опрос перечня запущен в фоне — обычно минута-две. Найденные записи появятся в «Реестрах допуска».";
       case "upload_registry":
         return summarisePoll(await uploadFile<RegistryPoll>(`/catalog/registries/${source.registry}/upload`, file!));
     }

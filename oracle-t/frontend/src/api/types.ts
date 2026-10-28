@@ -1940,6 +1940,8 @@ export interface RegistryRecord {
   valid_to: string | null;
   url: string | null;
   note: string | null;
+  // Баллы записи ГИСП по ПП 719 (28.10.2026): для закупок годится 113 и выше.
+  score: number | null;
   verified_by_user: boolean;
   verified_at: string | null;
   // Запись заведена автоматическим опросом реестра; null — человеком.

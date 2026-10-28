@@ -248,7 +248,7 @@ def test_registry_upload_ignores_same_designation_from_other_maker(client, admin
 
 
 def test_registry_poll_failure_is_explained(client, admin_token, monkeypatch):
-    def refuse(registry):
+    def refuse(registry, **_kwargs):
         raise RegistryUnavailable("Реестр ответил 403 — загрузите выгрузку файлом")
 
     monkeypatch.setattr(registry_polling, "_download", refuse)

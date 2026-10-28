@@ -27,7 +27,7 @@ from app.models.manufacturer import (
     ProductDataSource,
     SiType,
 )
-from app.services import product_manual_ingest, registry_records_service
+from app.services import product_manual_ingest, registry_polling, registry_records_service
 
 STATE_OK = "ok"
 STATE_PENDING = "pending"
@@ -207,9 +207,12 @@ def _registries(db: Session, product: Product) -> list[DataSource]:
         record = row["record"]
         last = row["last_poll"]
         last_ok = row["last_successful_poll"]
+        # Если реестр серверу недоступен, файл скачивается из браузера: у ГИСП — XLSX
+        # «Скачать только действующие», у Россетей — PDF «Раздел II» (28.10.2026).
+        upload_label = "Загрузить XLSX из ГИСП" if key == "gisp" else "Загрузить PDF перечня"
         actions = [
             SourceAction(ACTION_POLL_REGISTRY, "Опросить реестр"),
-            SourceAction(ACTION_UPLOAD_REGISTRY, "Загрузить выгрузку"),
+            SourceAction(ACTION_UPLOAD_REGISTRY, upload_label),
         ]
         if last and last["status"] == STATE_RUNNING:
             state, detail = STATE_RUNNING, "Идёт опрос реестра…"
@@ -227,6 +230,8 @@ def _registries(db: Session, product: Product) -> list[DataSource]:
             state, detail = STATE_ERROR, f"Опрос не удался: {last['message']}"
         else:
             state, detail = STATE_PENDING, "Реестр ещё не опрашивался."
+        if key == "gisp":
+            detail = f"{detail} {registry_polling.gisp_timing_hint()}"
         sources.append(DataSource(key, row["label"], state, detail, row["url"], actions, row["registry"]))
     return sources
 

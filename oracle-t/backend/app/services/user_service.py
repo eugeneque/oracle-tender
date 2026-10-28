@@ -100,6 +100,45 @@ def set_user_active(db: Session, user: User, is_active: bool, actor: User) -> Us
     return user
 
 
+def count_active_admins(db: Session) -> int:
+    return len(
+        db.scalars(
+            select(User.id).where(User.role == UserRole.ADMIN.value, User.is_active.is_(True))
+        ).all()
+    )
+
+
+def is_last_active_admin(db: Session, user: User) -> bool:
+    """Без активного администратора разделы «Пользователи» и настройки становятся
+    недоступны всем, и вернуть доступ можно только `reset_admin.py` на сервере."""
+
+    return user.role == UserRole.ADMIN.value and user.is_active and count_active_admins(db) <= 1
+
+
+def delete_user(db: Session, user: User, actor: User) -> None:
+    """Удаляет учётную запись вместе с логином (замечание 28.10.2026) — логин освобождается.
+
+    Подписи «кто сделал» в журнале, истории тендеров, настройках и сделках обнуляются
+    (`ON DELETE SET NULL`, миграция 0086), сами записи остаются. Личные профили отбора тоже
+    остаются без автора — ими пользуются коллеги (см. `RelevanceProfile.owner_id`), закладки
+    удаляются вместе с пользователем. Запись об удалении пишется от имени администратора,
+    чтобы пережить само удаление."""
+
+    username, full_name = user.username, user.full_name
+    db.delete(user)
+    db.flush()
+    log_action(
+        db,
+        component="users",
+        action=f"delete_user:{username}",
+        result="success",
+        level=LogLevel.WARNING,
+        details=f"Пользователь '{username}' ({full_name}) удалён из системы",
+        user_id=actor.id,
+    )
+    db.commit()
+
+
 def bootstrap_admin(db: Session, username: str, password: str, full_name: str) -> User | None:
     """Создаёт первого администратора, если в системе ещё нет ни одного пользователя.
     Идемпотентно: повторный вызов при уже существующих пользователях ничего не делает."""
