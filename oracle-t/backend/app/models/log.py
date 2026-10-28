@@ -41,5 +41,5 @@ class Log(Base):
     result: Mapped[str] = mapped_column(String(50), nullable=False)
     details: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

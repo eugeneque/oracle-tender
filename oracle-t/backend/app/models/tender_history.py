@@ -46,7 +46,7 @@ class TenderHistoryEntry(Base):
         UUID(as_uuid=True), ForeignKey("tenders.id", ondelete="CASCADE"), nullable=False, index=True
     )
     user_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     kind: Mapped[str] = mapped_column(
         String(20), nullable=False, default=HistoryKind.FIELD_CHANGE.value

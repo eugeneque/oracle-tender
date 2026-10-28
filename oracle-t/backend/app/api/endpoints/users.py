@@ -7,11 +7,13 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.schemas.user import UserCreate, UserOut, UserUpdate
 from app.services.user_service import (
     create_user,
+    delete_user,
     get_user_by_id,
+    is_last_active_admin,
     list_users,
     set_user_active,
     update_user,
@@ -58,7 +60,44 @@ def patch_user(
     admin: User = Depends(require_admin),
 ) -> User:
     user = _get_user_or_404(db, user_id)
+    demotes_admin = (
+        payload.role is not None
+        and payload.role != UserRole.ADMIN
+        and user.role == UserRole.ADMIN.value
+    )
+    if demotes_admin:
+        if user.id == admin.id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Нельзя снять роль администратора с самого себя",
+            )
+        if is_last_active_admin(db, user):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Это последний активный администратор — сначала назначьте другого",
+            )
     return update_user(db, user, payload, admin)
+
+
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_user(
+    user_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> Response:
+    if user_id == admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Нельзя удалить самого себя",
+        )
+    user = _get_user_or_404(db, user_id)
+    if is_last_active_admin(db, user):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Это последний активный администратор — сначала назначьте другого",
+        )
+    delete_user(db, user, admin)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/{user_id}/block", response_model=UserOut)

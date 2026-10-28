@@ -27,7 +27,7 @@ import enum
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -75,6 +75,9 @@ class ProductRegistryRecord(Base):
     valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
     # Ссылка на карточку записи в реестре — чтобы сверку можно было повторить.
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Баллы записи ГИСП по ПП 719 (миграция 0085, совещание 28.10.2026): для закупок годится
+    # запись со 113 баллами и выше — одна и та же модель бывает в реестре и с 80 баллами.
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     verified_by_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

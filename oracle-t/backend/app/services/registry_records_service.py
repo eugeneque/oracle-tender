@@ -47,6 +47,10 @@ COMPONENT = "registry_records"
 # столько в среднем идёт закупка от подачи заявки до поставки: ЗАК, истекающее через месяц,
 # к моменту поставки уже не действует.
 EXPIRING_DAYS = 90
+# Минимум баллов записи ГИСП по ПП 719, с которым прибор подходит для закупок (тендерный
+# отдел, совещание 28.10.2026: «те, которые 80, уже не подходят, 113 и более —
+# соответствуют закупочным требованиям»).
+PP719_MIN_SCORE = 113
 
 
 @dataclass(frozen=True)
@@ -189,7 +193,13 @@ def describe_record(record: ProductRegistryRecord, today: date | None = None) ->
     else:
         parts.append("срок действия не ограничен или не указан")
     parts.append(f"({STATE_LABELS[state]})")
-    return " ".join(parts)
+    if record.score is not None:
+        score = f"{record.score:g}"
+        parts.append(
+            f"; баллов по ПП 719: {score}"
+            + ("" if record.score >= PP719_MIN_SCORE else f" — меньше {PP719_MIN_SCORE}, для закупок не подходит")
+        )
+    return " ".join(parts).replace(" ;", ";")
 
 
 # --------------------------------------------------------------------------------- записи
@@ -318,6 +328,7 @@ def record_out(record: ProductRegistryRecord, today: date | None = None) -> dict
         "valid_to": record.valid_to,
         "url": record.url,
         "note": record.note,
+        "score": record.score,
         "verified_by_user": record.verified_by_user,
         "verified_at": record.verified_at,
         "auto_found_at": record.auto_found_at,
