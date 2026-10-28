@@ -15,6 +15,7 @@ import {
 import { ApiError, api } from "../../api/client";
 import type { Source, SourceCredential, SourcePollResult } from "../../api/types";
 import { CATALOG_SOURCE_TYPES, MANUAL_SOURCE_TYPE, isExternalFeedSource } from "../../api/types";
+import { AdmissionRegistryBlock, registryForSource } from "./AdmissionRegistryBlock";
 import { SourceAccessBlock } from "./SourceAccessBlock";
 import {
   SettingCard,
@@ -128,6 +129,8 @@ function SourceCard({
 }) {
   const isCatalog = CATALOG_SOURCE_TYPES.includes(source.type);
   const canPoll = isAdmin && !isCatalog && source.adapter_status === "implemented";
+  // Реестр допуска: опрос и загрузка файла — в своём блоке, `last_polled_at` у него не ведётся.
+  const registry = registryForSource(source);
   return (
     <SettingCard
       id={`source-${source.key}`}
@@ -153,9 +156,11 @@ function SourceCard({
             <span className="truncate">{source.url.replace(/^https?:\/\//, "")}</span>
             <ExternalLink size={11} className="shrink-0" />
           </a>
-          <span className="block text-zinc-600">
-            Последний опрос: {formatDateTime(source.last_polled_at)}
-          </span>
+          {!registry && (
+            <span className="block text-zinc-600">
+              Последний опрос: {formatDateTime(source.last_polled_at)}
+            </span>
+          )}
           {source.note && <span className="mt-1 block text-zinc-500">{source.note}</span>}
           {source.availability_status === "unavailable" && source.availability_error && (
             <span className="mt-1 block text-red-400/80">{source.availability_error}</span>
@@ -179,12 +184,18 @@ function SourceCard({
         </div>
       }
     >
-      {isAdmin && !isCatalog && credentials !== null && (
-        <SourceAccessBlock
-          source={source}
-          credentials={credentials}
-          onChanged={onCredentialsChanged}
-        />
+      {registry ? (
+        <AdmissionRegistryBlock source={source} registry={registry} isAdmin={isAdmin} />
+      ) : (
+        isAdmin &&
+        !isCatalog &&
+        credentials !== null && (
+          <SourceAccessBlock
+            source={source}
+            credentials={credentials}
+            onChanged={onCredentialsChanged}
+          />
+        )
       )}
     </SettingCard>
   );
