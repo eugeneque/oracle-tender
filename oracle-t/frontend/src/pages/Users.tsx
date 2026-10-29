@@ -8,11 +8,21 @@ import { AppShell } from "../components/AppShell";
 import { PageHeader } from "../components/PageHeader";
 import { UserAvatar } from "../components/UserAvatar";
 import { useAuth } from "../context/useAuth";
+import { ROLE_HINTS, ROLE_LABELS } from "../utils/access";
 
-const ROLE_LABELS: Record<UserRole, string> = {
-  admin: "Администратор",
-  user: "Пользователь",
-};
+const ROLES: UserRole[] = ["user", "analyst", "admin"];
+
+function RoleOptions() {
+  return (
+    <>
+      {ROLES.map((value) => (
+        <option key={value} className="bg-zinc-900" value={value} title={ROLE_HINTS[value]}>
+          {ROLE_LABELS[value]}
+        </option>
+      ))}
+    </>
+  );
+}
 
 const INPUT_CLASS =
   "rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white placeholder-zinc-600 outline-none focus:border-indigo-500";
@@ -271,13 +281,9 @@ export function UsersPage() {
               className={INPUT_CLASS}
               value={role}
               onChange={(e) => setRole(e.target.value as UserRole)}
+              title={ROLE_HINTS[role]}
             >
-              <option className="bg-zinc-900" value="user">
-                {ROLE_LABELS.user}
-              </option>
-              <option className="bg-zinc-900" value="admin">
-                {ROLE_LABELS.admin}
-              </option>
+              <RoleOptions />
             </select>
             <button
               type="submit"
@@ -364,13 +370,9 @@ export function UsersPage() {
                           title={roleLocked ? protectedHint : "Изменить роль"}
                           onChange={(e) => void changeRole(user, e.target.value as UserRole)}
                         >
-                          <option className="bg-zinc-900" value="user">
-                            {ROLE_LABELS.user}
-                          </option>
-                          <option className="bg-zinc-900" value="admin">
-                            {ROLE_LABELS.admin}
-                          </option>
+                          <RoleOptions />
                         </select>
+                        <div className="mt-1 text-xs text-zinc-600">{ROLE_HINTS[user.role]}</div>
                       </td>
                       <td className="px-5 py-3">
                         <span

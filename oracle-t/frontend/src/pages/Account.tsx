@@ -8,16 +8,13 @@ import { PageHeader } from "../components/PageHeader";
 import { AiProviderSwitcher } from "../components/settings/AiProviderControls";
 import { UserAvatar } from "../components/UserAvatar";
 import { useAuth } from "../context/useAuth";
+import { ROLE_LABELS } from "../utils/access";
 
 // Сторона квадрата, до которого картинка ужимается в браузере до отправки. Аватар
 // показывается кружком не больше 96 px, и слать исходную фотографию на сервер незачем —
 // после ужатия файл весит десятки килобайт и укладывается в серверный предел 512 КБ.
 const AVATAR_SIDE = 256;
 
-const ROLE_LABELS: Record<string, string> = {
-  admin: "Администратор",
-  user: "Пользователь",
-};
 
 /**
  * Ужимает картинку до квадрата `AVATAR_SIDE` по центру (обрезка по короткой стороне) и
@@ -234,7 +231,7 @@ export function AccountPage() {
               <div>
                 <label className="mb-1 block text-xs text-zinc-500">Роль</label>
                 <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-zinc-300">
-                  {ROLE_LABELS[user?.role ?? ""] ?? user?.role}
+                  {user ? ROLE_LABELS[user.role] ?? user.role : ""}
                 </div>
               </div>
               <div>

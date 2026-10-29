@@ -297,6 +297,19 @@ def run_poll(
     poll.rows_total = total
     poll.rows_relevant = len(rows)
     _apply_rows(db, poll, registry, rows)
+    market_note = ""
+    if registry == AdmissionRegistry.INDUSTRIAL_PRODUCTS.value:
+        # Те же строки — модификациям отчёта «Рынок ПУ» (раздел 79 ARCHITECTURE.md): дата
+        # внесения в РПП — точка отсчёта отчёта о локализации. Сбой здесь опрос не роняет.
+        try:
+            from app.services.meter_market_gisp import apply_gisp_rows
+
+            market = apply_gisp_rows(db, rows)
+            market_note = f"; модификаций рынка ПУ найдено {market.matched}" + (
+                f", баллы расходятся со справочником аналитика у {market.score_mismatch}" if market.score_mismatch else ""
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Сопоставление ГИСП с модификациями рынка ПУ не удалось: {exc}")
     if registry == AdmissionRegistry.INDUSTRIAL_PRODUCTS.value:
         label = "реестре ПП 719 (ГИСП)"
         scope = (
@@ -313,7 +326,7 @@ def run_poll(
         status=PollStatus.OK,
         message=(
             f"{scope}; моделей каталога найдено в {label}: {poll.products_found} из "
-            f"{poll.products_checked}, записей обновлено {poll.records_saved}"
+            f"{poll.products_checked}, записей обновлено {poll.records_saved}{market_note}"
         ),
     )
 

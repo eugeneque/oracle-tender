@@ -23,6 +23,7 @@ import { dropdownVariants, dropupVariants, scrimVariants } from "../utils/motion
 import { ThemeToggle } from "./ThemeToggle";
 import { UserAvatar } from "./UserAvatar";
 import { WhatsNewBadge, WhatsNewMenuBlock } from "./nav/WhatsNew";
+import { ROLE_LABELS } from "../utils/access";
 
 // Сколько отложенных закупок показывать в меню: это напоминание «к чему вернуться»,
 // а не список — за списком есть раздел «Избранное» на странице тендеров.
@@ -41,10 +42,6 @@ const DECISION_TITLE: Record<string, string> = {
   null: "Модель решения не выносила",
 };
 
-const ROLE_LABELS: Record<string, string> = {
-  admin: "Администратор",
-  user: "Пользователь",
-};
 
 /**
  * Меню учётной записи (расширено 17.09.2026). Раньше — два пункта и «Выйти»; теперь оно
@@ -216,7 +213,7 @@ export function AccountMenu({
                   <div className="truncate text-[15px] font-semibold text-white">{user?.full_name}</div>
                   <div className="truncate text-xs text-zinc-500">@{user?.username}</div>
                   <div className="mt-1.5 inline-flex rounded-full border border-white/[0.08] bg-white/[0.05] px-2 py-0.5 text-[11px] font-medium text-zinc-300">
-                    {ROLE_LABELS[user?.role ?? ""] ?? user?.role}
+                    {user ? ROLE_LABELS[user.role] ?? user.role : ""}
                   </div>
                 </div>
                 <ArrowRight

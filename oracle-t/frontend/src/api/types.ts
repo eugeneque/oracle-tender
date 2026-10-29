@@ -1,4 +1,4 @@
-export type UserRole = "admin" | "user";
+export type UserRole = "admin" | "analyst" | "user";
 
 export interface User {
   id: string;
@@ -2127,4 +2127,166 @@ export interface ActivityItem {
 
 export interface ActivityFeed {
   items: ActivityItem[];
+}
+
+// ── «Аналитика → Рынок ПУ»: поверки ФГИС «Аршин» (раздел 79 ARCHITECTURE.md) ───────────────
+
+export interface MarketShareRow {
+  key: string | number | null;
+  name?: string;
+  count: number;
+  share: number;
+}
+
+export interface MarketOverview {
+  period: { start: string; end: string; label: string };
+  total: number;
+  /** Поверки неразмеченных написаний — итог без них неполон. */
+  unmapped: number;
+  manufacturers: MarketShareRow[];
+  designs: MarketShareRow[];
+  phases: MarketShareRow[];
+  interfaces: MarketShareRow[];
+}
+
+export interface MarketYearRow {
+  name: string;
+  manufacturer_id?: number | null;
+  years: Record<string, number>;
+  total: number;
+  designs?: { design: string; years: Record<string, number>; total: number }[];
+  companies?: { name: string; years: Record<string, number>; total: number }[];
+}
+
+export interface MarketByYear {
+  label: string;
+  years: number[];
+  rows: MarketYearRow[];
+  totals: Record<string, number>;
+  total: number;
+}
+
+export interface MarketLocalizationRow {
+  manufacturer_id: number | null;
+  name: string;
+  quarters: Record<string, number>;
+  total: number;
+  scores: { score: number; requirement_year: number | null; quarters: Record<string, number>; total: number }[];
+}
+
+export interface MarketLocalization {
+  quarters: string[];
+  rows: MarketLocalizationRow[];
+  totals: Record<string, number>;
+  total: number;
+  /** Поверки модификаций без даты внесения в РПП — посчитаны с начала периода. */
+  undated: number;
+  requirement: number | null;
+  requirement_years: number[];
+}
+
+export interface MarketStatus {
+  last_package: { package_id: string; kind: string; finished_at: string; message: string | null } | null;
+  pending_package: { package_id: string; kind: string; status: string; checkpoint: string | null; started_at: string; message: string | null } | null;
+  edge: string | null;
+  edge_label: string | null;
+  new_types: number;
+  unmapped_variants: number;
+  thresholds: { year: number; min_score: number }[];
+  can_edit: boolean;
+}
+
+export interface MarketDrillType {
+  id: number;
+  mit_number: string;
+  notation: string | null;
+  title: string | null;
+  count: number;
+}
+
+export interface MarketDrillModification {
+  id: number | null;
+  name: string;
+  phase: string | null;
+  design: string | null;
+  interface: string | null;
+  count: number;
+}
+
+export interface MarketDrillVariant {
+  id: number;
+  raw: string;
+  mapped_by: string | null;
+  count: number;
+}
+
+export interface MarketSample {
+  global_id: number;
+  org: string | null;
+  mi_number: string | null;
+  verification_date: string;
+  applicable: boolean;
+  annulled: boolean;
+}
+
+export interface MarketUnmappedItem {
+  id: number;
+  raw: string;
+  type_id: number;
+  mit_number: string;
+  notation: string | null;
+  manufacturer: string | null;
+  count: number;
+  last_month: string | null;
+  orgs: string[];
+  mi_numbers: string[];
+}
+
+export interface MarketType {
+  id: number;
+  mit_number: string;
+  title: string | null;
+  notation: string | null;
+  manufacturer_id: number | null;
+  manufacturer: string | null;
+  cert_valid_to: string | null;
+  mpi_years: number | null;
+  in_report: boolean;
+  review_status: "new" | "included" | "excluded";
+  created_at: string;
+  modifications: number;
+  unmapped: number;
+  count: number;
+}
+
+export interface MarketModification {
+  id: number;
+  type_id: number;
+  name: string;
+  phase: string | null;
+  design: string;
+  interface: string | null;
+  mpi_years: number | null;
+  comment: string | null;
+  manufacturer_override_id: number | null;
+  in_rpp: boolean;
+  score: number | null;
+  rpp_included_at: string | null;
+  rpp_record_number: string | null;
+  localization_source: string | null;
+  variants: number;
+  count: number;
+}
+
+export interface MarketManufacturer {
+  id: number;
+  name: string;
+  synonyms: string[];
+  types: number;
+}
+
+export interface MarketGroup {
+  id: number;
+  name: string;
+  members: { manufacturer_id: number; name: string | null; year_from: number | null; year_to: number | null }[];
 }

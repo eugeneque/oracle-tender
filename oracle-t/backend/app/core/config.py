@@ -104,6 +104,11 @@ class Settings(BaseSettings):
     registry_poll_weekday: int = 0
     registry_poll_time: str = "02:30"
 
+    # Поверки ФГИС «Аршин» для отчёта «Рынок ПУ» (раздел 79 ARCHITECTURE.md): изменения
+    # публикуются около 01:00 МСК (поле `nextUpdate` манифеста), догружаем в 01:15.
+    meter_market_enabled: bool = True
+    meter_market_time: str = "01:15"
+
     # Ежесуточное автозаполнение каталога (замечание заказчика 28.09.2026): сквозной опрос
     # всех источников по каждому производителю — ФГИС, сайт, Аршин, руководства — и списки
     # ПО верхнего уровня в конце, см. `app/services/catalog_autofill.py`. Ночью: проход по

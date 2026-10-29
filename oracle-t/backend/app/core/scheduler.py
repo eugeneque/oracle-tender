@@ -71,6 +71,7 @@ _JOB_LABELS = {
     "fgis_revalidation": "Ревалидация карточек ФГИС",
     "document_registry_check": "Сверка документов по СИ",
     "registry_poll": "Сверка с реестрами допуска",
+    "meter_market_load": "Загрузка поверок ФГИС «Аршин»",
     "notify_deadlines": "Уведомления о сроках подачи",
     "purge_logs": "Уборка журнала",
     "tender_gap_repair": "Достройка матриц соответствия",
@@ -134,6 +135,7 @@ _TRACKED_JOBS = (
     "fgis_revalidation",
     "document_registry_check",
     "registry_poll",
+    "meter_market_load",
 )
 
 
@@ -395,6 +397,22 @@ def _run_registry_poll_job() -> None:
         logger.warning(f"Сверка с реестрами допуска завершилась ошибкой: {exc}")
 
 
+def _run_meter_market_job() -> None:
+    """Ночная догрузка поверок ФГИС «Аршин» для отчёта «Рынок ПУ» (раздел 79 ARCHITECTURE.md):
+    цепочка файлов изменений от последнего применённого до `currentId` манифеста. Раньше
+    `nextUpdate` обращаться к сервису незачем — задание просто ничего не найдёт. Итог и
+    ошибки — в журнал (компонент `meter_market`), файлы после применения удаляются."""
+
+    from app.services import meter_market_loader
+
+    try:
+        applied = meter_market_loader.catch_up()
+        if applied:
+            logger.info(f"Поверки ФГИС: применены пакеты {', '.join(applied)}")
+    except Exception as exc:  # noqa: BLE001 - сбой загрузки не должен ронять планировщик
+        _journal("meter_market_load", "error", f"Загрузка поверок ФГИС «Аршин»: {exc}", level=LogLevel.ERROR)
+
+
 def _run_catalog_queue_job() -> None:
     """Подбирает задачи очереди справочника, оставшиеся невыполненными.
 
@@ -564,6 +582,14 @@ def start_scheduler() -> BackgroundScheduler | None:
             _run_registry_poll_job,
             CronTrigger(day_of_week=settings.registry_poll_weekday, hour=hour, minute=minute),
             id="registry_poll",
+            replace_existing=True,
+        )
+    if settings.meter_market_enabled:
+        hour, minute = _parse_hh_mm(settings.meter_market_time)
+        scheduler.add_job(
+            _run_meter_market_job,
+            CronTrigger(hour=hour, minute=minute),
+            id="meter_market_load",
             replace_existing=True,
         )
     # Ночью, до утреннего опроса: к нему матрицы оборванных разборов уже достроены.

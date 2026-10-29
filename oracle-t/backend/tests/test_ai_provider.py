@@ -17,11 +17,11 @@ def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _create_regular_user_token(client, admin_token) -> str:
+def _create_regular_user_token(client, admin_token, role: str = "user") -> str:
     username = f"aiprov_{uuid.uuid4().hex[:8]}"
     resp = client.post(
         "/users",
-        json={"username": username, "password": "SomePass123", "full_name": "T", "role": "user"},
+        json={"username": username, "password": "SomePass123", "full_name": "T", "role": role},
         headers=_auth_headers(admin_token),
     )
     assert resp.status_code == 201, resp.text
@@ -190,7 +190,8 @@ def test_request_context_carries_the_user_into_the_dispatcher(client, admin_toke
 
     monkeypatch.setattr(analytics_service, "run_structured", fake_run_structured)
 
-    user_headers = _auth_headers(_create_regular_user_token(client, admin_token))
+    # «Аналитика» с 29.10.2026 — у аналитика и администратора, поэтому не обычный пользователь.
+    user_headers = _auth_headers(_create_regular_user_token(client, admin_token, role="analyst"))
     client.put("/auth/me/ai-provider", json={"ai_provider": "qwen"}, headers=user_headers)
 
     for hdrs in (user_headers, headers):
