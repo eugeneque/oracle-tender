@@ -1,4 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from app.api.deps import deny_analyst_catalog, require_analytics
 
 from app.api.endpoints import (
     activity,
@@ -16,6 +18,7 @@ from app.api.endpoints import (
     integrations,
     logs,
     manufacturers,
+    meter_market,
     matrix_recalc,
     notifications,
     relevance,
@@ -37,19 +40,20 @@ api_router.include_router(ai_feedback.router)
 api_router.include_router(ai_usage.router)
 api_router.include_router(tags.router)
 api_router.include_router(integrations.router)
-api_router.include_router(manufacturers.router)
+api_router.include_router(manufacturers.router, dependencies=[Depends(deny_analyst_catalog)])
 api_router.include_router(dictionaries.router)
 api_router.include_router(credentials.router)
 api_router.include_router(company_profile.router)
 api_router.include_router(company_profile.profiles_router)
 api_router.include_router(company_participations.router)
-api_router.include_router(analytics.router)
+api_router.include_router(analytics.router, dependencies=[Depends(require_analytics)])
+api_router.include_router(meter_market.router, dependencies=[Depends(require_analytics)])
 api_router.include_router(export.router)
 api_router.include_router(logs.router)
 api_router.include_router(activity.router)
 api_router.include_router(notifications.router)
 api_router.include_router(relevance.router)
 api_router.include_router(integration_api.router)
-api_router.include_router(upper_software.router)
-api_router.include_router(registry_records.router)
+api_router.include_router(upper_software.router, dependencies=[Depends(deny_analyst_catalog)])
+api_router.include_router(registry_records.router, dependencies=[Depends(deny_analyst_catalog)])
 api_router.include_router(matrix_recalc.router)

@@ -38,8 +38,8 @@ export default function App() {
           <Route path="/tenders" element={<TendersPage />} />
           <Route path="/tenders/:tenderId" element={<TenderFullPage />} />
           <Route path="/account" element={<AccountPage />} />
-          <Route path="/analytics" element={<AnalyticsPage />} />
-          <Route path="/catalog" element={<CatalogPage />} />
+          <Route path="/analytics" element={<ProtectedRoute section="/analytics"><AnalyticsPage /></ProtectedRoute>} />
+          <Route path="/catalog" element={<ProtectedRoute section="/catalog"><CatalogPage /></ProtectedRoute>} />
           <Route
             path="/users"
             element={
@@ -48,10 +48,10 @@ export default function App() {
               </ProtectedRoute>
             }
           />
-          <Route path="/company" element={<CompanyPage />} />
+          <Route path="/company" element={<ProtectedRoute section="/company"><CompanyPage /></ProtectedRoute>} />
           {/* «Интеграции» разделены 23.10.2026: внешние сервисы — «Приложения», ИИ — свой раздел. */}
-          <Route path="/apps" element={<AppsPage />} />
-          <Route path="/apps/:appKey" element={<AppDetailPage />} />
+          <Route path="/apps" element={<ProtectedRoute section="/apps"><AppsPage /></ProtectedRoute>} />
+          <Route path="/apps/:appKey" element={<ProtectedRoute section="/apps"><AppDetailPage /></ProtectedRoute>} />
           <Route
             path="/ai"
             element={

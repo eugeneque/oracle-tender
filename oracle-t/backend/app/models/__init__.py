@@ -49,6 +49,19 @@ from app.models.integration_setting import (
 )
 from app.models.job import BackgroundJob, JobKind, JobStatus
 from app.models.log import Log
+from app.models.meter_market import (
+    MeterMarketGroup,
+    MeterMarketGroupMember,
+    MeterMarketLoad,
+    MeterMarketManufacturer,
+    MeterMarketModification,
+    MeterMarketOrg,
+    MeterMarketScoreThreshold,
+    MeterMarketType,
+    MeterMarketVariant,
+    MeterVerification,
+    MeterVerificationMonthly,
+)
 from app.models.manufacturer import (
     CharacteristicSource,
     Manufacturer,
@@ -91,6 +104,17 @@ from app.models.upper_software import UpperSoftwareDevice, UpperSoftwareProductL
 from app.models.user import User
 
 __all__ = [
+    "MeterMarketGroup",
+    "MeterMarketGroupMember",
+    "MeterMarketLoad",
+    "MeterMarketManufacturer",
+    "MeterMarketModification",
+    "MeterMarketOrg",
+    "MeterMarketScoreThreshold",
+    "MeterMarketType",
+    "MeterMarketVariant",
+    "MeterVerification",
+    "MeterVerificationMonthly",
     "AiUsageRecord",
     "Bitrix24Settings",
     "BitrixDealLink",

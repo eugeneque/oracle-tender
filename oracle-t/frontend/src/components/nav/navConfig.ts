@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 
 import type { User } from "../../api/types";
+import { canOpen } from "../../utils/access";
 
 // Разделы приложения — один список на оба вида меню. Боковая панель показывает пункты
 // подряд, шапка — группами с выпадающими подпунктами (`group`). «Что нового?» сюда не
@@ -28,7 +29,6 @@ export interface NavItem {
   /** Подпись под пунктом в выпадающем меню шапки. */
   hint: string;
   group: NavGroupKey;
-  adminOnly?: boolean;
   /** Пункт только выпадающего меню шапки (в боковой панели его заменяет основной раздел). */
   headerOnly?: boolean;
   /** Вложенный пункт боковой панели: `to` родителя, под которым он раскрывается (06.10.2026 —
@@ -84,16 +84,17 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Аналитика", to: "/analytics", icon: BarChart3, hint: "Динамика, победители, доли", group: "market" },
   { label: "Каталог продукции", to: "/catalog", icon: Boxes, hint: "Модели производителей и Госреестр", group: "market" },
   { label: "Моя компания", to: "/company", icon: Building2, hint: "Профиль, участия и реквизиты", group: "company" },
-  { label: "Пользователи", to: "/users", icon: UsersIcon, hint: "Учётные записи и роли", group: "company", adminOnly: true },
+  { label: "Пользователи", to: "/users", icon: UsersIcon, hint: "Учётные записи и роли", group: "company" },
   // 23.10.2026: «Интеграции» разделены — ИИ отдельным пунктом, внешние сервисы — «Приложения».
-  { label: "Модели ИИ", to: "/ai", icon: BrainCircuit, hint: "Ключи моделей и расход токенов", group: "system", adminOnly: true },
+  { label: "Модели ИИ", to: "/ai", icon: BrainCircuit, hint: "Ключи моделей и расход токенов", group: "system" },
   { label: "Приложения", to: "/apps", icon: LayoutGrid, hint: "Bitrix24, почта, Rusprofile", group: "system" },
   { label: "Логирование", to: "/logs", icon: ScrollText, hint: "Журнал операций системы", group: "system" },
   { label: "Настройки", to: "/settings", icon: Settings, hint: "Источники, профиль отбора, вид меню", group: "system", sidebarFooter: true },
 ];
 
+/** Пункты, доступные роли пользователя (`utils/access.ts`). */
 export function visibleNavItems(user: User | null | undefined): NavItem[] {
-  return NAV_ITEMS.filter((item) => !item.adminOnly || user?.role === "admin");
+  return NAV_ITEMS.filter((item) => canOpen(user, item.to));
 }
 
 /** Вложенные адреса (`/tenders/:id`) подсвечивают свой раздел. Пункт с query в `to`

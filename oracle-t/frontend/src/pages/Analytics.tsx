@@ -1,11 +1,13 @@
 import NumberFlow from "@number-flow/react";
 import { motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   BarChart3,
   Building2,
   CalendarClock,
   Download,
+  Gauge,
   Layers,
   MapPin,
   Sparkles,
@@ -20,6 +22,8 @@ import { RankingList } from "../components/analytics/RankingList";
 import { SystemWidgets } from "../components/analytics/SystemWidgets";
 import { TrendChart } from "../components/analytics/TrendChart";
 import { AppShell } from "../components/AppShell";
+import { MarketTab } from "../components/meter-market/MarketTab";
+import { SegmentedControl } from "../components/ui/SegmentedControl";
 import { staggerContainer, staggerItem } from "../utils/motion";
 import { PageHeader } from "../components/PageHeader";
 import { percentTextClass, tenderTypeLabel } from "../utils/format";
@@ -121,7 +125,7 @@ function Panel({
   );
 }
 
-export function AnalyticsPage() {
+function TenderAnalytics() {
   const [period, setPeriod] = useState(PERIODS[1]);
   const [overview, setOverview] = useState<AnalyticsOverview | null>(null);
   const [aiSummary, setAiSummary] = useState<AiSummary | null>(null);
@@ -247,10 +251,9 @@ export function AnalyticsPage() {
       : Number(summary.average_ai_score);
 
   return (
-    <AppShell>
-      <div className="mx-auto w-full max-w-[1400px] px-8 py-8">
+      <div>
         <PageHeader
-          breadcrumb={["Sova", "Аналитика"]}
+          breadcrumb={["Sova", "Аналитика", "Тендеры"]}
           title="Аналитика"
           icon={
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
@@ -401,6 +404,53 @@ export function AnalyticsPage() {
               </div>
             </div>
           )
+        )}
+      </div>
+  );
+}
+
+type AnalyticsTab = "tenders" | "market" | "dictionary";
+
+const TABS: { value: AnalyticsTab; label: string }[] = [
+  { value: "tenders", label: "Тендеры" },
+  { value: "market", label: "Рынок ПУ" },
+  { value: "dictionary", label: "Справочник рынка ПУ" },
+];
+
+/**
+ * Раздел «Аналитика» (раздел 79 ARCHITECTURE.md): дашборд по тендерам остаётся отдельной
+ * вкладкой, рядом — отчёт о рынке счётчиков ЭЭ по поверкам ФГИС «Аршин» и его справочник.
+ * Вкладка — в адресе (`?tab=market`), чтобы ссылку на отчёт можно было переслать.
+ */
+export function AnalyticsPage() {
+  const [params, setParams] = useSearchParams();
+  const tab = (TABS.find((t) => t.value === params.get("tab"))?.value ?? "tenders") as AnalyticsTab;
+  return (
+    <AppShell>
+      <div className="mx-auto w-full max-w-[1400px] px-8 py-8">
+        <div className="mb-6">
+          <SegmentedControl<AnalyticsTab>
+            value={tab}
+            onChange={(next) => setParams(next === "tenders" ? {} : { tab: next })}
+            segments={TABS}
+            ariaLabel="Раздел аналитики"
+          />
+        </div>
+        {tab === "tenders" ? (
+          <TenderAnalytics />
+        ) : (
+          <>
+            <PageHeader
+              breadcrumb={["Sova", "Аналитика", tab === "market" ? "Рынок ПУ" : "Справочник рынка ПУ"]}
+              title={tab === "market" ? "Рынок приборов учёта электроэнергии" : "Справочник рынка ПУ"}
+              icon={
+                <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
+                  <Gauge size={18} />
+                </span>
+              }
+            />
+            <MarketTab view={tab === "market" ? "report" : "dictionary"} />
+          </>
         )}
       </div>
     </AppShell>
