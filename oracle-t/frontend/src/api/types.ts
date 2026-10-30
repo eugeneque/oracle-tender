@@ -1845,6 +1845,8 @@ export interface SelectionFunnel {
   }[];
   /** Закупки площадок, к которым не привязан ни один выбранный профиль — не сужались. */
   untouched_by_profiles: number;
+  /** Профили выбраны явно: такие закупки скрыты, а не показаны без отбора. */
+  untouched_hidden: boolean;
   profiles_mode: "any" | "all";
   ai_enabled: boolean;
   after_ai: number;

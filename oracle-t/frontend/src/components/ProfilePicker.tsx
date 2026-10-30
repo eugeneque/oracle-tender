@@ -21,6 +21,7 @@ export function ProfilePicker({
   onResetToDefault,
   onModeChange,
   onManage,
+  sourceNames = {},
 }: {
   profiles: UserRelevanceProfile[];
   selectedIds: string[];
@@ -32,6 +33,8 @@ export function ProfilePicker({
   onResetToDefault: () => void;
   onModeChange: (mode: "any" | "all") => void;
   onManage: () => void;
+  /** Ключ площадки → название: профиль на одну-две площадки подписывается ими. */
+  sourceNames?: Record<string, string>;
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -74,9 +77,13 @@ export function ProfilePicker({
       <span className="min-w-0">
         <span className="block truncate text-sm text-zinc-100">{profile.name}</span>
         <span className="block truncate text-[11px] text-zinc-500">
+          {/* Названия, а не «площадок: 1» (29.10.2026): по счётчику не понять, что профиль
+              привязан к Тендерплану и в «Стандартных ресурсах» ничего не отберёт. */}
           {profile.source_keys.length === 0
             ? "на всех площадках"
-            : `площадок: ${profile.source_keys.length}`}
+            : profile.source_keys.length <= 2
+              ? `только ${profile.source_keys.map((key) => sourceNames[key] ?? key).join(", ")}`
+              : `площадок: ${profile.source_keys.length}`}
           {!profile.is_default && profile.owner_name ? ` · ${profile.owner_name}` : ""}
           {!profile.is_active ? " · выключен" : ""}
         </span>

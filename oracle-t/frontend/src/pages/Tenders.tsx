@@ -1839,6 +1839,7 @@ export function TendersPage() {
             onResetToDefault={() => updateFilters({ relevanceProfileIds: null })}
             onModeChange={(mode) => updateFilters({ relevanceProfileMode: mode })}
             onManage={() => setIsProfilesOpen(true)}
+            sourceNames={Object.fromEntries(sources.map((source) => [source.key, source.name]))}
           />
 
           <button
@@ -2043,6 +2044,28 @@ export function TendersPage() {
             ) : tenders.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-zinc-600">
                 Нет тендеров по текущим фильтрам
+                {/* Профиль привязан к площадкам не этого канала (созвон 29.10.2026: личный
+                    профиль на Тендерплан в «Стандартных ресурсах»). Пустой список без
+                    объяснения читается как «фильтр сломан». */}
+                {funnel && funnel.profiles.length > 0 && funnel.profiles.every((item) => item.in_scope === 0) && (
+                  <div className="mx-auto mt-3 max-w-md text-xs leading-relaxed text-zinc-500">
+                    {funnel.profiles.length === 1 ? "Выбранный профиль не действует" : "Выбранные профили не действуют"}{" "}
+                    на площадках этого канала:{" "}
+                    {funnel.profiles
+                      .map((item) => `«${item.name}» — ${item.sources.join(", ") || "все площадки"}`)
+                      .join("; ")}
+                    . Переключите «Ресурсы» или поменяйте площадки профиля.
+                    <div className="mt-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsProfilesOpen(true)}
+                        className="rounded-full border border-white/10 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/5"
+                      >
+                        Управлять профилями
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {/* Поиск по заказчику или номеру (замечание 22.10.2026): закупка могла быть
                     скрыта профилями, сроком подачи или моделью — искать по всей базе. */}
                 {filters.search.trim() && (

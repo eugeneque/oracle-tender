@@ -482,11 +482,44 @@ def test_profiles_scoped_to_sources_and_combined(client, admin_token):
         assert response.status_code == 200, response.text
         return {item["id"] for item in response.json()["items"]}
 
-    # Один профиль на площадке A: сужает её закупки, закупку площадки B не трогает.
-    assert listing([alpha]) == {only_alpha, both, other_source}
+    # Явный выбор строгий (29.10.2026): профиль на площадке A показывает только свои
+    # совпадения, закупка площадки B, где выбранные профили не действуют, скрыта.
+    assert listing([alpha]) == {only_alpha, both}
     # Два профиля на одной площадке: «любой» — объединение, «все» — пересечение.
-    assert listing([alpha, beta]) == {only_alpha, only_beta, both, other_source}
-    assert listing([alpha, beta], "all") == {both, other_source}
+    assert listing([alpha, beta]) == {only_alpha, only_beta, both}
+    assert listing([alpha, beta], "all") == {both}
+
+    funnel = client.get(
+        f"/tenders/funnel?feed=standard&search={mark}&relevance_profile={alpha}",
+        headers=_auth(admin_token),
+    ).json()
+    # Слой профилей считается по всему каналу, без поиска: вне площадки A — не только
+    # закупка этого теста.
+    assert funnel["untouched_by_profiles"] >= 1 and funnel["untouched_hidden"] is True
+    assert funnel["shown"] == 2
+
+    # «Общие по умолчанию» по-прежнему не трогают чужие площадки — иначе общий профиль,
+    # привязанный к одной площадке, опустошал бы остальные.
+    from sqlalchemy import select
+
+    from app.api.deps import resolve_relevance_profiles
+    from app.services.tender_service import TenderFilters, apply_tender_filters
+
+    db = SessionLocal()
+    try:
+        def ids(strict: bool, mode: str = "any") -> set[str]:
+            filters = TenderFilters(
+                search=mark,
+                relevance_profiles=resolve_relevance_profiles(db, [uuid.UUID(alpha), uuid.UUID(beta)]),
+                relevance_profiles_mode=mode,
+                relevance_profiles_strict=strict,
+            )
+            return {str(i) for i in db.scalars(apply_tender_filters(select(Tender.id), filters))}
+
+        assert ids(strict=False) == {only_alpha, only_beta, both, other_source}
+        assert ids(strict=False, mode="all") == {both, other_source}
+    finally:
+        db.close()
 
     # Профиль на несколько площадок: привязка правится без пересчёта правил.
     updated = client.put(
