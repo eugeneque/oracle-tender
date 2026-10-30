@@ -76,10 +76,11 @@ _JOB_LABELS = {
     "purge_logs": "Уборка журнала",
     "tender_gap_repair": "Достройка матриц соответствия",
     "catalog_lookup_queue": "Подбор задач очереди справочника",
+    "ai_auto_review": "Автоматический разбор закупок",
 }
 # Ежеминутный пинг доступности в журнал о пропусках не пишется: следующий придёт через
 # минуту, а запись на каждый пропуск при подвисшем пуле засыпала бы журнал.
-_QUIET_JOBS = {"ping_sources"}
+_QUIET_JOBS = {"ping_sources", "ai_auto_review"}
 
 
 def _job_label(job_id: str) -> str:
@@ -456,6 +457,23 @@ def _run_gap_repair_job() -> None:
         db.close()
 
 
+def _run_auto_review_job() -> None:
+    """Авторазбор через YandexGPT (раздел 81 ARCHITECTURE.md): следующая закупка встаёт на
+    полный разбор, когда предыдущая закончилась. Выключенный авторазбор — пустой проход."""
+
+    from app.services import auto_review_service
+
+    db = SessionLocal()
+    try:
+        job = auto_review_service.feed(db)
+        if job is not None:
+            logger.info(f"Авторазбор: на разбор поставлена закупка {job.tender_id}")
+    except Exception as exc:  # noqa: BLE001 - сбой постановки не должен ронять планировщик
+        logger.warning(f"Авторазбор не продвинулся: {exc}")
+    finally:
+        db.close()
+
+
 def _parse_times(value: str) -> list[str]:
     """«06:00,20:00» → ["06:00", "20:00"]: у задачи может быть несколько запусков в сутки."""
 
@@ -605,6 +623,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         _run_catalog_queue_job,
         IntervalTrigger(minutes=15),
         id="catalog_lookup_queue",
+        replace_existing=True,
+    )
+
+    # Авторазбор — раз в минуту: полный разбор идёт минуты, и минута простоя между
+    # закупками незаметна, а чаще проверять, закончилась ли предыдущая, незачем.
+    scheduler.add_job(
+        _run_auto_review_job,
+        IntervalTrigger(minutes=1),
+        id="ai_auto_review",
         replace_existing=True,
     )
 

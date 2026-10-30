@@ -30,7 +30,13 @@ from app.models.job import BackgroundJob, JobKind, JobStatus
 from app.models.log import LogLevel
 from app.models.tender import Tender
 from app.models.user import User
-from app.services.ai_context import JobCancelled, acting_as, current_job_id, running_job
+from app.services.ai_context import (
+    JobCancelled,
+    acting_as,
+    current_job_id,
+    forcing_provider,
+    running_job,
+)
 from app.services.audit import log_action
 
 MAX_ATTEMPTS = 2
@@ -278,13 +284,23 @@ _TENDER_AI_KINDS = frozenset(
 )
 
 
-def enqueue(db: Session, *, kind: JobKind, tender: Tender, actor: User | None) -> BackgroundJob:
+def enqueue(
+    db: Session,
+    *,
+    kind: JobKind,
+    tender: Tender,
+    actor: User | None,
+    payload: dict | None = None,
+) -> BackgroundJob:
     """Ставит задачу в очередь и сразу возвращает её — HTTP-ответ не ждёт выполнения.
 
     Повторный запуск по тому же тендеру не создаёт вторую задачу: пользователь жмёт кнопку
     ещё раз, не дождавшись результата, а два параллельных анализа одного тендера затирали бы
     требования друг друга. Для разбора ИИ это верно и между видами (см. `_TENDER_AI_KINDS`):
-    возвращается уже идущая задача, и карточка следит за ней."""
+    возвращается уже идущая задача, и карточка следит за ней.
+
+    `payload` — входные данные задачи; `{"provider": "yandex"}` закрепляет за ней модель
+    (авторазбор, см. `forcing_provider`)."""
 
     kinds = [*_TENDER_AI_KINDS] if kind.value in _TENDER_AI_KINDS else [kind.value]
     existing = db.execute(
@@ -305,6 +321,7 @@ def enqueue(db: Session, *, kind: JobKind, tender: Tender, actor: User | None) -
         status=JobStatus.QUEUED.value,
         tender_id=tender.id,
         created_by_id=actor.id if actor else None,
+        payload=payload,
     )
     db.add(job)
     log_action(
@@ -448,6 +465,8 @@ def run_job(job_id: uuid.UUID) -> None:
             return
 
         actor = db.get(User, job.created_by_id) if job.created_by_id else None
+        # Модель, закреплённая за задачей при постановке (авторазбор — только YandexGPT).
+        forced = (job.payload or {}).get("provider")
         # Поток пула переиспользуется: контекст выставляется на каждую задачу заново.
         _current_job.set((job.id, job.created_at))
 
@@ -463,7 +482,11 @@ def run_job(job_id: uuid.UUID) -> None:
             try:
                 # Модель ИИ — та, что выбрал автор задачи (см. app/services/ai_context.py);
                 # у задач без автора (расписание) — системная по умолчанию.
-                with acting_as(actor.id if actor else None), running_job(job.started_at, job.id):
+                with (
+                    acting_as(actor.id if actor else None),
+                    forcing_provider(forced),
+                    running_job(job.started_at, job.id),
+                ):
                     message = job_handler(db, job, actor)
             except JobCancelled as exc:
                 db.rollback()
@@ -490,7 +513,11 @@ def run_job(job_id: uuid.UUID) -> None:
             db.commit()
 
             try:
-                with acting_as(actor.id if actor else None), running_job(job.started_at, job.id):
+                with (
+                    acting_as(actor.id if actor else None),
+                    forcing_provider(forced),
+                    running_job(job.started_at, job.id),
+                ):
                     message = handler(db, tender, actor)
             except JobCancelled as exc:
                 # Модель выключил администратор — повтор ушёл бы в ту же выключенную модель.

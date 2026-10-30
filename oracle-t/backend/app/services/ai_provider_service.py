@@ -42,7 +42,7 @@ from app.schemas.integration_setting import (
     RouterAiSettingsUpdate,
     YandexConnectionTestResult,
 )
-from app.services.ai_context import current_user_id
+from app.services.ai_context import current_user_id, forced_provider
 from app.services.audit import log_action
 from app.services.yandex_ai_service import _SINGLETON_ID as _YANDEX_SINGLETON_ID
 from app.services.yandex_ai_service import mask_api_key
@@ -208,8 +208,14 @@ def requested_provider(db: Session, user: User | None) -> tuple[str, str]:
     `("deepseek", "user")` — личный выбор, `("yandex", "default")` — системный. Личный выбор,
     у которого пропали учётные данные (администратор очистил ключ уже после выбора), не
     роняет пользователя: он молча получает модель по умолчанию, а в лог уходит
-    предупреждение — в интерфейсе это же видно по статусу «не настроено»."""
+    предупреждение — в интерфейсе это же видно по статусу «не настроено».
 
+    Модель, закреплённая за задачей (`ai_context.forcing_provider`, авторазбор), важнее и
+    личного выбора, и умолчания."""
+
+    forced = forced_provider()
+    if forced in PROVIDER_LABELS:
+        return forced, "default"
     if user is not None and user.ai_provider in PROVIDER_LABELS:
         if _is_configured(db, user.ai_provider):
             return user.ai_provider, "user"
@@ -230,7 +236,9 @@ def resolve_provider(db: Session, user: User | None) -> tuple[str, str]:
 
     provider, source = requested_provider(db, user)
     disabled = get_disabled_providers(db)
-    if provider not in disabled:
+    # Закреплённую модель не подменяют: авторазбор через выключенный Yandex должен
+    # остановиться, а не потратить платные токены другой модели.
+    if provider not in disabled or forced_provider() == provider:
         return provider, source
     default = get_default_provider(db)
     if default not in disabled and _is_configured(db, default):

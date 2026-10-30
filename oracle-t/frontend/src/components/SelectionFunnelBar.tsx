@@ -294,7 +294,7 @@ export function SelectionCounter({
               <div className="mt-1.5 text-[11px] leading-snug text-zinc-500">
                 {fmt(funnel.untouched_by_profiles)}{" "}
                 {plural(funnel.untouched_by_profiles, "закупка", "закупки", "закупок")} с площадок
-                без выбранных профилей показаны без отбора.
+                без выбранных профилей {funnel.untouched_hidden ? "скрыты" : "показаны без отбора"}.
               </div>
             )}
           </div>

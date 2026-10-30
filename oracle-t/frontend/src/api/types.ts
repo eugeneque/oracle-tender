@@ -563,6 +563,25 @@ export type AiProviderKey = "yandex" | "deepseek" | "qwen";
 
 /** Какая модель обслуживает запросы текущего пользователя. `source` — откуда она взялась:
  * личный выбор (`user`) или системная по умолчанию (`default`). */
+/** Автоматический разбор закупок через YandexGPT (30.10.2026). */
+export interface AutoReviewStatus {
+  enabled: boolean;
+  provider: AiProviderKey;
+  /** Почему очередь стоит при включённом флаге; `null` — идёт. */
+  blocker: string | null;
+  pending: number;
+  done: number;
+  failed: number;
+  current: {
+    job_id: string;
+    status: string;
+    message: string | null;
+    tender_id: string;
+    external_id: string;
+    title: string;
+  } | null;
+}
+
 export interface AiProviderStatus {
   active_provider: AiProviderKey;
   label: string;
@@ -1845,6 +1864,8 @@ export interface SelectionFunnel {
   }[];
   /** Закупки площадок, к которым не привязан ни один выбранный профиль — не сужались. */
   untouched_by_profiles: number;
+  /** Профили выбраны явно: такие закупки скрыты, а не показаны без отбора. */
+  untouched_hidden: boolean;
   profiles_mode: "any" | "all";
   ai_enabled: boolean;
   after_ai: number;

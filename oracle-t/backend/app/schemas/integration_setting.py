@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from typing import Literal
 
@@ -62,6 +63,29 @@ class AiProviderStatus(BaseModel):
 
 class AiProviderEnabledUpdate(BaseModel):
     enabled: bool
+
+
+class AutoReviewCurrent(BaseModel):
+    job_id: uuid.UUID
+    status: str
+    message: str | None = None
+    tender_id: uuid.UUID
+    external_id: str
+    title: str
+
+
+class AutoReviewStatus(BaseModel):
+    """Автоматический разбор через YandexGPT (30.10.2026, раздел 81 ARCHITECTURE.md).
+    `blocker` — почему очередь стоит при включённом флаге (Yandex не настроена или
+    выключена); `pending` — сколько закупок ждут разбора, `current` — какая разбирается."""
+
+    enabled: bool
+    provider: AiProviderKey
+    blocker: str | None = None
+    pending: int
+    done: int
+    failed: int
+    current: AutoReviewCurrent | None = None
 
 
 class AiModelLimitsOut(BaseModel):

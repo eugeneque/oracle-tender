@@ -15,6 +15,7 @@ from app.schemas.integration_setting import (
     AiProviderKey,
     AiProviderStatus,
     AiProviderSwitch,
+    AutoReviewStatus,
     BitrixAiPreview,
     BitrixAiRequestOut,
     BitrixAiSendRequest,
@@ -37,6 +38,7 @@ from app.schemas.integration_setting import (
 from app.services import (
     ai_provider_service,
     api_client_service,
+    auto_review_service,
     bitrix_ai_service,
     bitrix_deal_service,
     rusprofile_service,
@@ -112,6 +114,29 @@ def set_ai_provider_enabled(
     ни одного запроса, а начатые через неё задачи останавливаются."""
 
     return ai_provider_service.set_provider_enabled(db, provider, payload.enabled, actor=admin)
+
+
+@router.get("/auto-review", response_model=AutoReviewStatus)
+def get_auto_review(
+    db: Session = Depends(get_db), _admin: User = Depends(require_admin)
+) -> AutoReviewStatus:
+    """Состояние автоматического разбора закупок через YandexGPT (раздел 81 ARCHITECTURE.md)."""
+
+    return AutoReviewStatus.model_validate(auto_review_service.status(db))
+
+
+@router.put("/auto-review", response_model=AutoReviewStatus)
+def set_auto_review(
+    payload: AiProviderEnabledUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> AutoReviewStatus:
+    """Включает или выключает авторазбор. Включить можно и без настроенного Yandex — тогда
+    `blocker` скажет, что заполнить; очередь пойдёт, как только ключ появится."""
+
+    return AutoReviewStatus.model_validate(
+        auto_review_service.set_enabled(db, payload.enabled, actor=admin)
+    )
 
 
 @router.get("/ai-limits", response_model=list[AiModelLimitsOut])

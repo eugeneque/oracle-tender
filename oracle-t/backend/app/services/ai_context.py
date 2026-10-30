@@ -86,3 +86,31 @@ def running_job(started_at: datetime, job_id: uuid.UUID | None = None) -> Iterat
     finally:
         _job_id.reset(id_token)
         _job_started_at.reset(token)
+
+
+# --- принудительная модель (30.10.2026) -----------------------------------------------
+
+_forced_provider: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "ai_forced_provider", default=None
+)
+
+
+def forced_provider() -> str | None:
+    """Модель, закреплённая за выполняемой задачей мимо личного выбора и умолчания."""
+
+    return _forced_provider.get()
+
+
+@contextmanager
+def forcing_provider(provider: str | None) -> Iterator[None]:
+    """Все обращения к модели внутри блока идут в этого провайдера (`None` — как обычно).
+
+    Нужно авторазбору (раздел 81 ARCHITECTURE.md): он идёт строго через YandexGPT, пока тот
+    бесплатен, и не должен ни уйти в системную DeepSeek, ни молча подмениться платной
+    моделью, если Yandex выключат, — тогда запрос честно откажет."""
+
+    token = _forced_provider.set(provider)
+    try:
+        yield
+    finally:
+        _forced_provider.reset(token)

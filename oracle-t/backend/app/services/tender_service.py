@@ -564,6 +564,9 @@ class TenderFilters:
     relevance_profiles: list["ProfileScope"] = field(default_factory=list)
     # Как сочетаются несколько профилей на одной площадке: `any` — подошёл любой, `all` — все.
     relevance_profiles_mode: str = "any"
+    # Профили выбраны человеком явно (а не «общие по умолчанию»): закупки площадок, где не
+    # действует ни один выбранный профиль, скрываются, а не проходят без отбора (29.10.2026).
+    relevance_profiles_strict: bool = False
     # Скрыть то, что модель явно признала чужим (`ai_relevant = FALSE`). Отдельно от профилей
     # (05.10.2026): раньше это условие пряталось за галочкой «Только прошедшие профиль», и
     # пользователь не видел, что закупки скрывает не профиль, а модель.
@@ -734,13 +737,17 @@ class ProfileScope:
     source_ids: tuple[uuid.UUID, ...] | None
 
 
-def _profiles_condition(profiles: list[ProfileScope], mode: str):
+def _profiles_condition(profiles: list[ProfileScope], mode: str, strict: bool = False):
     """Условие по выбранным профилям с учётом их площадок.
 
-    Профиль сужает только закупки своих площадок; закупка с площадки, к которой не привязан
-    ни один выбранный профиль, не трогается — иначе профиль, привязанный к Тендерплану,
-    опустошал бы Госплан. Несколько профилей на одной площадке комбинируются: `any` — достаточно
-    любого из применимых, `all` — нужны все применимые.
+    Профиль сужает только закупки своих площадок. Закупка с площадки, к которой не привязан
+    ни один выбранный профиль, при «общих по умолчанию» не трогается — иначе общий профиль,
+    привязанный к Тендерплану, опустошал бы Госплан. При явном выборе (`strict`) она
+    скрывается: созвон 29.10.2026 — личный профиль «Счетчики газа», привязанный к Тендерплану,
+    в «Стандартных ресурсах» показывал все 5 524 закупки (обувь, лекарства), и человек видел
+    «фильтр не работает». Выбрал профиль — видишь только то, что он отобрал.
+    Несколько профилей на одной площадке комбинируются: `any` — достаточно любого из
+    применимых, `all` — нужны все применимые.
     """
 
     from app.models.relevance_profile import RelevanceProfileMatch
@@ -759,9 +766,13 @@ def _profiles_condition(profiles: list[ProfileScope], mode: str):
             )
         )
     if mode == "all":
-        return and_(*(or_(~a, m) for a, m in zip(applies, matched)))
+        condition = and_(*(or_(~a, m) for a, m in zip(applies, matched)))
+        return and_(or_(*applies), condition) if strict else condition
+    matched_any = [and_(a, m) for a, m in zip(applies, matched)]
+    if strict:
+        return or_(*matched_any)
     untouched = and_(*(~a for a in applies))
-    return or_(untouched, *(and_(a, m) for a, m in zip(applies, matched)))
+    return or_(untouched, *matched_any)
 
 
 def _build_conditions(filters: TenderFilters) -> list:
@@ -893,7 +904,13 @@ def _build_conditions(filters: TenderFilters) -> list:
             )
         )
     if filters.relevance_profiles:
-        conditions.append(_profiles_condition(filters.relevance_profiles, filters.relevance_profiles_mode))
+        conditions.append(
+            _profiles_condition(
+                filters.relevance_profiles,
+                filters.relevance_profiles_mode,
+                filters.relevance_profiles_strict,
+            )
+        )
     if filters.win_percentage_min is not None or filters.win_percentage_max is not None:
         percentage = mirtek_win_percentage_subquery()
         if filters.win_percentage_min is not None:
@@ -1129,6 +1146,7 @@ def selection_funnel(db: Session, filters: TenderFilters) -> dict:
         base,
         relevance_profiles=filters.relevance_profiles,
         relevance_profiles_mode=filters.relevance_profiles_mode,
+        relevance_profiles_strict=filters.relevance_profiles_strict,
     )
     after_profiles = (
         count_tenders(db, filters=profiles_layer) if filters.relevance_profiles else collected
@@ -1159,6 +1177,8 @@ def selection_funnel(db: Session, filters: TenderFilters) -> dict:
         "after_profiles": after_profiles,
         "profiles": per_profile,
         "untouched_by_profiles": untouched,
+        # Явный выбор: закупки площадок без выбранных профилей скрыты, а не пропущены.
+        "untouched_hidden": filters.relevance_profiles_strict,
         "profiles_mode": filters.relevance_profiles_mode,
         "ai_enabled": filters.hide_ai_rejected,
         "after_ai": after_ai,

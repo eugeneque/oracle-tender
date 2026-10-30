@@ -28,7 +28,7 @@ from app.services import routerai_client, yandex_ai_client
 from app.models.log import LogLevel
 from app.models.user import User
 from app.services.ai_log_service import log_ai_event
-from app.services.ai_context import JobCancelled, current_user_id, job_started_at
+from app.services.ai_context import JobCancelled, current_user_id, forced_provider, job_started_at
 from app.services.ai_provider_service import (
     PROVIDER_LABELS,
     PROVIDER_YANDEX,
@@ -128,6 +128,11 @@ def _run_structured(
     _stop_if_cancelled()
     provider = get_active_provider(db)
     if not is_provider_enabled(db, provider):
+        if forced_provider() == provider:
+            raise AiModelDisabledError(
+                f"{PROVIDER_LABELS[provider]} отключена администратором — автоматический "
+                "разбор через неё не идёт."
+            )
         raise AiModelDisabledError(
             "Все модели ИИ отключены администратором — разбор недоступен, пока одну из них "
             "не включат на странице «Модели ИИ»."

@@ -191,6 +191,8 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
         ),
         hide_ai_rejected=hide_ai_rejected,
         relevance_profiles_mode=relevance_profile_mode,
+        # Явный выбор профилей — строгий по площадкам; «общие по умолчанию» — нет.
+        relevance_profiles_strict=bool(relevance_profile) and not relevance_profile_default,
         win_percentage_min=win_percentage_min,
         win_percentage_max=win_percentage_max,
         ai_score_min=ai_score_min,

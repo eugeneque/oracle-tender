@@ -6,6 +6,7 @@ import type { AiModelLimits, AiProviderKey, YandexAiStudioSettings } from "../..
 import { refreshAiProvider, useAiProvider } from "../../hooks/useAiProvider";
 import { formatDateTime } from "../../utils/format";
 import { AiModelList, AiProviderSwitcher, ProviderCard, RouterAiCard } from "./AiProviderControls";
+import { AutoReviewCard } from "./AutoReviewCard";
 
 /**
  * Вкладка «Модели ИИ» страницы «Интеграции»: модель по умолчанию, доступность моделей и
@@ -26,6 +27,8 @@ export function AiIntegrationSection() {
       <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-5">
         <AiProviderSwitcher scope="default" />
       </div>
+
+      <AutoReviewCard />
 
       <div className="grid items-start gap-6 lg:grid-cols-[300px_minmax(0,1fr)]">
         <AiModelList selected={selected} onSelect={setPicked} />
