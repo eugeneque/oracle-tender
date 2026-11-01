@@ -61,7 +61,7 @@ MANUFACTURERS_ADDED_2026_09: list[tuple[str, str | None, str | None, bool]] = [
     ("АО «Ленэлектро»", "Ленэлектро", "https://lenelectro.ru/product/schetchikielektroenergii", False),
     ("ООО «Матрица»", "Матрица", "https://www.matritca.ru/production/equipment/", False),
     ("ООО «ТехноЭнерго»", "ТехноЭнерго", "https://te-nn.ru/", False),
-    ("ООО «Эльстер Метроника»", "Метроника (АЛЬФА)", "https://www.izmerenie.ru/catalog/", False),
+    # Эльстер Метроника убрана 01.11.2026 по решению заказчика — миграция 0091.
 ]
 
 # Доля рынка (оценка Onside за 2024 год) была здесь с 18.09.2026 и убрана 13.10.2026 по

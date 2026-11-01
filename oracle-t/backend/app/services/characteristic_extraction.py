@@ -360,7 +360,7 @@ def _product_value(
     «Описание типа» и руководство описывают тип целиком, и модель переносила в поле одной
     модели перечень всех вариантов («в зависимости от корпуса: S10, C10 — 120×180×74 мм;
     S30 — …»). Вариант модели выбирается по её обозначению; если выбрать нельзя, перечень
-    из «Описания типа» не записывается — в карточке он читался как ошибка (замечание
+    из «Описания типа» не записывается (кроме записи всего типа, `is_type_record`) — в карточке он читался как ошибка (замечание
     13.10.2026, п.2–3), — а из руководства остаётся: там это часто единственный ответ."""
 
     value = characteristic_values.normalise_value(field_name, raw)
@@ -383,7 +383,10 @@ def _product_value(
     picked = characteristic_values.resolve_family_value(value, tokens)
     if picked is not None:
         return characteristic_values.normalise_value(field_name, picked)
-    if source is CharacteristicSource.FGIS_DESCRIPTION_TYPE:
+    # У записи всего типа перечень вариантов и есть её значение.
+    if source is CharacteristicSource.FGIS_DESCRIPTION_TYPE and not characteristic_values.is_type_record(
+        product.model_code, product.registry_modification
+    ):
         return None
     return value
 

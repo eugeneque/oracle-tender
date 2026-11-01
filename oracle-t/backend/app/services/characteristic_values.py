@@ -91,6 +91,18 @@ _SEGMENT_VALUE_FOR_RE = re.compile(
     r"^\s*(?P<value>.+?)\s+для\s+(?:корпус\w*|исполнени\w*|модификаци\w*)\s+(?P<keys>.+)$",
     re.IGNORECASE,
 )
+# «246×169×57 мм для W31» — ключ корпуса сразу после «для», без слова «корпуса» (так
+# пишет «Описание типа» МИРТЕК-32-РУ, замечание 01.11.2026). Отдельный шаблон, а не
+# необязательное слово в предыдущем: «для счётчиков трансформаторного включения» ключом не
+# является, поэтому ключи здесь — только коды исполнений через запятую, «и» или пробел
+# («для CE30x R33» у Энергомеры). Оговорка в скобках после ключа («(с укороченной клеммной
+# крышкой)») ключом не считается.
+_KEY = r"[A-Za-zА-Яа-яЁё]{1,4}\d{1,3}[A-Za-zА-Яа-я]?"
+_KEYS = rf"{_KEY}(?:\s*(?:,|\bи\b|/|\s)\s*{_KEY})*"
+_SEGMENT_VALUE_FOR_KEY_RE = re.compile(
+    rf"^\s*(?P<value>.+?)\s+для\s+(?P<keys>{_KEYS})(?:\s*\([^)]*\))?\s*$",
+    re.IGNORECASE,
+)
 _PREFIX_RE = re.compile(r"^\s*в\s+зависимост\w*[^:]*:\s*", re.IGNORECASE)
 
 
@@ -166,6 +178,9 @@ def is_family_level(value: str | None) -> bool:
 
 def _split_candidates(value: str) -> list[list[str]]:
     text = _PREFIX_RE.sub("", value)
+    # «192; 122; 57 (для W1); …» (МИРТЕК-101) и «192×122×57 (W1); …» (Нартис) — ключ в
+    # скобках разбирается так же, как «… для W1».
+    text = re.sub(rf"\s*\(\s*(?:для\s+)?({_KEYS})\s*\)", r" для \1", text, flags=re.IGNORECASE)
     candidates = [
         # «S10, C10 — 120×180×74 мм; S30, C30 — 165×230×75 мм»
         re.split(r"\s*;\s*", text),
@@ -178,9 +193,11 @@ def _split_candidates(value: str) -> list[list[str]]:
             text,
             flags=re.IGNORECASE,
         ),
-        # «W1 196×121×60 мм, W2 182×125×55 мм» либо «IP51 для корпуса D17, IP54 для корпуса SP17».
+        # «W1 196×121×60 мм, W2 182×125×55 мм», «IP51 для корпуса D17, IP54 для корпуса SP17»
+        # либо «246×169×57 мм для W31, 291×171×88 мм для W32».
         re.split(
-            r",\s*(?=[A-Za-zА-Яа-яЁё]{1,4}\d{1,3}[A-Za-zа-я]?\s+\d|[^,]*\bдля\s+(?:корпус|исполнени|модификаци))",
+            r",\s*(?=[A-Za-zА-Яа-яЁё]{1,4}\d{1,3}[A-Za-zа-я]?\s+\d"
+            r"|[^,]*\bдля\s+(?:корпус|исполнени|модификаци|[A-Za-zА-Яа-яЁё]{1,4}\d{1,3}[A-Za-zа-я]?\s*(?:,|$)))",
             text,
             flags=re.IGNORECASE,
         ),
@@ -191,6 +208,7 @@ def _split_candidates(value: str) -> list[list[str]]:
 def _parse_segment(segment: str) -> tuple[set[str], str] | None:
     match = (
         _SEGMENT_VALUE_FOR_RE.match(segment)
+        or _SEGMENT_VALUE_FOR_KEY_RE.match(segment)
         or _SEGMENT_KEY_SPACE_RE.match(segment)
         or _SEGMENT_KEYS_FIRST_RE.match(segment)
     )
@@ -242,6 +260,22 @@ def designation_tokens(*designations: str | None) -> set[str]:
     return tokens
 
 
+def is_type_record(model_code: str | None, registry_modification: str | None) -> bool:
+    """Запись описывает тип целиком, а не исполнение: заведена из реестра, и её обозначение
+    по реестру — сам код типа («МИРТЕК-101», «СЕ102М»), без кода корпуса.
+
+    Перечень вариантов из «Описания типа» у такой записи верен — он и описывает тип, — и
+    удалять его нельзя (решение заказчика 01.11.2026: «МИРТЕК-101» без габаритов вовсе хуже,
+    чем с габаритами всех корпусов). Модели с сайта с кодом серии («Пульсар 3» в разных
+    исполнениях) сюда не попадают: обозначения по реестру у них нет или оно длиннее."""
+
+    def plain(text: str | None) -> str:
+        return re.sub(r"[^0-9A-ZА-ЯЁ]+", "", _fold(text or ""))
+
+    code = plain(model_code)
+    return bool(code) and code == plain(registry_modification)
+
+
 def resolve_family_value(value: str, tokens: set[str]) -> str | None:
     """Вариант значения, относящийся к модели с такими кусками обозначения. `None` — по
     обозначению вариант не выбрать."""
@@ -258,7 +292,15 @@ def resolve_family_value(value: str, tokens: set[str]) -> str | None:
     # «не менее 36 суток…; для исполнений Z: не менее 90 суток» — общее значение и
     # оговорки для отдельных исполнений: если модель ни под одну оговорку не попала,
     # к ней относится общее значение.
-    if not unique and keyed and len(plain) == 1 and not _FAMILY_MARKERS.search(plain[0]):
+    # Часть с кодом исполнения в скобках, который ключом не разобрался («в щиток и на рейку
+    # (R5.1)» у СЕ102М), — тоже оговорка, а не общее значение.
+    if (
+        not unique
+        and keyed
+        and len(plain) == 1
+        and not _FAMILY_MARKERS.search(plain[0])
+        and not re.search(rf"\(\s*{_KEY}", plain[0])
+    ):
         return plain[0]
     return None
 

@@ -96,7 +96,11 @@ def _repair_value(
             picked = characteristic_values.normalise_value(row.field_name, picked)
             if picked:
                 return picked, "вариант своей модели из перечня семейства"
-        if from_fgis:
+        # У записи всего типа («МИРТЕК-101») перечень вариантов верен — остаётся.
+        if from_fgis and not (
+            product is not None
+            and characteristic_values.is_type_record(product.model_code, product.registry_modification)
+        ):
             return None, "перечень всего семейства"
     if normalised != value:
         return normalised, "приведено к формату"

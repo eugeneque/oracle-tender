@@ -50,6 +50,48 @@ def test_family_value_resolved_to_own_variant():
     assert cv.resolve_family_value(value, cv.designation_tokens("CE210 C36")) == "120×180×74 мм"
 
 
+def test_family_value_with_bare_housing_key():
+    """01.11.2026: у МИРТЕК-32-РУ-SP37 в «Габаритных размерах» стоял перечень всех корпусов —
+    «… мм для W31, … мм для SP37» без слова «корпуса» не узнавался как перечень."""
+
+    value = (
+        "246×169×57 мм для W31, 291×171×88 мм для W32, 131×91×70 мм для D31, "
+        "236×190×106 мм для SP31, 235х186х78 мм для SP37"
+    )
+    assert cv.is_family_level(value)
+    assert cv.resolve_family_value(value, cv.designation_tokens("МИРТЕК-32-РУ-SP37")) == "235х186х78 мм"
+    assert cv.resolve_family_value(value, cv.designation_tokens("МИРТЕК-32-РУ-W31")) == "246×169×57 мм"
+    # Корпус в обозначении не указан — выбрать нельзя.
+    assert cv.resolve_family_value(value, cv.designation_tokens("МИРТЕК-32-РУ")) is None
+
+    value = "192; 122; 57 (для W1); 182; 125; 55 (для W2); 130; 90; 69 (для D1)"
+    assert cv.resolve_family_value(value, cv.designation_tokens("МИРТЕК-101-РУ-D1")) == "130; 90; 69"
+
+    # Нартис: код корпуса в скобках без «для»; W6 и W6b — разные корпуса.
+    value = "192×122×57 (W1); 209×128×104 (W6); 209×128×110 (W6b); 240×165×77 (SP1)"
+    assert cv.resolve_family_value(value, cv.designation_tokens("НАРТИС-100-W6")) == "209×128×104"
+    assert cv.resolve_family_value(value, cv.designation_tokens("НАРТИС-100-W6b")) == "209×128×110"
+    # Энергомера: серия перед кодом корпуса и оговорка в скобках; у R33 два варианта крышки.
+    value = (
+        "72,5×143×113 мм для CE30x R33 (с укороченной клеммной крышкой); "
+        "72,5×143×151,5 мм для CE30x R33; 73×177×212 мм для CE30x S31"
+    )
+    assert cv.resolve_family_value(value, cv.designation_tokens("CE307 S31")) == "73×177×212 мм"
+    assert cv.resolve_family_value(value, cv.designation_tokens("CE307 R33")) is None
+    # «(R5.1)» — тоже код исполнения, а не общее значение для записи типа без корпуса.
+    value = "для установки в щиток (S7), на рейку (R5), в щиток и на рейку (R5.1)"
+    assert cv.resolve_family_value(value, cv.designation_tokens("СЕ102М")) is None
+
+
+def test_type_record_keeps_family_list():
+    """01.11.2026: у записи всего типа («МИРТЕК-101» из реестра) перечень корпусов остаётся."""
+
+    assert cv.is_type_record("МИРТЕК-101", "МИРТЕК-101")
+    assert cv.is_type_record("СЕ102М", "CE102M")  # кириллица и латиница в обозначении
+    assert not cv.is_type_record("НАРТИС-И300-W113", "НАРТИС-И300-W113-A1R1-230-5-100A")
+    assert not cv.is_type_record("Пульсар 3", None)
+
+
 def test_designation_code_is_not_a_value():
     assert cv.looks_like_designation_code("L1", "CE210 C10.746.L1F", "Интерфейсы")
     # Класс точности сам пишется кодом — его нормализует normalise_value, а не удаляет фильтр.
