@@ -7,7 +7,9 @@
 
 Правила отправки:
 * события с несогласованным типом (`held`) не отправляются, пока тип не станет согласованным
-  в `tender_monitor_service.EVENT_TYPES`;
+  в `tender_monitor_service.EVENT_TYPES` (сейчас все наши коды есть в документации Bitrix24 1.7.0);
+* в `deal_fields` уходят только поля, которые меняет событие (даты, сумма с валютой) — ни
+  результат заявки, ни прочие поля сделки не трогаются;
 * технический сбой (нет ответа, 5xx) оставляет события в очереди — уйдут при следующем проходе;
   отказ портала по данным (4xx) переводит события в `error` и сам не повторяется — нужен
   разбор и ручная повторная отправка;
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -43,8 +46,39 @@ def _z(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+_DATE_TYPES = {
+    "APPLICATION_END_CHANGED",
+    "AUCTION_DATE_CHANGED",
+    "REBID_DATE_CHANGED",
+    "RESULT_DATE_CHANGED",
+}
+
+
+def _typed(event_type: str, value: str | None) -> Any:
+    """Значение в форме, которую просит Bitrix24: дата — RFC 3339 с секундами и поясом, НМЦК —
+    число без пробелов и валюты, остальное — текст, неизвестное — JSON null (не «null», не 0)."""
+
+    if value is None:
+        return None
+    if event_type in _DATE_TYPES:
+        try:
+            return datetime.fromisoformat(value).isoformat(timespec="seconds")
+        except ValueError:
+            return value
+    if event_type == "AMOUNT_CHANGED":
+        try:
+            number = Decimal(value)
+        except InvalidOperation:
+            return None
+        return int(number) if number == number.to_integral_value() else float(number)
+    return value
+
+
 def event_out(event: TenderEvent) -> dict[str, Any]:
-    """Событие в формате `events[]` портала; пустые необязательные поля не передаются."""
+    """Событие в формате `events[]` портала. `old_value` и `new_value` передаются всегда (по
+    договорённости обмена), `effective_at` — только если известен; остальные пустые поля
+    опускаются. Содержимое не должно меняться между повторами: тот же `event_id` с другим
+    телом портал отклоняет."""
 
     data = {
         "event_id": event.event_id,
@@ -52,17 +86,42 @@ def event_out(event: TenderEvent) -> dict[str, Any]:
         "title": event.title,
         "scope": event.scope,
         "lot_number": event.lot_number if event.scope == "LOT" else None,
-        "old_value": event.old_value,
-        "new_value": event.new_value,
         "detected_at": _z(event.detected_at),
         "effective_at": event.effective_at.isoformat(timespec="seconds") if event.effective_at else None,
-        "source_document": event.source_document,
-        "source_url": event.source_url,
+        "source_document": (event.source_document or None) and event.source_document[:500],
+        "source_url": (event.source_url or None) and event.source_url[:2000],
         "source_version": event.source_version,
         "note": event.note,
+        "data": event.data or None,
         "supersedes_event_id": event.supersedes_event_id,
     }
-    return {key: value for key, value in data.items() if value not in (None, "")}
+    out = {key: value for key, value in data.items() if value not in (None, "")}
+    out["old_value"] = _typed(event.event_type, event.old_value)
+    out["new_value"] = _typed(event.event_type, event.new_value)
+    return out
+
+
+# Поля сделки, которые обновляет событие: только свои. Прежде пакет нёс все `deal_fields`, и
+# вместе с событием уходил бы, например, `result_status` — а он мог быть уже подтверждён
+# сотрудником портала (Bitrix24: изменение статуса процедуры не должно стирать результат).
+_EVENT_DEAL_FIELDS: dict[str, tuple[str, ...]] = {
+    "APPLICATION_END_CHANGED": ("application_end",),
+    "AUCTION_DATE_CHANGED": ("auction_date",),
+    "REBID_DATE_CHANGED": ("rebid_date",),
+    "RESULT_DATE_CHANGED": ("result_date",),
+    "AMOUNT_CHANGED": ("amount", "currency"),
+}
+
+
+def event_deal_fields(db: Session, tender: Tender, events: list[TenderEvent]) -> dict[str, Any]:
+    full = bitrix.build_deal_fields(db, tender)
+    wanted = {name for event in events for name in _EVENT_DEAL_FIELDS.get(event.event_type, ())}
+    fields = {name: full[name] for name in wanted if name in full}
+    # После победы сумма сделки — договорная, НМЦК её затирать не должна: событие уходит, поле нет.
+    if full.get("result_status") == "WIN":
+        fields.pop("amount", None)
+        fields.pop("currency", None)
+    return fields
 
 
 def build_events_payload(
@@ -77,7 +136,7 @@ def build_events_payload(
         "generated_at": _z(now),
         "full_snapshot": False,
         "lookup": bitrix.build_lookup(db, tender),
-        "deal_fields": bitrix.build_deal_fields(db, tender),
+        "deal_fields": event_deal_fields(db, tender, events),
         "sections": {},
         "events": [event_out(event) for event in events],
     }

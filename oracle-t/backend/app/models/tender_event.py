@@ -86,6 +86,8 @@ class TenderEvent(Base):
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Подробности для поля `data` события Bitrix24 (валюта, вид обеспечения, вид протокола…).
+    data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     supersedes_event_id: Mapped[str | None] = mapped_column(String(191), nullable=True)
     delivery: Mapped[str] = mapped_column(
         String(10), nullable=False, default=EventDelivery.PENDING.value, index=True

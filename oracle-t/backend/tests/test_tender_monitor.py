@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import httpx
@@ -55,19 +56,21 @@ def test_deadline_change_compares_instants_not_strings():
     same_instant = _snap(fields={"application_end": "2026-11-20T07:00+00:00"})
     assert diff_snapshots(_snap(), same_instant) == []
     moved = diff_snapshots(_snap(), _snap(fields={"application_end": "2026-11-25T10:00+03:00"}))
-    assert _types(moved) == ["DEADLINE_CHANGED"]
+    assert _types(moved) == ["APPLICATION_END_CHANGED"]
     assert moved[0]["old_value"] == "2026-11-20T10:00+03:00"
     assert moved[0]["new_value"] == "2026-11-25T10:00+03:00"
+    assert "effective_at" not in moved[0]  # дату торгов вместо неё не подставляем
 
 
-def test_auction_first_scheduled_then_changed():
+def test_auction_first_scheduled_then_moved_use_one_code():
     first = diff_snapshots(_snap(), _snap(fields={"auction_date": "2026-11-27T11:00+03:00"}))
-    assert _types(first) == ["AUCTION_SCHEDULED"] and first[0]["old_value"] is None
+    assert _types(first) == ["AUCTION_DATE_CHANGED"] and first[0]["old_value"] is None
+    assert first[0]["note"]  # старого значения нет — причина в note
     moved = diff_snapshots(
         _snap(fields={"auction_date": "2026-11-27T11:00+03:00"}),
         _snap(fields={"auction_date": "2026-11-28T11:00+03:00"}),
     )
-    assert _types(moved) == ["AUCTION_CHANGED"]
+    assert _types(moved) == ["AUCTION_DATE_CHANGED"] and moved[0]["old_value"]
 
 
 def test_vanished_date_is_not_an_event():
@@ -79,13 +82,27 @@ def test_rebid_price_status_and_security():
     changes = diff_snapshots(
         _snap(),
         _snap(
-            fields={"rebid_date": "2026-12-01T09:00+03:00", "price": "900000.00", "status": "cancelled"},
-            security={"Размер обеспечения заявки": "5%"},
+            fields={"rebid_date": "2026-12-01T09:00+03:00", "price": "900000.00", "status": "cancelled", "currency": "RUB"},
+            security={"Размер обеспечения заявки": "5%", "Размер обеспечения исполнения контракта": "10%"},
         ),
     )
-    assert set(_types(changes)) == {"REBID_SCHEDULED", "PRICE_CHANGED", "PROCEDURE_CANCELLED", "SECURITY_CHANGED"}
+    assert sorted(_types(changes)) == [
+        "AMOUNT_CHANGED",
+        "PROCEDURE_CANCELLED",
+        "REBID_DATE_CHANGED",
+        "SECURITY_CHANGED",
+        "SECURITY_CHANGED",
+    ]
+    kinds = {c["data"]["security_kind"] for c in changes if c["event_type"] == "SECURITY_CHANGED"}
+    assert kinds == {"APPLICATION", "CONTRACT"}  # заявка и контракт — отдельными событиями
+    assert next(c for c in changes if c["event_type"] == "AMOUNT_CHANGED")["data"] == {"currency": "RUB"}
     # Число в другом написании — не изменение.
     assert diff_snapshots(_snap(), _snap(fields={"price": "1000000"})) == []
+
+
+def test_other_status_is_general_status_event():
+    changes = diff_snapshots(_snap(), _snap(fields={"status": "evaluation"}))
+    assert _types(changes) == ["PROCEDURE_STATUS_CHANGED"]
 
 
 def test_documents_classified_by_kind():
@@ -100,31 +117,45 @@ def test_documents_classified_by_kind():
             **old["documents"],
             "u/contract2": {"name": "Проект контракта (ред.2).docx", "class": "contract"},
             "u/tz2": {"name": "ТЗ.docx", "class": "tz_description"},
-            "u/prot": {"name": "Протокол рассмотрения заявок.pdf", "class": "protocol"},
+            "u/prot": {"name": "Протокол подведения итогов.pdf", "class": "protocol"},
+            "u/prot2": {"name": "Протокол рассмотрения заявок.pdf", "class": "protocol"},
             "u/clar": {"name": "Разъяснения положений документации.docx", "class": "other"},
             "u/other": {"name": "Приложение 5.xlsx", "class": "other"},
+            "u/same": {"name": "Приложение 5.xlsx", "class": "other"},
         }
     )
     by_url = {c["source_url"]: c for c in diff_snapshots(old, new)}
     assert by_url["u/contract2"]["event_type"] == "CONTRACT_CHANGED"
-    assert by_url["u/tz2"]["event_type"] == "TZ_CHANGED"
+    assert by_url["u/tz2"]["event_type"] == "TECHNICAL_REQUIREMENT_CHANGED"
     assert by_url["u/tz2"]["note"] and "редакция" in by_url["u/tz2"]["note"]
     assert by_url["u/prot"]["event_type"] == "PROTOCOL_PUBLISHED"
-    assert by_url["u/clar"]["event_type"] == "CLARIFICATION_RECEIVED"
-    assert by_url["u/other"]["event_type"] == "DOCUMENT_CHANGED"
+    assert by_url["u/prot"]["data"]["is_final"] is True
+    assert by_url["u/prot2"]["data"]["is_final"] is None  # итоговость по названию не определить
+    assert by_url["u/clar"]["event_type"] == "CLARIFICATION_PUBLISHED"
+    assert by_url["u/clar"]["old_value"] is None
+    assert by_url["u/other"]["event_type"] == "DOCUMENT_ADDED"
     assert "u/contract1" not in by_url
 
 
 def test_first_contract_is_added_document_not_new_edition():
     new = _snap(documents={"u/c": {"name": "Проект контракта.docx", "class": "contract"}})
-    assert _types(diff_snapshots(_snap(), new)) == ["DOCUMENT_CHANGED"]
+    assert _types(diff_snapshots(_snap(), new)) == ["DOCUMENT_ADDED"]
 
 
-def test_empty_document_list_is_failure_not_removal():
+def test_replaced_document_with_same_name():
+    old = _snap(documents={"u/a": {"name": "Приложение.xlsx", "class": "other"}})
+    new = _snap(documents={**old["documents"], "u/b": {"name": "Приложение.xlsx", "class": "other"}})
+    (change,) = diff_snapshots(old, new)
+    assert change["event_type"] == "DOCUMENT_REPLACED" and change["old_value"] == "Приложение.xlsx"
+
+
+def test_disappeared_document_is_not_reported():
     old = _snap(documents={"u/a": {"name": "a.docx", "class": "other"}})
     assert diff_snapshots(old, _snap()) == []
-    removed = diff_snapshots(old, _snap(documents={"u/b": {"name": "b.docx", "class": "other"}}))
-    assert "Документ убран" in removed[0]["title"] or any("убран" in c["title"] for c in removed)
+    assert diff_snapshots(old, _snap(documents={"u/b": {"name": "b.docx", "class": "other"}})) == [
+        c for c in diff_snapshots(old, _snap(documents={"u/b": {"name": "b.docx", "class": "other"}}))
+        if c["event_type"] == "DOCUMENT_ADDED"
+    ]
 
 
 # --- с базой -----------------------------------------------------------------------------------
@@ -167,16 +198,15 @@ def test_baseline_then_changes_become_events_with_chain(db_session, client, admi
     db_session.flush()
     events = monitor.check_tender(db_session, tender, refresh=False)
     by_type = {e.event_type: e for e in events}
-    assert set(by_type) == {"PRICE_CHANGED", "CLARIFICATION_RECEIVED"}
-    assert by_type["PRICE_CHANGED"].delivery == EventDelivery.HELD.value  # код не согласован
-    assert by_type["CLARIFICATION_RECEIVED"].delivery == EventDelivery.PENDING.value
+    assert set(by_type) == {"AMOUNT_CHANGED", "CLARIFICATION_PUBLISHED"}
+    assert all(e.delivery == EventDelivery.PENDING.value for e in events)
     assert monitor.check_tender(db_session, tender, refresh=False) == []  # повтор — без дублей
 
     tender.price = Decimal("800000")
     db_session.flush()
     again = monitor.check_tender(db_session, tender, refresh=False)
-    assert again[0].supersedes_event_id == by_type["PRICE_CHANGED"].event_id
-    assert again[0].event_id != by_type["PRICE_CHANGED"].event_id
+    assert again[0].supersedes_event_id == by_type["AMOUNT_CHANGED"].event_id
+    assert again[0].event_id != by_type["AMOUNT_CHANGED"].event_id
 
 
 class _Receiver:
@@ -214,38 +244,90 @@ def _ready(db, admin, tender, *, with_deal: bool = True):
     return monitor.check_tender(db, tender, refresh=False)
 
 
-def test_send_only_agreed_events_without_sections(db_session, client, admin_user):
+def test_send_payload_matches_portal_profile(db_session, client, admin_user):
     tender = _tender(db_session)
+    tender.application_end = datetime(2026, 11, 20, 7, 0, tzinfo=timezone.utc)
     _ready(db_session, admin_user, tender)
     receiver = _Receiver()
 
     result = tender_event_service.send_pending(db_session, tender, transport=httpx.MockTransport(receiver))
 
-    assert result["status"] == "sent" and result["sent"] == 1
+    assert result["status"] == "sent" and result["sent"] == 2
     body = receiver.bodies[0]
-    assert body["sections"] == {} and body["deal_id"] == 1984
-    (event,) = body["events"]
-    assert event["event_type"] == "PROTOCOL_PUBLISHED" and event["scope"] == "PROCEDURE"
-    assert "lot_number" not in event and "old_value" not in event
-    assert event["event_id"].startswith("sova-evt-")
-    states = {e.event_type: e.delivery for e in db_session.query(TenderEvent).filter_by(tender_id=tender.id)}
-    assert states == {"PROTOCOL_PUBLISHED": "sent", "PRICE_CHANGED": "held"}
-    # Нечего отправлять — второй запрос не уходит.
+    assert body["sections"] == {} and body["deal_id"] == 1984 and body["schema_version"] == 2
+    events = {e["event_type"]: e for e in body["events"]}
+    assert set(events) == {"AMOUNT_CHANGED", "PROTOCOL_PUBLISHED"}
+    amount = events["AMOUNT_CHANGED"]
+    # НМЦК — числом, оба значения присутствуют, валюта в data; дата — с секундами и поясом.
+    assert amount["old_value"] == 1000000 and amount["new_value"] == 900000
+    assert amount["data"] == {"currency": "RUB"} and amount["scope"] == "PROCEDURE"
+    protocol = events["PROTOCOL_PUBLISHED"]
+    assert protocol["old_value"] is None and "old_value" in protocol
+    assert protocol["new_value"] == "Протокол.pdf" and protocol["source_url"] == "https://example.test/p.pdf"
+    assert "lot_number" not in protocol and "effective_at" not in protocol
+    assert protocol["event_id"].startswith("sova-evt-")
+    # В сделку — только поля самих событий: сумма и валюта; результат и прочее не трогаются.
+    assert set(body["deal_fields"]) == {"amount", "currency"}
+    assert body["deal_fields"]["amount"] == 900000
+    assert {e.delivery for e in db_session.query(TenderEvent).filter_by(tender_id=tender.id)} == {"sent"}
     assert tender_event_service.send_pending(db_session, tender, transport=httpx.MockTransport(receiver))["status"] == "empty"
     assert len(receiver.bodies) == 1
 
 
-def test_held_event_goes_out_once_type_is_agreed(db_session, client, admin_user, monkeypatch):
+def test_dates_are_rfc3339_with_seconds():
+    from app.services.tender_event_service import _typed
+
+    assert _typed("AUCTION_DATE_CHANGED", "2026-11-27T11:00+03:00") == "2026-11-27T11:00:00+03:00"
+    assert _typed("AMOUNT_CHANGED", "12500000.50") == 12500000.5
+    assert _typed("AMOUNT_CHANGED", None) is None
+    assert _typed("SECURITY_CHANGED", "5%") == "5%"
+
+
+def test_amount_not_sent_to_deal_after_win(db_session, client, admin_user, monkeypatch):
     tender = _tender(db_session)
     _ready(db_session, admin_user, tender)
+    monkeypatch.setattr(bitrix_ai_service, "_result_status", lambda db, t: "WIN")
     receiver = _Receiver()
+
     tender_event_service.send_pending(db_session, tender, transport=httpx.MockTransport(receiver))
 
-    monkeypatch.setitem(monitor.EVENT_TYPES, "PRICE_CHANGED", True)
-    result = tender_event_service.send_pending(db_session, tender, transport=httpx.MockTransport(receiver))
+    body = receiver.bodies[0]
+    assert "amount" not in body["deal_fields"] and "currency" not in body["deal_fields"]
+    assert any(e["event_type"] == "AMOUNT_CHANGED" for e in body["events"])  # журнал остаётся
 
+
+def test_unagreed_event_is_held_until_type_agreed(db_session, client, admin_user, monkeypatch):
+    tender = _tender(db_session)
+    monkeypatch.setitem(monitor.EVENT_TYPES, "AMOUNT_CHANGED", False)
+    _ready(db_session, admin_user, tender)
+    receiver = _Receiver()
+
+    tender_event_service.send_pending(db_session, tender, transport=httpx.MockTransport(receiver))
+    states = {e.event_type: e.delivery for e in db_session.query(TenderEvent).filter_by(tender_id=tender.id)}
+    assert states == {"PROTOCOL_PUBLISHED": "sent", "AMOUNT_CHANGED": "held"}
+
+    monkeypatch.setitem(monitor.EVENT_TYPES, "AMOUNT_CHANGED", True)
+    result = tender_event_service.send_pending(db_session, tender, transport=httpx.MockTransport(receiver))
     assert result["sent"] == 1
-    assert receiver.bodies[1]["events"][0]["event_type"] == "PRICE_CHANGED"
+    assert receiver.bodies[1]["events"][0]["event_type"] == "AMOUNT_CHANGED"
+
+
+def test_resend_keeps_event_content_identical(db_session, client, admin_user):
+    """Тот же event_id с другим содержимым портал отклоняет (409): повтор не должен менять тело."""
+
+    tender = _tender(db_session)
+    _ready(db_session, admin_user, tender)
+
+    def down(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("нет связи")
+
+    tender_event_service.send_pending(db_session, tender, transport=httpx.MockTransport(down))
+    receiver = _Receiver()
+    tender_event_service.send_pending(db_session, tender, transport=httpx.MockTransport(receiver))
+    first = {e.event_id: e for e in db_session.query(TenderEvent).filter_by(tender_id=tender.id)}
+    sent = {e["event_id"]: e for e in receiver.bodies[0]["events"]}
+    for event_id, payload in sent.items():
+        assert payload == tender_event_service.event_out(first[event_id])
 
 
 def test_no_send_without_deal_or_when_disabled(db_session, client, admin_user):
@@ -274,7 +356,7 @@ def test_portal_rejection_is_not_retried_automatically(db_session, client, admin
     assert event.delivery == EventDelivery.ERROR.value and "HTTP 400" in event.error
     assert tender_event_service.send_pending(db_session, tender, transport=httpx.MockTransport(receiver))["status"] == "empty"
 
-    assert tender_event_service.retry_errors(db_session, tender) == 1
+    assert tender_event_service.retry_errors(db_session, tender) == 2
 
 
 def test_network_failure_keeps_events_queued(db_session, client, admin_user):

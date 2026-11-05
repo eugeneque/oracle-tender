@@ -39,26 +39,31 @@ from app.models.user import User
 from app.services import document_service, eis_card_dates, tender_card_service
 from app.services.audit import log_action
 
-# Типы событий и согласованы ли они с Bitrix24. Согласованные названы в инструкции портала и
-# в документе специалиста; остальные — наши рабочие названия: событие записывается, но не
-# уходит (`held`), пока коды не согласованы. Согласовали — меняем значение на True: накопленные
-# события уйдут при ближайшей отправке.
+# Коды событий — по документации Bitrix24 «События СОВА и Bitrix24» (редакция 2026-11-05,
+# приложение 1.7.0, schema_version 2): 16 кодов с русскими подписями и два новых для даты итогов
+# и общего статуса процедуры. Значение — согласован ли код: событие с несогласованным кодом
+# записывается как `held` и не отправляется. Сейчас согласованы все, которые мы формируем.
+# Не заменять близкими по смыслу названиями из других документов: у портала именно
+# `APPLICATION_END_CHANGED` и `AUCTION_DATE_CHANGED`, а не `DEADLINE_CHANGED`/`AUCTION_CHANGED`.
 EVENT_TYPES: dict[str, bool] = {
-    "DEADLINE_CHANGED": True,
-    "AUCTION_SCHEDULED": True,
-    "AUCTION_CHANGED": True,
-    "REBID_SCHEDULED": True,
-    "DOCUMENT_CHANGED": True,
+    "APPLICATION_END_CHANGED": True,
+    "AUCTION_DATE_CHANGED": True,
+    "REBID_DATE_CHANGED": True,
+    "DOCUMENT_ADDED": True,
+    "DOCUMENT_REPLACED": True,
+    "DOCUMENT_REMOVED": True,
+    "TECHNICAL_REQUIREMENT_CHANGED": True,
     "CONTRACT_CHANGED": True,
+    "AMOUNT_CHANGED": True,
     "SECURITY_CHANGED": True,
-    "CLARIFICATION_RECEIVED": True,
-    "PROTOCOL_PUBLISHED": True,
+    "CLARIFICATION_PUBLISHED": True,
+    "PROCEDURE_SUSPENDED": True,
+    "PROCEDURE_RESUMED": True,
     "PROCEDURE_CANCELLED": True,
-    # Коды не согласованы (в документе: «код этого подтипа согласовать в обмене»).
-    "TZ_CHANGED": False,
-    "PRICE_CHANGED": False,
-    "STATUS_CHANGED": False,
-    "RESULT_DATE_CHANGED": False,
+    "PROTOCOL_PUBLISHED": True,
+    "RESULT_CHANGED": True,
+    "RESULT_DATE_CHANGED": True,
+    "PROCEDURE_STATUS_CHANGED": True,
 }
 
 _STATUS_LABELS = {
@@ -114,6 +119,7 @@ def build_snapshot(db: Session, tender: Tender) -> dict[str, Any]:
         "rebid_date": _iso(dates.get("rebid_date")),
         "result_date": _iso(dates.get("result_date")),
         "price": str(tender.price) if tender.price is not None else None,
+        "currency": tender.currency,
         "status": tender.status,
     }
     security = {
@@ -149,43 +155,68 @@ def _change(
     }
 
 
-def _date_effective(value: str | None) -> datetime | None:
-    try:
-        return datetime.fromisoformat(value) if value else None
-    except ValueError:
-        return None
+_NO_PREVIOUS = "Прежнего значения нет: показатель обнаружен впервые."
 
 
-def _document_event(
-    url: str, doc: dict[str, Any], old_docs: dict[str, Any]
-) -> dict[str, Any]:
+def _security_kind(name: str) -> str | None:
+    """Вид обеспечения по названию поля карточки: заявки или исполнения контракта."""
+
+    lowered = name.lower()
+    if "заяв" in lowered:
+        return "APPLICATION"
+    if any(word in lowered for word in ("исполнен", "контракт", "договор")):
+        return "CONTRACT"
+    return None
+
+
+def _document_event(url: str, doc: dict[str, Any], old_docs: dict[str, Any]) -> dict[str, Any]:
     name = doc.get("name") or "документ"
     klass = doc.get("class")
     old_names = {d.get("name") for d in old_docs.values()}
     had_class = any(d.get("class") == klass for d in old_docs.values())
     revised = name in old_names
     lowered = name.lower()
+    common = {"source_document": name, "source_url": url}
+    # Файл с тем же названием, но другим адресом — вероятно, новая редакция; номер версии не
+    # выдумываем (требование Bitrix24).
+    revision_note = "Файл с тем же названием, но другим адресом — вероятно, новая редакция." if revised else None
 
     if klass == DocumentClass.PROTOCOL.value:
-        event_type, title = "PROTOCOL_PUBLISHED", f"Опубликован протокол: {name}"
-    elif "разъяснен" in lowered:
-        event_type, title = "CLARIFICATION_RECEIVED", f"Опубликовано разъяснение: {name}"
-    elif klass == DocumentClass.CONTRACT.value and had_class:
-        event_type, title = "CONTRACT_CHANGED", f"Новая редакция проекта договора: {name}"
-    elif klass == DocumentClass.TZ_DESCRIPTION.value and had_class:
-        event_type, title = "TZ_CHANGED", f"Новая редакция ТЗ: {name}"
-    else:
-        event_type = "DOCUMENT_CHANGED"
-        title = ("Новая редакция документа: " if revised else "Добавлен документ: ") + name
+        return _change(
+            "PROTOCOL_PUBLISHED", f"doc:{url}", f"Опубликован протокол: {name}", None, name,
+            data={"protocol_kind": name, "is_final": True if "итогов" in lowered else None},
+            note="Итоговый характер определён по названию файла." if "итогов" in lowered
+            else "Итоговый ли протокол, по названию файла не определить.",
+            **common,
+        )
+    if "разъяснен" in lowered:
+        return _change(
+            "CLARIFICATION_PUBLISHED", f"doc:{url}", f"Опубликовано разъяснение: {name}", None, name,
+            note="В значении — название файла; содержание разъяснения в самом документе.",
+            **common,
+        )
+    if klass == DocumentClass.CONTRACT.value and had_class:
+        return _change(
+            "CONTRACT_CHANGED", f"doc:{url}", f"Новая редакция проекта договора: {name}",
+            name if revised else None, name,
+            note=revision_note or "Опубликован ещё один файл договора; различия пунктов не сверялись.",
+            **common,
+        )
+    if klass == DocumentClass.TZ_DESCRIPTION.value and had_class:
+        return _change(
+            "TECHNICAL_REQUIREMENT_CHANGED", f"doc:{url}", f"Новая редакция ТЗ: {name}",
+            name if revised else None, name,
+            note=revision_note or "Опубликован ещё один файл ТЗ; изменённые требования не сверялись.",
+            **common,
+        )
+    if revised:
+        return _change(
+            "DOCUMENT_REPLACED", f"doc:{url}", f"Заменён документ: {name}", name, name,
+            note=revision_note, **common,
+        )
     return _change(
-        event_type,
-        f"doc:{url}",
-        title,
-        name if revised else None,
-        name,
-        source_document=name,
-        source_url=url,
-        note="Файл с тем же названием, но другим адресом — вероятно, новая редакция" if revised else None,
+        "DOCUMENT_ADDED", f"doc:{url}", f"Добавлен документ: {name}", None, name,
+        note="Прежнего значения нет: документ опубликован впервые.", **common,
     )
 
 
@@ -195,85 +226,67 @@ def diff_snapshots(old: dict[str, Any], new: dict[str, Any]) -> list[dict[str, A
     changes: list[dict[str, Any]] = []
     of, nf = old.get("fields") or {}, new.get("fields") or {}
 
-    if nf.get("application_end") and not _same_instant(of.get("application_end"), nf["application_end"]):
-        changes.append(
-            _change(
-                "DEADLINE_CHANGED",
-                "application_end",
-                "Изменился срок окончания подачи заявок",
-                of.get("application_end"),
-                nf["application_end"],
-                effective_at=_date_effective(nf["application_end"]),
+    for field, code, title_first, title_changed in (
+        ("application_end", "APPLICATION_END_CHANGED", "Назначен срок окончания подачи заявок",
+         "Изменился срок окончания подачи заявок"),
+        # Дата пропала из карточки — не событие: чаще это сбой разбора страницы, чем снятие даты.
+        ("auction_date", "AUCTION_DATE_CHANGED", "Назначена дата аукциона", "Изменилась дата аукциона"),
+        ("rebid_date", "REBID_DATE_CHANGED", "Назначена переторжка", "Изменилась дата переторжки"),
+        ("result_date", "RESULT_DATE_CHANGED", "Назначена дата подведения итогов",
+         "Изменилась дата подведения итогов"),
+    ):
+        if nf.get(field) and not _same_instant(of.get(field), nf[field]):
+            first = not of.get(field)
+            changes.append(
+                _change(
+                    code, field, title_first if first else title_changed, of.get(field), nf[field],
+                    note=_NO_PREVIOUS if first else None,
+                )
             )
-        )
-
-    # Дата пропала из карточки — не событие: чаще это сбой разбора страницы, чем отмена.
-    if nf.get("auction_date") and not _same_instant(of.get("auction_date"), nf["auction_date"]):
-        scheduled = not of.get("auction_date")
-        changes.append(
-            _change(
-                "AUCTION_SCHEDULED" if scheduled else "AUCTION_CHANGED",
-                "auction_date",
-                "Назначена дата аукциона" if scheduled else "Изменилась дата аукциона",
-                of.get("auction_date"),
-                nf["auction_date"],
-                effective_at=_date_effective(nf["auction_date"]),
-            )
-        )
-
-    if nf.get("rebid_date") and not _same_instant(of.get("rebid_date"), nf["rebid_date"]):
-        changes.append(
-            _change(
-                "REBID_SCHEDULED",
-                "rebid_date",
-                "Назначена переторжка" if not of.get("rebid_date") else "Изменилась дата переторжки",
-                of.get("rebid_date"),
-                nf["rebid_date"],
-                effective_at=_date_effective(nf["rebid_date"]),
-            )
-        )
-
-    if nf.get("result_date") and not _same_instant(of.get("result_date"), nf["result_date"]):
-        changes.append(
-            _change(
-                "RESULT_DATE_CHANGED",
-                "result_date",
-                "Изменилась дата подведения итогов",
-                of.get("result_date"),
-                nf["result_date"],
-            )
-        )
 
     if nf.get("price") is not None and not _same_price(of.get("price"), nf["price"]):
         changes.append(
-            _change("PRICE_CHANGED", "price", "Изменилась НМЦК", of.get("price"), nf["price"])
+            _change(
+                "AMOUNT_CHANGED", "price", "Изменилась НМЦК", of.get("price"), nf["price"],
+                data={"currency": nf.get("currency") or "RUB"},
+                note=_NO_PREVIOUS if of.get("price") is None else None,
+            )
         )
 
     old_status, new_status = of.get("status"), nf.get("status")
     if new_status and new_status != old_status:
-        label = _STATUS_LABELS.get(new_status, new_status)
+        cancelled = new_status == "cancelled"
         changes.append(
             _change(
-                "PROCEDURE_CANCELLED" if new_status == "cancelled" else "STATUS_CHANGED",
+                "PROCEDURE_CANCELLED" if cancelled else "PROCEDURE_STATUS_CHANGED",
                 "status",
-                "Процедура отменена" if new_status == "cancelled" else "Изменился статус процедуры",
+                "Процедура отменена" if cancelled else "Изменился статус процедуры",
                 _STATUS_LABELS.get(old_status, old_status),
-                label,
+                _STATUS_LABELS.get(new_status, new_status),
+                note="Статус — по классификации СОВА, а не дословная формулировка площадки.",
             )
         )
 
     old_sec, new_sec = old.get("security") or {}, new.get("security") or {}
-    if new_sec and old_sec != new_sec:
+    for kind in ("APPLICATION", "CONTRACT", None):
+        o = {k: v for k, v in old_sec.items() if _security_kind(k) == kind}
+        n = {k: v for k, v in new_sec.items() if _security_kind(k) == kind}
+        if not n or o == n:
+            continue
+
         def render(data: dict[str, str]) -> str | None:
             return "\n".join(f"{k}: {v}" for k, v in sorted(data.items())) or None
 
+        label = {"APPLICATION": "заявки", "CONTRACT": "исполнения договора", None: ""}[kind]
         changes.append(
             _change(
                 "SECURITY_CHANGED",
-                "security",
-                "Изменились условия обеспечения",
-                render(old_sec),
-                render(new_sec),
+                f"security:{kind or 'OTHER'}",
+                f"Изменились условия обеспечения {label}".strip(),
+                render(o),
+                render(n),
+                data={"security_kind": kind} if kind else {},
+                note=None if o else _NO_PREVIOUS,
             )
         )
 
@@ -281,21 +294,8 @@ def diff_snapshots(old: dict[str, Any], new: dict[str, Any]) -> list[dict[str, A
     for url, doc in new_docs.items():
         if url not in old_docs:
             changes.append(_document_event(url, doc, old_docs))
-    if new_docs:  # пустой список — вероятный сбой получения, а не удаление всех файлов
-        for url, doc in old_docs.items():
-            if url not in new_docs:
-                name = doc.get("name")
-                changes.append(
-                    _change(
-                        "DOCUMENT_CHANGED",
-                        f"doc:{url}",
-                        f"Документ убран из закупки: {name}",
-                        name,
-                        None,
-                        source_document=name,
-                        source_url=url,
-                    )
-                )
+    # `DOCUMENT_REMOVED` намеренно не формируем: Bitrix24 просит передавать его только при
+    # подтверждённом удалении, а пропажа файла из выдачи площадки чаще означает сбой страницы.
     return changes
 
 
@@ -448,7 +448,7 @@ def record_events(
             old_value=change.get("old_value"),
             new_value=change.get("new_value"),
             detected_at=detected_at,
-            effective_at=change.get("effective_at"),
+            data=change.get("data") or None,
             source_document=(change.get("source_document") or None),
             source_url=change.get("source_url") or tender.source_url,
             note=change.get("note"),
