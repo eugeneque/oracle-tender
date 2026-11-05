@@ -2206,6 +2206,31 @@ export interface BitrixAiPreview {
   size_bytes: number;
 }
 
+/** Отслеживание изменений по закупке и журнал событий Bitrix24 (05.11.2026). */
+export interface TenderMonitoringEvent {
+  event_id: string;
+  event_type: string;
+  title: string;
+  old_value: string | null;
+  new_value: string | null;
+  detected_at: string;
+  delivery: "pending" | "held" | "sent" | "error";
+  type_agreed: boolean;
+  error: string | null;
+  sent_at: string | null;
+}
+
+export interface TenderMonitoringState {
+  enabled: boolean;
+  baseline_at: string | null;
+  last_checked_at: string | null;
+  checks_count: number;
+  last_error: string | null;
+  has_deal: boolean;
+  events: TenderMonitoringEvent[];
+  send_result: { status: string; detail: string | null } | null;
+}
+
 /** Кнопка «Загрузить в Битрикс» на странице тендера (20.10.2026). */
 export interface BitrixTenderState {
   can_upload: boolean;

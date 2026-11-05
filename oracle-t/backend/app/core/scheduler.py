@@ -77,10 +77,11 @@ _JOB_LABELS = {
     "tender_gap_repair": "Достройка матриц соответствия",
     "catalog_lookup_queue": "Подбор задач очереди справочника",
     "ai_auto_review": "Автоматический разбор закупок",
+    "tender_monitoring": "Отслеживание изменений по закупкам",
 }
 # Ежеминутный пинг доступности в журнал о пропусках не пишется: следующий придёт через
 # минуту, а запись на каждый пропуск при подвисшем пуле засыпала бы журнал.
-_QUIET_JOBS = {"ping_sources", "ai_auto_review"}
+_QUIET_JOBS = {"ping_sources", "ai_auto_review", "tender_monitoring"}
 
 
 def _job_label(job_id: str) -> str:
@@ -474,6 +475,26 @@ def _run_auto_review_job() -> None:
         db.close()
 
 
+def _run_tender_monitoring_job() -> None:
+    """Проверка закупок под наблюдением и отправка событий в Bitrix24 (раздел 84
+    ARCHITECTURE.md). Без включённых закупок — пустой проход."""
+
+    from app.services import tender_monitor_service
+
+    db = SessionLocal()
+    try:
+        result = tender_monitor_service.run_all(db)
+        if result["checked"] or result["failed"]:
+            logger.info(
+                f"Отслеживание: проверено {result['checked']}, новых событий {result['events']}, "
+                f"сбоев {result['failed']}"
+            )
+    except Exception as exc:  # noqa: BLE001 - сбой прохода не должен ронять планировщик
+        logger.warning(f"Отслеживание закупок не выполнено: {exc}")
+    finally:
+        db.close()
+
+
 def _parse_times(value: str) -> list[str]:
     """«06:00,20:00» → ["06:00", "20:00"]: у задачи может быть несколько запусков в сутки."""
 
@@ -632,6 +653,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         _run_auto_review_job,
         IntervalTrigger(minutes=1),
         id="ai_auto_review",
+        replace_existing=True,
+    )
+
+    # Отслеживание изменений по закупкам под наблюдением (раздел 84): раз в полчаса. Чаще —
+    # лишняя нагрузка на площадки, реже — перенос аукциона замечается с задержкой.
+    scheduler.add_job(
+        _run_tender_monitoring_job,
+        IntervalTrigger(minutes=30),
+        id="tender_monitoring",
         replace_existing=True,
     )
 

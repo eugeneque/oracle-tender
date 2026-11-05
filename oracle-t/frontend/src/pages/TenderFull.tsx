@@ -7,6 +7,7 @@ import type { Tender } from "../api/types";
 import { AppShell } from "../components/AppShell";
 import { TenderDetailPanel } from "../components/TenderDetailPanel";
 import { BitrixUploadButton } from "../components/tender-detail/BitrixUploadButton";
+import { TenderMonitoringButton } from "../components/tender-detail/TenderMonitoringButton";
 
 /**
  * Закупка на отдельной странице (замечание 17.09.2026): та же карточка, что справа в
@@ -60,6 +61,7 @@ export function TenderFullPage() {
             </span>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {tender && <TenderMonitoringButton tenderId={tender.id} />}
             {tender && <BitrixUploadButton tenderId={tender.id} stage={tender.stage} />}
             <Link
               to="/tenders"
