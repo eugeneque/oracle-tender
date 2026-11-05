@@ -25,6 +25,7 @@ from app.api.endpoints import (
     sources,
     tags,
     tenders,
+    software_integrations,
     upper_software,
     registry_records,
     users,
@@ -55,5 +56,6 @@ api_router.include_router(notifications.router)
 api_router.include_router(relevance.router)
 api_router.include_router(integration_api.router)
 api_router.include_router(upper_software.router, dependencies=[Depends(deny_analyst_catalog)])
+api_router.include_router(software_integrations.router, dependencies=[Depends(deny_analyst_catalog)])
 api_router.include_router(registry_records.router, dependencies=[Depends(deny_analyst_catalog)])
 api_router.include_router(matrix_recalc.router)

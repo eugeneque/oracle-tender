@@ -815,8 +815,11 @@ def tender_overview(db: Session, tender: Tender) -> dict:
                 "support": support,
             }
         )
+    from app.services.software_integration_service import tender_integrations
+
     return {
         "requirements": integration_requirements,
+        "mirtek_integrations": tender_integrations(db, requirements),
         "named_platforms": named,
         "generic_requirement": generic,
         "platforms": platforms,

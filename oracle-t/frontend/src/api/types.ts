@@ -416,8 +416,116 @@ export interface TenderIntegrationRequirement {
   generic: boolean;
 }
 
+// Интеграции МИРТЕК в ПО верхнего уровня — данные специалиста (05.11.2026).
+export type IntegrationVerdict = "yes" | "partial" | "no" | "unknown";
+export type IntegrationFieldStatus = "auto" | "confirmed" | "edited" | "manual";
+
+export interface IntegrationField {
+  value: string;
+  verdict: IntegrationVerdict | null;
+  status: IntegrationFieldStatus;
+  source: string;
+  updated_at: string | null;
+  updated_by: string | null;
+  document_id?: string | null;
+}
+
+export interface IntegrationFunction {
+  id: string;
+  model: string;
+  protocol: string;
+  name: string;
+  status: "yes" | "partial" | "no";
+  comment: string;
+  verified: boolean;
+  source: string;
+  document_id: string | null;
+}
+
+export interface IntegrationDraft {
+  fields: Record<string, IntegrationField>;
+  models: string[];
+  functions: IntegrationFunction[];
+}
+
+export interface SoftwareIntegration {
+  id: string;
+  key: string;
+  name: string;
+  platform_key: string | null;
+  platform_name: string | null;
+  aliases: string[];
+  sort_order: number;
+  draft: IntegrationDraft;
+  published_at: string | null;
+  draft_updated_at: string | null;
+  dirty: boolean;
+  pending_review: number;
+  has_published: boolean;
+}
+
+export interface IntegrationPublication {
+  id: string;
+  published_at: string;
+  published_by: string | null;
+  comment: string | null;
+  changes: { key: string; name: string; fields?: string[]; initial?: boolean; functions_added?: number; functions_removed?: number }[];
+}
+
+export interface SoftwareIntegrationsOverview {
+  items: SoftwareIntegration[];
+  fields: { key: string; label: string; with_verdict: boolean }[];
+  publications: IntegrationPublication[];
+  platforms: { key: string; name: string }[];
+}
+
+export interface IntegrationDocument {
+  id: string;
+  integration_id: string;
+  file_name: string;
+  content_type: string | null;
+  size: number;
+  analysis_status: "none" | "pending" | "done" | "failed";
+  analysis_result: {
+    summary?: string;
+    reading?: { summary: string };
+    fields_filled?: string[];
+    functions_added?: number;
+    conflicts?: { field: string; current: string; from_scan: string }[];
+  } | null;
+  analysis_error: string | null;
+  analyzed_at: string | null;
+  created_at: string;
+}
+
+export interface ProductIntegration {
+  integration_id: string;
+  key: string;
+  name: string;
+  matched_models: string[];
+  has_mirtek: string;
+  has_mirtek_verdict: IntegrationVerdict | null;
+  protocol_mirtek: string;
+  protocol_spodes: string;
+  software_version: string;
+  functions_total: number;
+  functions_supported: number;
+  published_at: string | null;
+}
+
+export interface TenderMirtekIntegration {
+  integration_id: string;
+  name: string;
+  has_mirtek: string;
+  has_mirtek_verdict: IntegrationVerdict | null;
+  protocol_spodes: string;
+  software_version: string;
+  published_at: string | null;
+}
+
 export interface TenderUpperSoftware {
   requirements: TenderIntegrationRequirement[];
+  mirtek_integrations?: TenderMirtekIntegration[];
   named_platforms: string[];
   generic_requirement: boolean;
   platforms: (UpperSoftwarePlatform & { mentioned: boolean })[];

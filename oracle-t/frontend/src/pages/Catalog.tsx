@@ -35,6 +35,7 @@ import { RegistryLearningSection } from "../components/catalog/RegistryLearningS
 import { SiteSyncProgress } from "../components/catalog/SiteSyncProgress";
 import { SiTypeGroups } from "../components/catalog/SiTypeGroups";
 import { siTypeGroup } from "../components/catalog/siTypeGroup";
+import { SoftwareIntegrationsSection } from "../components/catalog/SoftwareIntegrationsSection";
 import { UpperSoftwareSection } from "../components/catalog/UpperSoftwareSection";
 import { DropdownMenu } from "../components/DropdownMenu";
 import { PageHeader } from "../components/PageHeader";
@@ -864,7 +865,12 @@ export function CatalogPage() {
                 {step === "documents" && <CatalogDocumentsSection manufacturerId={selectedId} isAdmin={isAdmin} />}
 
                 {/* ПО верхнего уровня */}
-                {step === "software" && <UpperSoftwareSection manufacturerId={selectedId} isAdmin={isAdmin} />}
+                {step === "software" && (
+                  <div className="space-y-4">
+                    <SoftwareIntegrationsSection canDelete />
+                    <UpperSoftwareSection manufacturerId={selectedId} isAdmin={isAdmin} />
+                  </div>
+                )}
               </>
             )}
           </div>

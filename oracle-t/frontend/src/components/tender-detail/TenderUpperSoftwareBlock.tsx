@@ -78,6 +78,33 @@ export function TenderUpperSoftwareBlock({ tenderId }: { tenderId: string }) {
         </ul>
       </div>
 
+      {(data.mirtek_integrations?.length ?? 0) > 0 && (
+        <div className="border-b border-white/[0.06] px-3 py-2.5">
+          <div className="text-xs font-medium text-zinc-400">МИРТЕК — данные специалиста</div>
+          <ul className="mt-1 space-y-1">
+            {data.mirtek_integrations?.map((row) => (
+              <li key={row.integration_id} className="text-[12px] leading-snug text-zinc-400">
+                <span className="text-zinc-200">{row.name}</span>
+                <span
+                  className={
+                    row.has_mirtek_verdict === "yes"
+                      ? " text-emerald-400"
+                      : row.has_mirtek_verdict === "no"
+                        ? " text-red-400"
+                        : " text-amber-400"
+                  }
+                >
+                  {" "}
+                  · {row.has_mirtek || "нет данных"}
+                </span>
+                {row.protocol_spodes && <span> · СПОДЭС: {row.protocol_spodes}</span>}
+                {row.software_version && <span> · версия: {row.software_version}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="overflow-x-auto">
         <table className="w-full min-w-[480px] border-collapse text-[13px]">
           <thead>

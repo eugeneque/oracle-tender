@@ -100,6 +100,11 @@ from app.models.tender_card import TenderCard
 from app.models.tender_document import DocumentClass, TenderDocument
 from app.models.tender_history import HistoryKind, TenderHistoryEntry
 from app.models.tender_position import TenderPosition
+from app.models.software_integration import (
+    SoftwareIntegration,
+    SoftwareIntegrationDocument,
+    SoftwareIntegrationPublication,
+)
 from app.models.upper_software import UpperSoftwareDevice, UpperSoftwareProductLink
 from app.models.user import User
 

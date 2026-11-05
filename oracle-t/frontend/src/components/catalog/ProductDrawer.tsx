@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ExternalLink, X } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
-import type { Characteristic, DataSource, MeterParameter, Product, ProductSupport, SiType } from "../../api/types";
+import type { Characteristic, DataSource, MeterParameter, Product, ProductIntegration, ProductSupport, SiType } from "../../api/types";
 import { productDisplayName } from "../../utils/format";
 import { meterKindLabel } from "../../utils/meterKinds";
 import { DataSourcesPanel } from "./DataSourcesPanel";
@@ -60,6 +60,7 @@ export function ProductDrawer({
 }) {
   const [characteristics, setCharacteristics] = useState<Characteristic[]>([]);
   const [support, setSupport] = useState<ProductSupport[]>([]);
+  const [integrations, setIntegrations] = useState<ProductIntegration[]>([]);
   const [parameters, setParameters] = useState<MeterParameter[]>([]);
   const [sources, setSources] = useState<DataSource[] | null>(null);
   // Меняется после действий с источниками — раздел реестров перечитывает свои записи.
@@ -87,16 +88,20 @@ export function ProductDrawer({
   useEffect(() => {
     setCharacteristics([]);
     setSupport([]);
+    setIntegrations([]);
     setSources(null);
     setNotice(null);
     setError(null);
     void run("load", async () => {
-      const [rows, platforms] = await Promise.all([
+      const [rows, platforms, verified] = await Promise.all([
         api.get<Characteristic[]>(`/products/${productId}/characteristics`),
         api.get<ProductSupport[]>(`/products/${productId}/upper-software`),
+        // Данные специалиста (05.11.2026): только у моделей МИРТЕК, у прочих — пустой список.
+        api.get<ProductIntegration[]>(`/products/${productId}/software-integrations`).catch(() => []),
       ]);
       setCharacteristics(rows);
       setSupport(platforms);
+      setIntegrations(verified);
     });
   }, [productId]);
 
@@ -313,6 +318,34 @@ export function ProductDrawer({
                   ))
                 )}
               </div>
+              {integrations.length > 0 && (
+                <div className="mt-2">
+                  <div className="text-[11px] text-zinc-500">Подтверждено специалистом</div>
+                  <div className="mt-0.5 flex flex-wrap gap-1 text-[12px]">
+                    {integrations.map((row) => (
+                      <span
+                        key={row.integration_id}
+                        title={[
+                          row.protocol_mirtek && `Протокол МИРТЕК: ${row.protocol_mirtek}`,
+                          row.protocol_spodes && `СПОДЭС: ${row.protocol_spodes}`,
+                          row.software_version && `Версия ПО: ${row.software_version}`,
+                          row.functions_total > 0 && `Функций: ${row.functions_supported} из ${row.functions_total}`,
+                        ]
+                          .filter(Boolean)
+                          .join("\n")}
+                        className={`rounded-full border px-2 py-0.5 ${
+                          row.has_mirtek_verdict === "yes"
+                            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                            : "border-amber-500/30 bg-amber-500/10 text-amber-300"
+                        }`}
+                      >
+                        {row.name}
+                        {row.has_mirtek_verdict !== "yes" && " · частично"}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </section>
 

@@ -7,6 +7,8 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+from app.schemas.software_integration import TenderIntegrationOut
+
 
 class UpperSoftwarePlatformOut(BaseModel):
     """Площадка со состоянием её списка поддерживаемого оборудования."""
@@ -111,6 +113,8 @@ class TenderUpperSoftwareOut(BaseModel):
     «производитель × площадка»."""
 
     requirements: list[TenderIntegrationRequirementOut]
+    # Данные специалиста по названным в требованиях ПО (интеграции МИРТЕК, 05.11.2026).
+    mirtek_integrations: list[TenderIntegrationOut] = []
     named_platforms: list[str]
     generic_requirement: bool
     platforms: list[TenderPlatformOut]

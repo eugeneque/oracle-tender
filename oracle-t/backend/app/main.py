@@ -26,6 +26,7 @@ from app.services import (
     fgis_catalog_sync,
     relevance_service,
     startup_refresh,
+    software_integration_service,
     upper_software_service,
 )
 from app.services.notification_service import bootstrap_from_env as bootstrap_notifications
@@ -61,6 +62,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         if admin is not None:
             logger.info(f"Создан первый администратор: {admin.username}")
         bootstrap_notifications(db)
+        try:
+            software_integration_service.seed_defaults(db)
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 - сбой первичной загрузки не должен ронять запуск
+            db.rollback()
+            logger.warning(f"Не удалось загрузить интеграции в ПО верхнего уровня: {exc}")
     finally:
         db.close()
     # Профиль релевантности — в фоне: на архиве без отметок пересчёт занимает секунды, и
