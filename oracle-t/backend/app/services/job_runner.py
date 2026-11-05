@@ -33,6 +33,7 @@ from app.services import (
     tender_card_service,
     tender_insights,
     tender_positions,
+    delivery_terms_service,
     tender_twins,
 )
 from app.services.ai_profile_service import compute_profile_score
@@ -86,6 +87,17 @@ def _run_analysis(db: Session, tender: Tender, actor: User | None) -> str:
     except Exception as exc:  # noqa: BLE001 - позиции не обязательны для анализа
         db.rollback()
         parts.append(f"позиции закупки не извлечены ({exc})")
+
+    # Условия поставки (модель поставки, места и грузополучатели, график, заявки) — ещё одним
+    # запросом по тем же документам (05.11.2026, раздел 85 ARCHITECTURE.md). Сбой не отменяет
+    # анализ: прежние условия остаются.
+    try:
+        report_progress("Условия поставки: места, график, заявки…")
+        found = delivery_terms_service.extract(db, tender, actor=actor)
+        parts.append(f"мест поставки: {found['points']}, этапов графика: {found['stages']}")
+    except Exception as exc:  # noqa: BLE001 - условия поставки не обязательны для анализа
+        db.rollback()
+        parts.append(f"условия поставки не извлечены ({exc})")
 
     # Вектор и список похожих обновляются здесь же: требования только что извлечены, а
     # именно они делают «похожесть» осмысленной (без них похожими оказываются все закупки

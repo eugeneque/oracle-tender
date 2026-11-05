@@ -74,6 +74,7 @@ SECTIONS = (
     "preparation",
     "technical_specification",
     "contract",
+    "documents",
     "participants_prices",
     "fas",
     "matching",
@@ -462,6 +463,123 @@ def _mirtek_cells(db: Session, tender: Tender) -> dict[uuid.UUID, tuple[Complian
     return best
 
 
+_MIME = {
+    "pdf": "application/pdf",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "rtf": "application/rtf",
+    "txt": "text/plain",
+    "zip": "application/zip",
+}
+
+
+def _file_size_label(doc: TenderDocument) -> str | None:
+    """«2.4 МБ» — размер скачанного файла; файла в хранилище нет — не передаём."""
+
+    if not doc.storage_path:
+        return None
+    from app.services.document_service import get_storage_root
+
+    try:
+        size = (get_storage_root() / doc.storage_path).stat().st_size
+    except OSError:
+        return None
+    if size >= 1024 * 1024:
+        return f"{size / 1024 / 1024:.1f} МБ"
+    return f"{max(1, round(size / 1024))} КБ"
+
+
+def document_row(tender: Tender, doc: TenderDocument) -> dict[str, Any]:
+    """Строка `procurement_document` раздела `documents` (API 1.7.0). Ключ постоянен для одной
+    редакции одного документа (по адресу файла): новая редакция — новый адрес, новая строка,
+    прежняя не исчезает. `file_url` — только HTTPS; иначе ссылка на файл не передаётся."""
+
+    from app.models.tender_document import DOCUMENT_CLASS_LABELS
+
+    label = DOCUMENT_CLASS_LABELS.get(doc.document_class or "", "Прочее")
+    https = (doc.source_url or "").startswith("https://")
+    return _row(
+        f"document-{procedure_number(tender)}-{hashlib.sha1((doc.source_url or doc.file_name).encode('utf-8')).hexdigest()[:12]}",
+        "procurement_document",
+        label if doc.document_class and doc.document_class != "other" else doc.file_name,
+        {
+            "file_name": doc.file_name,
+            "document_type": label,
+            "mime_type": _MIME.get((doc.file_type or "").lower().lstrip(".")),
+            "file_size": _file_size_label(doc),
+            "file_url": doc.source_url if https else None,
+            "source_url": tender.source_url if (tender.source_url or "").startswith("https://") else None,
+        },
+        status="published",
+        confidence=1.0,
+    )
+
+
+def _delivery_rows(db: Session, tender: Tender, sections: dict[str, list[dict[str, Any]]]) -> None:
+    """Модель поставки, места поставки, график и заявки (API 1.7.0, раздел `contract`)."""
+
+    from app.services.delivery_terms_service import get_terms
+
+    terms = get_terms(db, tender)
+
+    def evidence(item: dict[str, Any]) -> list[dict[str, Any]]:
+        return _evidence(item.get("document"), item.get("quote"))
+
+    model = terms["supply_model"]
+    if model:
+        sections["contract"].append(
+            _row(
+                "supply-model",
+                "supply_model",
+                "Модель поставки",
+                {k: model.get(k) for k in ("delivery_mode", "delivery_order", "general_delivery_terms", "nomenclature_link", "contract_type")},
+                evidence=evidence(model),
+            )
+        )
+    for index, point in enumerate(terms["points"], start=1):
+        lot = point.get("lot_number") or "1"
+        sections["contract"].append(
+            _row(
+                _key(f"delivery-point-lot-{lot}", point.get("consignee_inn"), point.get("consignee_name"), point.get("delivery_address")),
+                "delivery_point",
+                f"Место поставки №{index}",
+                {k: point.get(k) for k in ("consignee_name", "consignee_inn", "consignee_kpp", "delivery_address", "lot_number", "related_positions", "relation_status")},
+                evidence=evidence(point),
+            )
+        )
+    for stage in terms["stages"]:
+        lot = stage.get("lot_number") or "1"
+        sections["contract"].append(
+            _row(
+                f"delivery-schedule-lot-{lot}-stage-{stage.get('stage_number')}",
+                "delivery_schedule",
+                f"Этап №{stage.get('stage_number')}",
+                {k: stage.get(k) for k in ("stage_number", "delivery_period", "trigger_event", "quantity_or_volume", "consignee_name", "delivery_address", "lot_number", "related_positions", "relation_status")},
+                evidence=evidence(stage),
+            )
+        )
+    requests = terms["requests"]
+    if requests:
+        sections["contract"].append(
+            _row(
+                "delivery-request-terms",
+                "delivery_request_terms",
+                "Условия поставки по заявкам",
+                {k: requests.get(k) for k in ("request_method", "fulfillment_term", "min_volume", "max_volume", "request_period", "nomenclature_defined_in_request", "quantity_defined_in_request", "address_defined_in_request", "consignee_defined_in_request")},
+                evidence=evidence(requests),
+            )
+        )
+
+
+def _document_rows(db: Session, tender: Tender, sections: dict[str, list[dict[str, Any]]]) -> None:
+    for doc in db.scalars(
+        select(TenderDocument).where(TenderDocument.tender_id == tender.id).order_by(TenderDocument.created_at)
+    ):
+        sections["documents"].append(document_row(tender, doc))
+
+
 def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]]]:
     sections: dict[str, list[dict[str, Any]]] = {name: [] for name in SECTIONS}
     documents = _documents(db, tender)
@@ -684,6 +802,9 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
                     updated_at=extra_at,
                 )
             )
+
+    _delivery_rows(db, tender, sections)
+    _document_rows(db, tender, sections)
 
     # Участники и цены: итог процедуры из протокола.
     outcome = db.scalar(

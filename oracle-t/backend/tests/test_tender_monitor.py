@@ -254,7 +254,12 @@ def test_send_payload_matches_portal_profile(db_session, client, admin_user):
 
     assert result["status"] == "sent" and result["sent"] == 2
     body = receiver.bodies[0]
-    assert body["sections"] == {} and body["deal_id"] == 1984 and body["schema_version"] == 2
+    assert body["deal_id"] == 1984 and body["schema_version"] == 2
+    # Раздел документов — только по событию о документе (протокол); анализ не трогается.
+    assert list(body["sections"]) == ["documents"]
+    (doc_row,) = body["sections"]["documents"]
+    assert doc_row["type"] == "procurement_document" and doc_row["data"]["file_name"] == "Протокол.pdf"
+    assert body["full_snapshot"] is False
     events = {e["event_type"]: e for e in body["events"]}
     assert set(events) == {"AMOUNT_CHANGED", "PROTOCOL_PUBLISHED"}
     amount = events["AMOUNT_CHANGED"]

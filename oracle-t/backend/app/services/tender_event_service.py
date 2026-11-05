@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from app.models.bitrix_deal import BitrixAiRequest, BitrixDealLink
 from app.models.log import LogLevel
 from app.models.tender import Tender
+from app.models.tender_document import TenderDocument
 from app.models.tender_event import EventDelivery, TenderEvent
 from app.services import bitrix_ai_service as bitrix
 from app.services.audit import log_action
@@ -124,6 +125,20 @@ def event_deal_fields(db: Session, tender: Tender, events: list[TenderEvent]) ->
     return fields
 
 
+def event_document_rows(db: Session, tender: Tender, events: list[TenderEvent]) -> list[dict[str, Any]]:
+    """Строки `procurement_document` для событий о документах: в примерах Bitrix24 (events_09)
+    публикация протокола сопровождается строкой документа во вкладке «Документы». Строки
+    обновляются по постоянному ключу, прежние редакции не пропадают (`full_snapshot: false`)."""
+
+    urls = {e.field_key[4:] for e in events if e.field_key.startswith("doc:")}
+    if not urls:
+        return []
+    docs = db.scalars(
+        select(TenderDocument).where(TenderDocument.tender_id == tender.id, TenderDocument.source_url.in_(urls))
+    )
+    return [bitrix.document_row(tender, doc) for doc in docs]
+
+
 def build_events_payload(
     db: Session, tender: Tender, events: list[TenderEvent], *, request_id: str | None = None
 ) -> dict[str, Any]:
@@ -137,7 +152,8 @@ def build_events_payload(
         "full_snapshot": False,
         "lookup": bitrix.build_lookup(db, tender),
         "deal_fields": event_deal_fields(db, tender, events),
-        "sections": {},
+        # Для журнала без изменений анализа — пустые разделы; документы — только по событиям о них.
+        "sections": ({"documents": rows} if (rows := event_document_rows(db, tender, events)) else {}),
         "events": [event_out(event) for event in events],
     }
 
