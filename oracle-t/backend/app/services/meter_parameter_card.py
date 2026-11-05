@@ -33,7 +33,7 @@ from app.seed.meter_parameters import (
     RULE_ONLY_MANUFACTURERS,
     THREE_POSITION_RELAY_BRANDS,
 )
-from app.services import registry_records_service, upper_software_service
+from app.services import characteristic_values, registry_records_service, upper_software_service
 from app.services.characteristic_extraction import list_characteristics
 
 # Параметры, ответ на которые лежит в реестре допуска, а не в характеристиках.
@@ -108,6 +108,9 @@ class ParameterField:
     field_name: str
     characteristic: ProductCharacteristic | None = None
     label: str = ""
+    # Значение по исполнениям корпуса: [{"keys": ["W1"], "value": "192×122×57 мм"}, …]. Пусто —
+    # значение одно на модель (05.11.2026).
+    variants: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -183,6 +186,21 @@ def _has_three_position_relay(manufacturer: Manufacturer | None) -> bool:
     return any(name in brand for name in THREE_POSITION_RELAY_BRANDS)
 
 
+def _housing_variants(characteristic: ProductCharacteristic | None) -> list[dict]:
+    """Значение, записанное перечнем по корпусам («192×122×57 (W1); 182×125×55 (W2)»), → список
+    вариантов, чтобы карточка показывала размеры выбранного корпуса, а не всех сразу
+    (замечание 05.11.2026: «Габариты» подтягивали параметры со всех корпусов). Меньше двух
+    вариантов с ключом корпуса — значение одно, делить нечего."""
+
+    value = characteristic.value if characteristic else None
+    if not value:
+        return []
+    keyed = characteristic_values._segments_with_keys(value)
+    if len(keyed) < 2:
+        return []
+    return [{"keys": sorted(keys), "value": text} for keys, text in keyed]
+
+
 def product_parameters(db: Session, product: Product) -> list[ParameterRow]:
     characteristics = {
         (item.group_name, item.field_name): item for item in list_characteristics(db, product.id)
@@ -213,6 +231,7 @@ def product_parameters(db: Session, product: Product) -> list[ParameterRow]:
                     field_name,
                     characteristics.get((group_name, field_name)),
                     label=FIELD_LABELS.get(field_name, field_name),
+                    variants=_housing_variants(characteristics.get((group_name, field_name))),
                 )
             )
 

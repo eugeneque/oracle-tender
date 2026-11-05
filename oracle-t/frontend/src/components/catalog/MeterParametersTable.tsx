@@ -56,6 +56,7 @@ function needsCheck(c: Characteristic | null): boolean {
 export function CharacteristicLine({
   label,
   characteristic,
+  shownValue,
   emptyHint,
   sourceLabels,
   sourceUrls,
@@ -66,6 +67,8 @@ export function CharacteristicLine({
 }: {
   label?: string;
   characteristic: Characteristic | null;
+  // Значение выбранного корпуса вместо полного перечня; правка по-прежнему меняет всё поле.
+  shownValue?: string;
   emptyHint?: string | null;
   sourceLabels: Record<string, string>;
   sourceUrls: Record<string, string | null>;
@@ -130,7 +133,7 @@ export function CharacteristicLine({
       ) : c?.value ? (
         <Tooltip content={originText(c, sourceLabels)} className="min-w-0 items-center gap-1.5">
           {needsCheck(c) && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" aria-label="не проверено" />}
-          <span className="text-zinc-100">{c.value}</span>
+          <span className="text-zinc-100">{shownValue ?? c.value}</span>
         </Tooltip>
       ) : (
         <Tooltip content={emptyHint}>
@@ -216,6 +219,10 @@ export function MeterParametersTable({
   onSave,
   onVerify,
 }: Props) {
+  // Выбранный корпус общий для всей карточки: размеры, масса и монтаж показываются для него
+  // (05.11.2026 — раньше «Габариты» выводили размеры всех корпусов серии сразу).
+  const [housing, setHousing] = useState<string | null>(null);
+
   if (parameters.length === 0) {
     return <p className="text-xs text-zinc-500">Загружаю параметры…</p>;
   }
@@ -243,11 +250,36 @@ export function MeterParametersTable({
                   </span>
                 </td>
                 <td className="py-2.5">
-                  {fields.map((item) => (
+                  {fields.map((item) => {
+                    const variants = item.variants ?? [];
+                    const selected = variants.find((v) => housing && v.keys.includes(housing)) ?? variants[0];
+                    return (
+                    <div key={`${item.group_name}/${item.field_name}`}>
+                    {variants.length > 1 && (
+                      <div className="flex flex-wrap gap-1 pb-1" role="group" aria-label="Корпус">
+                        {variants.map((v) => {
+                          const name = v.keys.join(", ");
+                          const active = v === selected;
+                          return (
+                            <button
+                              key={name}
+                              type="button"
+                              onClick={() => setHousing(v.keys[0])}
+                              aria-pressed={active}
+                              className={`rounded-md px-2 py-0.5 text-[11px] ${
+                                active ? "bg-white/10 text-zinc-100" : "text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
+                              }`}
+                            >
+                              {name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                     <CharacteristicLine
-                      key={`${item.group_name}/${item.field_name}`}
                       label={parameter.fields.length > 1 ? item.label || item.field_name : undefined}
                       characteristic={item.characteristic}
+                      shownValue={selected?.value}
                       emptyHint={hint}
                       sourceLabels={sourceLabels}
                       sourceUrls={sourceUrls}
@@ -256,7 +288,9 @@ export function MeterParametersTable({
                       onSave={(value) => onSave(item.group_name, item.field_name, value)}
                       onVerify={onVerify}
                     />
-                  ))}
+                    </div>
+                    );
+                  })}
                   {parameter.facts.map((fact, index) => (
                     <div key={index} className="flex min-h-[26px] items-center gap-2 text-[13px] text-zinc-300">
                       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${FACT_DOTS[fact.tone]}`} aria-hidden="true" />

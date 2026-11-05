@@ -255,6 +255,8 @@ export interface MeterParameterField {
   // Подпись в карточке, если имя поля справочника читается странно (П32); пусто — имя поля.
   label: string;
   characteristic: Characteristic | null;
+  // Значение по корпусам («W1» → «192×122×57 мм»); пусто — значение одно на модель.
+  variants?: { keys: string[]; value: string }[];
 }
 
 export interface MeterParameterFact {

@@ -165,6 +165,8 @@ class MeterParameterFieldOut(BaseModel):
     # Подпись в карточке, если имя поля справочника читается странно (П32).
     label: str = ""
     characteristic: CharacteristicOut | None
+    # Значение по корпусам: [{keys: ["W1"], value: "…"}]; пусто — значение одно на модель.
+    variants: list[dict] = []
 
 
 class MeterParameterFactOut(BaseModel):
