@@ -46,7 +46,7 @@ from app.models.analysis import (
 )
 from app.models.ai_profile import WeakPointSeverity
 from app.models.company_participation import CompanyParticipation, ParticipationOutcome
-from app.models.manufacturer import Manufacturer, Product, ProductStatus
+from app.models.manufacturer import Manufacturer, Product, ProductCharacteristic, ProductStatus
 from app.models.market import NicheStatistics
 from app.models.tender import Tender
 from app.models.user import User
@@ -56,7 +56,7 @@ from app.services.product_relevance import (
     select_products_for_context,
     tender_named_text,
 )
-from app.services.meter_kind import kind_labels
+from app.services.meter_kind import kind_labels, kinds_from_text, product_kinds
 from app.services.national_regime import NationalRegime, national_regime, regime_block
 from app.services.tz_reference import is_model_requirement, is_vendor_exclusive, match_manufacturer
 
@@ -281,6 +281,10 @@ class ConclusionFacts:
     # Национальный режим, ПП 1875 (22.10.2026) — какие наши приборы допустимы, см.
     # `national_regime`.
     regime: NationalRegime | None = None
+    # Типы приборов, которые закупает заказчик (`meter_kind`), и типы наших моделей из
+    # каталога — по ним `_clean_products` отсекает прибор не того типа (05.11.2026).
+    wanted_kinds: set[str] = field(default_factory=set)
+    product_kinds: dict[uuid.UUID, set[str]] = field(default_factory=dict)
 
 
 _VERDICT_TEXT = {
@@ -580,6 +584,17 @@ def _product_requirements(db: Session, tender: Tender) -> list[Requirement]:
     )
 
 
+_VERDICT_RANK = {"passes": 0, "caveats": 1, "unknown": 2, "fails": 3}
+
+
+def _rank_key(win: WinPercentage) -> tuple[int, float]:
+    """Порядок производителей: сначала по итогу («проходит» выше «оговорок»), затем по
+    проценту, умноженному на долю оценённых требований."""
+
+    coverage = (win.requirements_scored / win.requirements_total) if win.requirements_total else 0.0
+    return _VERDICT_RANK.get(win.verdict or "", 2), -float(win.percentage) * coverage
+
+
 def collect_facts(db: Session, tender: Tender) -> ConclusionFacts:
     """Приборы и производители: кандидаты из каталога, итог матрицы, что у нас не так."""
 
@@ -607,6 +622,10 @@ def collect_facts(db: Session, tender: Tender) -> ConclusionFacts:
             select_products_for_context(
                 db, manufacturer, requirements, limit=limit, named_text=named_text,
                 active_only=manufacturer.is_mirtek,
+                # Только модели закупаемого типа: штраф за чужой тип лишь сдвигал их вниз, и
+                # при малом каталоге высоковольтный МИРТЕК-135-РУ попадал «нашим прибором» в
+                # закупку трёхфазных счётчиков прямого включения (замечание 05.11.2026).
+                only_wanted_kinds=True,
             )
             if products
             else []
@@ -687,7 +706,9 @@ def collect_facts(db: Session, tender: Tender) -> ConclusionFacts:
 
     lines.append("\nПРОИЗВОДИТЕЛИ (итог матрицы соответствия по ТЗ):")
     compared = [item for item in others if item.win is not None]
-    compared.sort(key=lambda item: -float(item.win.percentage))  # type: ignore[union-attr]
+    # По процентам с поправкой на покрытие: «100% (учтено 16 из 30)» — это не лучше, чем
+    # 85% по 28 требованиям, но в сортировке по голому проценту стояло выше (05.11.2026).
+    compared.sort(key=lambda item: _rank_key(item.win))
     for item in compared:
         win = item.win
         assert win is not None
@@ -731,6 +752,26 @@ def collect_facts(db: Session, tender: Tender) -> ConclusionFacts:
     if msp:
         lines.append("\n" + msp)
 
+    wanted_kinds = set(
+        kinds_from_text(
+            " ".join(
+                [tender.title or ""]
+                + [(item.normalized_text or item.text or "") for item in requirements]
+            )
+        )
+    )
+    own_kinds: dict[uuid.UUID, set[str]] = {}
+    if mirtek is not None and mirtek.products:
+        by_product: dict[uuid.UUID, list[ProductCharacteristic]] = {}
+        for characteristic in db.scalars(
+            select(ProductCharacteristic).where(
+                ProductCharacteristic.product_id.in_([item.id for item in mirtek.products])
+            )
+        ):
+            by_product.setdefault(characteristic.product_id, []).append(characteristic)
+        for product in mirtek.products:
+            own_kinds[product.id] = set(product_kinds(product, by_product.get(product.id, [])))
+
     return ConclusionFacts(
         text="\n".join(lines),
         mirtek=mirtek,
@@ -739,6 +780,8 @@ def collect_facts(db: Session, tender: Tender) -> ConclusionFacts:
         product_requirements=len(requirements),
         brand_lock=lock,
         regime=regime,
+        wanted_kinds=wanted_kinds,
+        product_kinds=own_kinds,
     )
 
 
@@ -1220,6 +1263,20 @@ def _match_manufacturer(name: str, items: list[ManufacturerFacts]) -> Manufactur
 _PRODUCT_STATUSES = set(PRODUCT_STATUS_LABELS)
 
 
+_REGISTRY_CLAUSE_RE = re.compile(r"реестр|ГИСП|\b1875\b|\b719\b|промышленн\w+\s+продукц", re.IGNORECASE)
+
+
+def _drop_registry_claims(note: str) -> str:
+    """Убирает из заметки модели утверждения о реестре: для модели с записью их проверил код.
+    Заметка режется по запятым, точкам с запятой и «и»; остаётся то, что про реестр не говорит."""
+
+    clauses = [part.strip() for part in re.split(r"[;,.]|\s+и\s+(?=о\s)", note) if part.strip()]
+    kept = [part for part in clauses if not _REGISTRY_CLAUSE_RE.search(part)]
+    if len(kept) == len(clauses):
+        return note
+    return ("; ".join(kept) + ". " if kept else "") + "Запись в реестре промпродукции есть."
+
+
 def _clean_products(answer: FitAnswer, facts: ConclusionFacts) -> list[dict]:
     if facts.mirtek is None:
         return []
@@ -1230,12 +1287,21 @@ def _clean_products(answer: FitAnswer, facts: ConclusionFacts) -> list[dict]:
         if product is None or product.id in seen:
             continue
         seen.add(product.id)
+        # Прибор другого типа (высоковольтный в закупке прямого включения и т.п.) не
+        # «подходит частично» — он не относится к закупке вовсе. Тип неизвестен — не трогаем.
+        own = facts.product_kinds.get(product.id)
+        if facts.wanted_kinds and own and not (own & facts.wanted_kinds):
+            continue
         status = item.status if item.status in _PRODUCT_STATUSES else "unchecked"
         # Без матрицы прибор по ТЗ никто не сверял — «подходит» было бы обещанием без факта.
         if not facts.matrix_built and status in {"fits", "partial"}:
             status = "unchecked"
         note = item.note.strip()
         regime = facts.regime
+        if regime is not None and any(allowed.id == product.id for allowed in regime.allowed):
+            # Запись в реестре промпродукции у модели есть (проверено кодом) — слова модели
+            # «нет данных о реестре» неверны и противоречат заключению (баг 05.11.2026).
+            note = _drop_registry_claims(note)
         if regime is not None and regime.blocks(product):
             status = "not_fits"
             note = "Нет записи в реестре промпродукции — по ПП 1875 к поставке не допускается"
@@ -1280,6 +1346,17 @@ def _clean_competitors(answer: FitAnswer, facts: ConclusionFacts) -> list[dict]:
                 "note": item.note.strip(),
             }
         )
+    # Порядок «кто ещё проходит» задаёт матрица, а не модель: сильнейший — по итогу и проценту
+    # с поправкой на покрытие (`_rank_key`); стабильная сортировка сохраняет порядок модели
+    # там, где матрицы нет.
+    wins = {str(item.manufacturer.id): item.win for item in facts.others}
+    order = {"fits": 0, "partial": 1, "not_fits": 2}
+    result.sort(
+        key=lambda row: (
+            order.get(row["status"], 1),
+            _rank_key(wins[row["manufacturer_id"]]) if wins.get(row["manufacturer_id"]) else (9, 0.0),
+        )
+    )
     return result[:5]
 
 

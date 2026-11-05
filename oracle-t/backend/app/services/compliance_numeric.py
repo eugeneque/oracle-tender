@@ -450,6 +450,55 @@ def _ip_check(value: str) -> Check | None:
     return Check("ip", ("Степень защиты",), judge, value.strip())
 
 
+# --------------------------------------------------------------------------- габариты
+
+_SIDES = re.compile(
+    rf"^({_NUM})\s*[×хx*]\s*({_NUM})\s*[×хx*]\s*({_NUM})\s*(?:мм)?$", re.IGNORECASE
+)
+_DIMENSIONS_NAME = re.compile(
+    r"^габарит\w*(?:\s+размер\w*)?\s*(?:\([^)]*\))?\s*(?:,\s*(не\s+более))?$", re.IGNORECASE
+)
+
+
+def _sides(value: str) -> tuple[float, float, float] | None:
+    """Ровно три стороны «A×B×C [мм]»; перечень исполнений, пояснения — None."""
+
+    match = _SIDES.match(value.strip(" ."))
+    return tuple(_number(item) for item in match.groups()) if match else None  # type: ignore[return-value]
+
+
+def _dimensions_check(name: str, value: str) -> Check | None:
+    """«Габариты: не более 90×130×62 мм» — предельные размеры корпуса (05.11.2026).
+
+    Только однозначное: предел задан словами «не более» (точный размер «258*170*74» — не
+    предел, а характеристика конкретного прибора), три числа, без пояснений вроде «без
+    модуля связи». «Подходит» — стороны прибора не больше пределов в порядке записи;
+    «не подходит» — не подходит и при любой перестановке сторон (порядок Ш×Д×В в ТЗ и у
+    производителя бывает разный, и это определяет модель). Раньше габариты целиком решала
+    модель и писала «габариты превышают заданные» без арифметики."""
+
+    heading = _DIMENSIONS_NAME.match(name.strip())
+    if heading is None:
+        return None
+    text = value.strip()
+    at_most = bool(heading.group(1)) or bool(_AT_MOST.match(text))
+    limit = _sides(_AT_MOST.sub("", text))
+    if not at_most or limit is None:
+        return None
+
+    def judge(product_value: str, field_name: str = "") -> list[bool] | None:
+        own = _sides(product_value)
+        if own is None:
+            return None
+        if all(a <= b for a, b in zip(own, limit)):
+            return [True]
+        if any(a > b for a, b in zip(sorted(own), sorted(limit))):
+            return [False]
+        return None
+
+    return Check("dimensions", ("Габаритные размеры",), judge, f"не более {value.strip().removeprefix('не более').strip()}")
+
+
 # --------------------------------------------------------------------------- разбор требования
 
 # Название условия → разбор значения. Порядок важен: «максимальный ток» раньше «ток».
@@ -501,6 +550,12 @@ def requirement_checks(text: str) -> list[Check] | None:
     if re.match(r"^класс\w*\s+точност", text, re.IGNORECASE):
         check = _accuracy_check(text) if ":" in text else None
         return [check] if check else None
+    if ":" in text:
+        # «Габариты, не более: …» — запятая перед «не более» не граница условий.
+        name, _, value = text.partition(":")
+        dimensions = _dimensions_check(name, value)
+        if dimensions is not None:
+            return [dimensions]
     text = _expand_paired(text)
     if not text or ":" not in text:
         return None
@@ -576,7 +631,7 @@ class CatalogModel:
 # нашла ни одного «соответствует» кодом, где была бы права модель (раздел 59 ARCHITECTURE.md).
 ENABLED = frozenset(
     {"accuracy", "voltage", "nominal_current", "max_current", "frequency", "mtbf",
-     "service_life", "mpi", "tariffs", "temperature", "ip"}
+     "service_life", "mpi", "tariffs", "temperature", "ip", "dimensions"}
 )
 
 # Параметры, зависящие от типа прибора (фазность × включение).
@@ -588,7 +643,7 @@ KIND_BOUND = frozenset({"accuracy", "voltage", "nominal_current", "max_current"}
 # не менее 100 А, у прибора 80 А», «требуют 8 тарифов, у прибора 4» — и прибор
 # предлагался). Каталог МИРТЕК — вся линейка с сайта производителя, «ни одна модель не
 # подходит» в нём значит «у нас такого нет»; у конкурентов каталог неполон (см. `prejudge`).
-DECISIVE_KEYS = frozenset({"nominal_current", "max_current", "tariffs"})
+DECISIVE_KEYS = frozenset({"nominal_current", "max_current", "tariffs", "dimensions"})
 
 
 @dataclass

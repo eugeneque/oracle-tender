@@ -272,3 +272,26 @@ def test_purchase_kinds_block_names_every_type_and_unparsed_phase():
     assert "1. Однофазный ПУ" in block
     assert "трёхфазные приборы, но требований к ним не извлечено" in block
     assert purchase_kinds_block(Tender(title="Услуги"), [], "") is None
+
+
+def test_drop_registry_claims_keeps_other_remarks():
+    from app.services.ai_conclusion_service import _drop_registry_claims
+
+    note = _drop_registry_claims(
+        "Габариты счётчика превышают заданные, нет данных о включении в реестр российской "
+        "промышленной продукции"
+    )
+    assert "реестр" not in note.split("Запись")[0]
+    assert note.startswith("Габариты счётчика превышают заданные")
+    assert note.endswith("Запись в реестре промпродукции есть.")
+    assert _drop_registry_claims("Габариты больше") == "Габариты больше"
+
+
+def test_rank_key_penalizes_low_coverage():
+    from types import SimpleNamespace
+
+    from app.services.ai_conclusion_service import _rank_key
+
+    thin = SimpleNamespace(verdict="caveats", percentage=100, requirements_scored=16, requirements_total=30)
+    full = SimpleNamespace(verdict="caveats", percentage=85, requirements_scored=28, requirements_total=30)
+    assert _rank_key(full) < _rank_key(thin)
