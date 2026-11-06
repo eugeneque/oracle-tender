@@ -51,6 +51,19 @@ class Period:
     start: date
     end: date
     label: str
+    # Несколько кварталов/месяцев подряд не обязательно (замечание аналитика 06.11.2026):
+    # `start`/`end` — охват, `ranges` — сами полуинтервалы. Пусто — один `[start, end)`.
+    ranges: tuple[tuple[date, date], ...] = ()
+
+    def where(self, column: str = "mv.month", prefix: str = "p") -> tuple[str, dict[str, Any]]:
+        """Условие по периоду и его параметры; `column` — месяц или дата поверки."""
+
+        ranges = self.ranges or ((self.start, self.end),)
+        parts, params = [], {}
+        for i, (a, b) in enumerate(ranges):
+            parts.append(f"({column} >= :{prefix}s{i} AND {column} < :{prefix}e{i})")
+            params[f"{prefix}s{i}"], params[f"{prefix}e{i}"] = a, b
+        return "(" + " OR ".join(parts) + ")", params
 
 
 def _add_months(value: date, months: int) -> date:
@@ -103,6 +116,8 @@ def parse_period(value: str | None, edge: date | None) -> Period:
                 end = edge
                 return Period(start, end, f"{year} г. ({_quarters_label(start, end)})")
             return Period(start, end, f"{year} г.")
+        if kind in ("quarters", "months"):
+            return _multi_period(kind, arg, edge)
         if kind == "quarter":
             year, quarter = (int(x) for x in arg.split("-"))
             start = date(year, (quarter - 1) * 3 + 1, 1)
@@ -114,6 +129,38 @@ def parse_period(value: str | None, edge: date | None) -> Period:
     except ValueError as exc:
         raise ValueError(f"Непонятный период «{value}»") from exc
     raise ValueError(f"Непонятный период «{value}»")
+
+
+def _multi_period(kind: str, arg: str, edge: date) -> Period:
+    """`quarters:2026-1,2026-3`, `months:2026-01,2026-03` — несколько кварталов или месяцев."""
+
+    starts: set[date] = set()
+    for item in arg.split(","):
+        year, number = (int(x) for x in item.strip().split("-"))
+        if kind == "quarters":
+            if not 1 <= number <= 4:
+                raise ValueError("Квартал — от 1 до 4")
+            starts.add(date(year, (number - 1) * 3 + 1, 1))
+        else:
+            starts.add(date(year, number, 1))
+    if not starts:
+        raise ValueError("Не выбран ни один период")
+    step = 3 if kind == "quarters" else 1
+    ordered = sorted(starts)
+    ranges: list[tuple[date, date]] = []
+    for start in ordered:  # соседние периоды склеиваем: меньше условий в запросе
+        end = _add_months(start, step)
+        if ranges and ranges[-1][1] == start:
+            ranges[-1] = (ranges[-1][0], end)
+        else:
+            ranges.append((start, end))
+    if kind == "quarters":
+        label = ", ".join(quarter_label(d.year, (d.month - 1) // 3 + 1) for d in ordered) + " г."
+    else:
+        label = ", ".join(f"{d:%m.%Y}" for d in ordered)
+    if len(ordered) > 6:
+        label = f"{len(ordered)} {'кварталов' if kind == 'quarters' else 'мес.'}: {label[:40]}…"
+    return Period(ordered[0], ranges[-1][1], label, tuple(ranges))
 
 
 def _edge_label(edge: date) -> str:
@@ -197,14 +244,15 @@ class Filters:
 
 
 def _cells(db: Session, period: Period, extra_group: str = "", extra_select: str = "") -> list[dict[str, Any]]:
+    period_sql, period_params = period.where()
     rows = db.execute(
         text(
             f"SELECT {_MANUFACTURER_SQL} AS manufacturer_id, m.design, m.phase, m.interface, "
             f"(v.modification_id IS NULL) AS unmapped, m.smart_890 AS smart{extra_select}, sum(mv.count) AS count "
-            f"{_BASE_FROM} WHERE mv.month >= :start AND mv.month < :end "
+            f"{_BASE_FROM} WHERE {period_sql} "
             f"GROUP BY 1, 2, 3, 4, 5, 6{extra_group}"
         ),
-        {"start": period.start, "end": period.end},
+        period_params,
     ).mappings()
     return [dict(r) for r in rows]
 
@@ -525,8 +573,7 @@ def drill(
     modification_id: int | None = None,
     unmapped_type_id: int | None = None,
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {"start": period.start, "end": period.end}
-    period_where = "mv.month >= :start AND mv.month < :end"
+    period_where, params = period.where()
     if modification_id is not None or unmapped_type_id is not None:
         if modification_id is not None:
             where, params["id"] = "v.modification_id = :id", modification_id
@@ -565,14 +612,15 @@ def drill(
 def variant_samples(db: Session, variant_id: int, period: Period, limit: int = 10) -> list[dict[str, Any]]:
     """Примеры поверок варианта — чтобы любое расхождение можно было показать записями ФГИС."""
 
+    sample_sql, sample_params = period.where("mv.verification_date")
     rows = db.execute(
         text(
             "SELECT mv.global_id, o.title AS org, mv.mi_number, mv.verification_date, mv.applicable, mv.annulled "
             "FROM meter_verifications mv LEFT JOIN meter_market_orgs o ON o.id = mv.org_id "
-            "WHERE mv.variant_id = :v AND mv.verification_date >= :s AND mv.verification_date < :e "
+            f"WHERE mv.variant_id = :v AND {sample_sql} "
             "ORDER BY mv.verification_date DESC LIMIT :l"
         ),
-        {"v": variant_id, "s": period.start, "e": period.end, "l": limit},
+        {"v": variant_id, "l": limit, **sample_params},
     ).mappings()
     return [dict(r) for r in rows]
 
@@ -583,17 +631,18 @@ def powerbi_rows(db: Session, period: Period) -> list[list[Any]]:
 
     names = _manufacturer_names(db)
     limits = thresholds(db)
+    period_sql, period_params = period.where()
     rows = db.execute(
         text(
             f"SELECT {_MANUFACTURER_SQL} AS manufacturer_id, t.mit_number, "
             "m.design, m.phase, m.interface, "
             "mv.month, m.in_rpp, m.score, m.smart_890, (v.modification_id IS NULL) AS unmapped, "
             "sum(mv.count) AS count "
-            f"{_BASE_FROM} WHERE mv.month >= :start AND mv.month < :end "
+            f"{_BASE_FROM} WHERE {period_sql} "
             "GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 "
             "ORDER BY 2, 6, 1"
         ),
-        {"start": period.start, "end": period.end},
+        period_params,
     ).mappings()
     result: list[list[Any]] = []
     for r in rows:

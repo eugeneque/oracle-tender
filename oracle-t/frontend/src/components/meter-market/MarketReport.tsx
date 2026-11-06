@@ -26,7 +26,7 @@ import { fmt, fmtShare, quarterLabel } from "./format";
  */
 
 type Screen = "overview" | "designs" | "groups" | "localization";
-type PeriodKind = "ytd" | "quarter" | "month" | "all";
+type PeriodKind = "ytd" | "quarters" | "months" | "all";
 
 const SCREENS: { value: Screen; label: string }[] = [
   { value: "overview", label: "Общая информация" },
@@ -41,6 +41,11 @@ const INPUT = "rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1.5 t
 function lastFullMonth(edge: string): { year: number; month: number } {
   const [y, m] = edge.split("-").map(Number);
   return m === 1 ? { year: y - 1, month: 12 } : { year: y, month: m - 1 };
+}
+
+/** Выбранные кварталы/месяцы из значения периода: `quarters:2026-1,2025-4` → «2026-1», «2025-4». */
+function parseSet(arg: string | undefined): string[] {
+  return (arg ?? "").split(",").filter(Boolean);
 }
 
 function PeriodPicker({
@@ -59,33 +64,65 @@ function PeriodPicker({
   const [ly, lm] = (loadedMonth ?? "").split("-").map(Number);
   const last = ly && (ly > fullMonth.year || (ly === fullMonth.year && lm > fullMonth.month)) ? { year: ly, month: lm } : fullMonth;
   const monthOpen = (y: number, m: number) => y < last.year || (y === last.year && m <= last.month);
+  const quarterOpen = (y: number, q: number) => monthOpen(y, (q - 1) * 3 + 1);
   const years = Array.from({ length: last.year - 2021 + 1 }, (_, i) => last.year - i);
   const [kind, arg] = value.split(":") as [PeriodKind, string | undefined];
-  const year = Number((arg ?? String(last.year)).slice(0, 4));
-  const quarter = kind === "quarter" ? Number(arg?.split("-")[1]) : Math.ceil(last.month / 3);
-  const month = kind === "month" ? Number(arg?.split("-")[1]) : last.month;
-  const set = (k: PeriodKind, y = year, q = quarter, m = month) => {
-    if (k === "all") onChange("all");
-    else if (k === "ytd") onChange(`ytd:${y}`);
-    else if (k === "quarter") onChange(`quarter:${y}-${q}`);
-    else onChange(`month:${y}-${String(m).padStart(2, "0")}`);
+  const picked = kind === "quarters" || kind === "months" ? parseSet(arg) : [];
+  // Год для переключателей — отдельное состояние: выбор может охватывать несколько лет.
+  const [viewYear, setViewYear] = useState(() => Number((picked[0] ?? arg ?? String(last.year)).slice(0, 4)) || last.year);
+
+  const pad = (m: number) => String(m).padStart(2, "0");
+  const key = (k: PeriodKind, y: number, n: number) => (k === "quarters" ? `${y}-${n}` : `${y}-${pad(n)}`);
+  const commit = (k: PeriodKind, keys: string[]) => {
+    const sorted = [...keys].sort();
+    onChange(sorted.length ? `${k}:${sorted.join(",")}` : "all");
   };
+  const switchKind = (k: PeriodKind) => {
+    if (k === "all") onChange("all");
+    else if (k === "ytd") onChange(`ytd:${viewYear}`);
+    else if (k === "quarters") onChange(`quarters:${key(k, last.year, Math.ceil(last.month / 3))}`);
+    else onChange(`months:${key(k, last.year, last.month)}`);
+  };
+  const toggle = (k: "quarters" | "months", n: number) => {
+    const id = key(k, viewYear, n);
+    const current = kind === k ? picked : [];
+    if (current.includes(id)) {
+      if (current.length > 1) commit(k, current.filter((x) => x !== id)); // последний не снимаем
+    } else {
+      commit(k, [...current, id]);
+    }
+  };
+  const chip = (active: boolean, disabled: boolean) =>
+    `rounded-lg border px-2.5 py-1.5 text-sm transition-colors ${
+      active
+        ? "border-indigo-400/40 bg-indigo-500/20 text-indigo-200"
+        : "border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.06]"
+    } ${disabled ? "pointer-events-none opacity-30" : ""}`;
+
   return (
     <div className="flex flex-wrap items-center gap-2">
       <SegmentedControl<PeriodKind>
         size="sm"
         value={kind}
-        onChange={(k) => set(k)}
+        onChange={switchKind}
         ariaLabel="Период"
         segments={[
           { value: "ytd", label: "Год" },
-          { value: "quarter", label: "Квартал" },
-          { value: "month", label: "Месяц" },
+          { value: "quarters", label: "Кварталы" },
+          { value: "months", label: "Месяцы" },
           { value: "all", label: "Все годы" },
         ]}
       />
       {kind !== "all" && (
-        <select className={INPUT} value={year} onChange={(e) => set(kind, Number(e.target.value))}>
+        <select
+          className={INPUT}
+          value={viewYear}
+          onChange={(e) => {
+            const y = Number(e.target.value);
+            setViewYear(y);
+            if (kind === "ytd") onChange(`ytd:${y}`);
+          }}
+        >
           {years.map((y) => (
             <option key={y} value={y} className="bg-zinc-900">
               {y}
@@ -93,24 +130,31 @@ function PeriodPicker({
           ))}
         </select>
       )}
-      {kind === "quarter" && (
-        <select className={INPUT} value={quarter} onChange={(e) => set(kind, year, Number(e.target.value))}>
-          {[1, 2, 3, 4].map((q) => (
-            <option key={q} value={q} className="bg-zinc-900" disabled={year === last.year && q > Math.ceil(last.month / 3)}>
-              {q} кв.
-            </option>
-          ))}
-        </select>
-      )}
-      {kind === "month" && (
-        <select className={INPUT} value={month} onChange={(e) => set(kind, year, quarter, Number(e.target.value))}>
-          {MONTHS.map((label, i) => (
-            <option key={label} value={i + 1} className="bg-zinc-900" disabled={!monthOpen(year, i + 1)}>
-              {label}{year === last.year && i + 1 === last.month && last.month !== fullMonth.month ? " (неполный)" : ""}
-            </option>
-          ))}
-        </select>
-      )}
+      {kind === "quarters" &&
+        [1, 2, 3, 4].map((q) => (
+          <button
+            key={q}
+            type="button"
+            className={chip(picked.includes(key("quarters", viewYear, q)), !quarterOpen(viewYear, q))}
+            onClick={() => toggle("quarters", q)}
+          >
+            {q} кв.
+          </button>
+        ))}
+      {kind === "months" &&
+        MONTHS.map((label, i) => (
+          <button
+            key={label}
+            type="button"
+            title={viewYear === last.year && i + 1 === last.month && last.month !== fullMonth.month ? "месяц ещё не завершён" : undefined}
+            className={chip(picked.includes(key("months", viewYear, i + 1)), !monthOpen(viewYear, i + 1))}
+            onClick={() => toggle("months", i + 1)}
+          >
+            {label}
+            {viewYear === last.year && i + 1 === last.month && last.month !== fullMonth.month ? "*" : ""}
+          </button>
+        ))}
+      {picked.length > 1 && <span className="text-xs text-zinc-500">выбрано: {picked.length}</span>}
     </div>
   );
 }
