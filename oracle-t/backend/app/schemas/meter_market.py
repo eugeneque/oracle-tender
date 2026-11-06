@@ -40,6 +40,12 @@ class TypeIn(BaseModel):
     notation: str | None = None
 
 
+class TypeSmartIn(BaseModel):
+    """Ручная отметка ПП 890 всем модификациям типа; null — снять ручные отметки."""
+
+    smart_890: bool | None = None
+
+
 class ManufacturerIn(BaseModel):
     name: str = Field(min_length=1, max_length=255)
 

@@ -438,9 +438,34 @@ function Modifications({ typeId, canEdit, report, fail }: EditProps & { typeId: 
     }
     api.get<(typeof variants)[number]>(`/meter-market/modifications/${id}/variants`).then((rows) => setVariants((prev) => ({ ...prev, [id]: rows })));
   };
+  const markAll = async (value: boolean | null) => {
+    try {
+      const result = await api.post<{ changed: number }>(`/meter-market/types/${typeId}/smart`, { smart_890: value });
+      report(
+        value === null
+          ? `Ручные отметки ПП 890 сняты (модификаций: ${result.changed})`
+          : `Отмечено «${value ? "соответствует" : "не соответствует"} ПП 890»: модификаций ${result.changed}`,
+      );
+      load();
+    } catch (err) {
+      fail(err, "Не удалось отметить модификации");
+    }
+  };
   if (!mods) return <p className="py-3 text-xs text-zinc-600">Загружаю модификации…</p>;
   return (
     <div className="mt-2 overflow-x-auto rounded-xl border border-white/[0.06]">
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2 text-xs text-zinc-500">
+        <span>ПП 890 для всех модификаций типа:</span>
+        <button type="button" className={BUTTON} disabled={!canEdit} title={canEdit ? undefined : NO_RIGHT} onClick={() => void markAll(true)}>
+          Интеллектуальные
+        </button>
+        <button type="button" className={BUTTON} disabled={!canEdit} title={canEdit ? undefined : NO_RIGHT} onClick={() => void markAll(false)}>
+          Простейшие
+        </button>
+        <button type="button" className={BUTTON} disabled={!canEdit} title={canEdit ? "Снять ручные отметки — ИИ оценит заново" : NO_RIGHT} onClick={() => void markAll(null)}>
+          Сбросить
+        </button>
+      </div>
       <table className="w-full min-w-[760px] text-xs">
         <thead>
           <tr className="text-zinc-500">

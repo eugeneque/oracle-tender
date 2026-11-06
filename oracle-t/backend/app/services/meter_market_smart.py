@@ -12,7 +12,7 @@
 модификации, фаза, интерфейс, МПИ), и обязана отвечать «не определено», когда по этим данным
 решить нельзя: ложное «да» в отчёте хуже, чем честное «н/д».
 
-Запуск: `python -m app.services.meter_market_smart run [--all]`.
+Запуск: `python -m app.services.meter_market_smart run [--unknown | --all]`.
 """
 
 from __future__ import annotations
@@ -45,12 +45,20 @@ SYSTEM_PROMPT = f"""\
 
 Тебе дан тип средства измерений и список его модификаций (в одном описании типа бывают и
 интеллектуальные, и простейшие исполнения). По каждой модификации дай вердикт:
-— "yes" — по обозначению и данным прибор отвечает требованиям раздела III;
+— "yes" — прибор отвечает требованиям раздела III;
 — "no" — прибор простейший или заведомо не отвечает;
-— "unknown" — данных недостаточно. Не угадывай: лучше "unknown", чем ошибочное "yes".
+— "unknown" — прибор тебе незнаком и по данным судить нельзя.
+Опирайся не только на переданные поля, но и на свои знания о линейках приборов: «НАРТИС-И100»,
+«Энергомера СЕ208/СЕ308», «Меркурий 234/236», «МИРТЕК», «Милур», «Матрица» и т. п. — если ты
+знаешь, что линейка выпускается как интеллектуальная (оптический порт плюс RS-485/PLC/GSM/LoRa,
+журнал событий, профиль, реле), а модификация это подтверждает, отвечай "yes"; если знаешь, что
+модификация без цифровых интерфейсов и журналов, — "no". "unknown" — только когда прибор тебе
+незнаком. Не придумывай характеристик, которых не знаешь.
+confidence — твоя уверенность: "high" (линейка и функции хорошо известны или явно следуют из
+данных), "medium" (вывод по линейке и обозначению), "low" (скорее догадка).
+В reason — одна короткая фраза по-русски, какие признаки определили вердикт.
 Ориентируйся на обозначение модификации, фазность, интерфейсы и межповерочный интервал
 (для прямого включения требуется не менее 16 лет, для трансформаторного — не менее 10).
-В reason — одна короткая фраза по-русски, какие признаки определили вердикт.
 
 Текст раздела III:
 {REQUIREMENTS}"""
@@ -59,6 +67,7 @@ SYSTEM_PROMPT = f"""\
 class ModificationVerdict(pydantic.BaseModel):
     id: int
     verdict: str  # yes | no | unknown
+    confidence: str = "medium"  # high | medium | low
     reason: str = ""
 
 
@@ -103,15 +112,18 @@ def classify_type(db: Session, meter_type: MeterMarketType, modifications: list[
         verdict = item.verdict.strip().lower()
         mod.smart_890 = {"yes": True, "no": False}.get(verdict)  # unknown → None
         mod.smart_890_source = "ai"
-        mod.smart_890_note = (item.reason or "")[:500] or ("Данных недостаточно" if verdict not in ("yes", "no") else None)
+        confidence = {"high": "высокая", "medium": "средняя", "low": "низкая"}.get(item.confidence.strip().lower(), "средняя")
+        reason = (item.reason or "").strip() or ("Данных недостаточно" if verdict not in ("yes", "no") else "")
+        mod.smart_890_note = (f"[уверенность: {confidence}] {reason}" if verdict in ("yes", "no") else reason)[:500] or None
         mod.smart_890_at = now
         done += 1
     db.flush()
     return done
 
 
-def run(db: Session, *, only_new: bool = True, limit_types: int | None = None) -> dict[str, int]:
-    """Оценивает типы отчёта. `only_new` — только модификации, которых ИИ ещё не смотрел."""
+def run(db: Session, *, mode: str = "new", limit_types: int | None = None) -> dict[str, int]:
+    """Оценивает типы отчёта. `mode`: `new` — только те, которых ИИ ещё не смотрел; `unknown` —
+    ещё и те, где ИИ ответил «не определено» (после смены промпта); `all` — все, кроме ручных."""
 
     types = db.scalars(
         select(MeterMarketType).where(MeterMarketType.in_report.is_(True)).order_by(MeterMarketType.mit_number)
@@ -124,8 +136,12 @@ def run(db: Session, *, only_new: bool = True, limit_types: int | None = None) -
             MeterMarketModification.type_id == meter_type.id,
             (MeterMarketModification.smart_890_source.is_(None)) | (MeterMarketModification.smart_890_source != "manual"),
         )
-        if only_new:
+        if mode == "new":
             query = query.where(MeterMarketModification.smart_890_at.is_(None))
+        elif mode == "unknown":
+            query = query.where(
+                MeterMarketModification.smart_890_at.is_(None) | MeterMarketModification.smart_890.is_(None)
+            )
         modifications = db.scalars(query.order_by(MeterMarketModification.id)).all()
         if not modifications:
             continue
@@ -147,6 +163,6 @@ if __name__ == "__main__":
     from app.db.session import SessionLocal
 
     if len(sys.argv) < 2 or sys.argv[1] != "run":
-        raise SystemExit("python -m app.services.meter_market_smart run [--all]")
+        raise SystemExit("python -m app.services.meter_market_smart run [--unknown | --all]")
     with SessionLocal() as session:
-        print(run(session, only_new="--all" not in sys.argv))
+        print(run(session, mode="all" if "--all" in sys.argv else "unknown" if "--unknown" in sys.argv else "new"))

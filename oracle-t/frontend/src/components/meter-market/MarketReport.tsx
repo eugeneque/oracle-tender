@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronRight, X } from "lucide-react";
+import { AlertTriangle, ChevronRight, Info, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ApiError, api } from "../../api/client";
@@ -13,6 +13,7 @@ import type {
   MarketStatus,
 } from "../../api/types";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { Tooltip } from "../ui/Tooltip";
 import { BarList, Donut, ExportButton, MatrixTable, Panel } from "./common";
 import { fmt, fmtShare, quarterLabel } from "./format";
 
@@ -257,6 +258,27 @@ function OverviewScreen({
 
       <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
         <span>Постановление 890 (интеллектуальные ПУ):</span>
+        <Tooltip
+          content={
+            <div className="max-w-xs space-y-1.5 text-left text-xs leading-relaxed">
+              <p>
+                Соответствие ПП РФ 890 — это не локализация (РПП). Счётчик должен быть интеллектуальным: отвечать
+                требованиям раздела III постановления (два интерфейса связи, журнал событий, профиль нагрузки,
+                электронные пломбы, управление нагрузкой и др.).
+              </p>
+              <p>
+                Признак стоит у модификации: в одном описании типа бывают и интеллектуальные, и простейшие приборы.
+                Его выставляет ИИ по тексту раздела III, а аналитик может задать своё решение в справочнике — оно
+                важнее.
+              </p>
+              <p>«Не определено» — ИИ не хватило данных или написание модификации ещё не размечено.</p>
+            </div>
+          }
+        >
+          <span className="cursor-help text-zinc-500 hover:text-zinc-300" tabIndex={0} aria-label="Что такое ПП 890">
+            <Info size={14} />
+          </span>
+        </Tooltip>
         <select
           className={INPUT}
           value={filters.smart ?? ""}

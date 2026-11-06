@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_analytics
 from app.db.session import get_db
-from app.models.meter_market import MeterMarketModification
+from app.models.meter_market import MeterMarketModification, MeterMarketType
 from app.models.user import User
 from app.schemas.meter_market import (
     GroupIn,
@@ -23,6 +23,7 @@ from app.schemas.meter_market import (
     ModificationIn,
     ThresholdsIn,
     TypeIn,
+    TypeSmartIn,
     VariantMapIn,
 )
 from app.services import meter_market_dictionary as dictionary
@@ -264,6 +265,28 @@ def patch_type(
     )
     db.commit()
     return {"id": si_type.id, "in_report": si_type.in_report, "review_status": si_type.review_status}
+
+
+@router.post("/types/{type_id}/smart")
+def post_type_smart(
+    type_id: int, payload: TypeSmartIn, db: Session = Depends(get_db), user: User = Depends(require_analytics)
+) -> dict[str, Any]:
+    """Отметить «соответствует ПП 890» сразу все модификации типа."""
+
+    si_type = db.get(MeterMarketType, type_id)
+    if si_type is None:
+        raise HTTPException(status_code=404, detail="Тип не найден")
+    changed = dictionary.set_type_smart(db, type_id, payload.smart_890)
+    log_action(
+        db,
+        component="meter_market",
+        action=f"type_smart_890:{si_type.mit_number}",
+        result="success",
+        details=f"{payload.smart_890}: модификаций {changed}",
+        user_id=user.id,
+    )
+    db.commit()
+    return {"changed": changed}
 
 
 @router.get("/types/{type_id}/modifications")

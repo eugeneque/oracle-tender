@@ -188,6 +188,22 @@ def update_modification(
     return modification
 
 
+def set_type_smart(db: Session, type_id: int, value: bool | None) -> int:
+    """Ручная отметка «соответствует ПП 890» всем модификациям типа сразу (06.11.2026): у крупных
+    типов десятки модификаций, а решение по линейке одно. `None` — снять ручные отметки (ИИ
+    оценит заново). Возвращает, сколько модификаций затронуто."""
+
+    rows = db.execute(select(MeterMarketModification).where(MeterMarketModification.type_id == type_id)).scalars().all()
+    for mod in rows:
+        if value is None:
+            if mod.smart_890_source == "manual":
+                mod.smart_890, mod.smart_890_source, mod.smart_890_note, mod.smart_890_at = None, None, None, None
+        else:
+            mod.smart_890, mod.smart_890_source = value, "manual"
+    db.flush()
+    return len(rows)
+
+
 def modifications(db: Session, type_id: int) -> list[dict[str, Any]]:
     rows = db.execute(
         text(
