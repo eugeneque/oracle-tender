@@ -14,9 +14,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import select
 
 from app.core import jobs
 from app.models.job import BackgroundJob, JobKind, JobStatus
+from app.models.log import Log, LogLevel
 from app.models.source import Source
 from app.models.tender import Tender
 
@@ -368,3 +370,31 @@ def test_enqueue_standalone_dedupes_running_poll(db_session, admin_user, monkeyp
         db_session, kind=JobKind.SOURCES_POLL, payload={"source_keys": ["eis"]}, actor=admin_user
     )
     assert third.id != first.id
+
+
+@pytest.mark.parametrize(
+    ("message", "result", "level"),
+    [
+        ("Анализ: ок | Матрица: без ответа модели: 3 ячеек у 1 производителей | Оценка: 40%", "partial_error", LogLevel.WARNING),
+        ("Анализ: ок | Матрица: не выполнен: сбой | Оценка: 40%", "partial_error", LogLevel.WARNING),
+        ("Анализ: ок | Матрица: ячеек матрицы: 10 | Оценка: 40%", "success", LogLevel.INFO),
+    ],
+)
+def test_finish_marks_incomplete_matrix_in_log(
+    db_session, admin_user, no_background_execution, message, result, level
+):
+    """06.11.2026: разбор с потерянными ячейками в журнале не отличался от полного. Задача
+    остаётся `success` — посчитанное сохранено, — а журнал показывает неполный итог."""
+
+    tender = _tender(db_session)
+    job = jobs.enqueue(db_session, kind=JobKind.TENDER_FULL_REVIEW, tender=tender, actor=admin_user)
+
+    jobs._finish(db_session, job, JobStatus.SUCCESS, message, tender=tender)
+
+    assert job.status == JobStatus.SUCCESS.value
+    entry = db_session.scalars(
+        select(Log)
+        .where(Log.component == "jobs", Log.action == f"finish:{job.kind}")
+        .order_by(Log.timestamp.desc())
+    ).first()
+    assert entry is not None and entry.result == result and entry.level == level

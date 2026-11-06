@@ -22,7 +22,7 @@ export interface ActivitySummary {
   tone: SummaryTone;
 }
 
-const ERROR_RE = /отклонил|ошибк|не удалось|http\s*\d{3}|не выполнен|ни один/i;
+const ERROR_RE = /отклонил|ошибк|не удалось|http\s*\d{3}|не выполнен|ни один|без ответа модели/i;
 const WARN_RE = /не посчитан|не извлечен|прежняя оставлена|точность ниже|неразобранн/i;
 
 function toneOf(text: string): SummaryTone {

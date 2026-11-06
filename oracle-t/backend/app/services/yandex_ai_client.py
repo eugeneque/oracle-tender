@@ -407,6 +407,7 @@ def _run_openai_compatible(
                 max_tokens=max_tokens,
                 response_format=response_format,
                 timeout=DEFAULT_TIMEOUT_SECONDS,
+                provider="Yandex",
             )
             choice = payload["choices"][0]
             raw_text = _strip_fences(_message_text(choice.get("message") or {}))

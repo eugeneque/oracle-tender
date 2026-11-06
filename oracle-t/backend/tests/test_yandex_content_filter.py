@@ -141,3 +141,44 @@ def test_routerai_quota_falls_back_to_yandex(monkeypatch):
     monkeypatch.setattr(ai_client, "is_provider_configured", lambda db, provider: False)
     with pytest.raises(RouterAiQuotaError):
         ai_client.run_structured(None, system_prompt="s", user_text="u", response_model=Answer)
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected", "unexpected"),
+    [
+        ("RouterAI", "RouterAI отклонил ключ", "Yandex"),
+        ("Yandex", "Yandex отклонил запрос", "проверьте ключ на странице"),
+    ],
+)
+def test_forbidden_error_names_the_real_provider(monkeypatch, provider, expected, unexpected):
+    """Журнал 06.11.2026: 403 от Yandex AI Studio советовал проверить ключ RouterAI — запасная
+    модель идёт через общий клиент, и текст ошибки был зашит под RouterAI."""
+
+    from app.services import routerai_client
+    from app.services.routerai_client import RouterAiUnavailableError
+
+    monkeypatch.setattr(
+        routerai_client.httpx,
+        "post",
+        lambda *args, **kwargs: SimpleNamespace(
+            status_code=403,
+            text='{"message": "Forbidden"}',
+            json=lambda: {"message": "Forbidden"},
+        ),
+    )
+
+    with pytest.raises(RouterAiUnavailableError) as error:
+        routerai_client._chat_completion(
+            api_key="test",
+            model="m",
+            base_url="https://example.test/v1",
+            messages=[],
+            temperature=0,
+            max_tokens=10,
+            response_format=None,
+            timeout=1,
+            provider=provider,
+        )
+
+    assert expected in str(error.value)
+    assert unexpected not in str(error.value)

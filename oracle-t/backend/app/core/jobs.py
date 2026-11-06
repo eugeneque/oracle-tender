@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 import uuid
@@ -543,6 +544,13 @@ def run_job(job_id: uuid.UUID) -> None:
         db.close()
 
 
+# Итог, при котором матрица неполна: ячейки без ответа модели или матрица не построена. Задача
+# остаётся `success` — посчитанное сохранено и повтор той же задачи ничего не даст, — но в журнале
+# это `partial_error`: 06.11.2026 три разбора с потерянными ячейками выглядели в журнале как
+# обычное «success», и отличить их можно было только чтением всей строки итога.
+_INCOMPLETE_RESULT_RE = re.compile(r"без ответа модели|Матрица: не выполнен")
+
+
 def _finish(
     db: Session,
     job: BackgroundJob,
@@ -560,13 +568,16 @@ def _finish(
     job.status = status.value
     job.finished_at = datetime.now(timezone.utc)
     job.message = message
+    incomplete = status is JobStatus.SUCCESS and bool(_INCOMPLETE_RESULT_RE.search(message or ""))
     log_action(
         db,
         component="jobs",
         action=f"finish:{job.kind}",
-        result=status.value,
+        result="partial_error" if incomplete else status.value,
         level=(
-            LogLevel.INFO
+            LogLevel.WARNING
+            if incomplete
+            else LogLevel.INFO
             if status is JobStatus.SUCCESS
             else LogLevel.WARNING
             if status is JobStatus.CANCELLED
