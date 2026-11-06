@@ -2346,6 +2346,7 @@ export interface MarketStatus {
   pending_package: { package_id: string; kind: string; status: string; checkpoint: string | null; started_at: string; message: string | null } | null;
   edge: string | null;
   edge_label: string | null;
+  loaded_month: string | null;
   new_types: number;
   unmapped_variants: number;
   thresholds: { year: number; min_score: number }[];

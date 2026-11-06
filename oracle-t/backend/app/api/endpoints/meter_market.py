@@ -136,7 +136,7 @@ def _xlsx_response(filename: str, content: bytes) -> Response:
 
 @router.get("/export.xlsx")
 def export_table(
-    table: str = Query(pattern="^(manufacturers|designs|phases|interfaces|designs_by_year|groups|localization)$"),
+    table: str = Query(pattern="^(manufacturers|designs|phases|interfaces|designs_by_year|groups|localization|powerbi)$"),
     period: str | None = None,
     manufacturer_id: int | None = None,
     design: str | None = None,
@@ -150,6 +150,12 @@ def export_table(
 
     edge = _edge(db)
     subtitle = f"{SOURCE_NOTE}, данные на {report.status(db)['edge_label']}"
+    if table == "powerbi":
+        p = _period(db, period)
+        content = report.to_xlsx(
+            f"Поверки ПУ ЭЭ для Power BI, {p.label}", subtitle, report.POWERBI_HEADER, report.powerbi_rows(db, p)
+        )
+        return _xlsx_response(f"Рынок ПУ — для Power BI — {p.label}.xlsx", content)
     if table in ("manufacturers", "designs", "phases", "interfaces"):
         p = _period(db, period)
         data = report.overview(db, p, _filters(manufacturer_id, design, phase, interface))

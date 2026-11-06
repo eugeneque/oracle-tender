@@ -77,6 +77,13 @@ def data_edge(db: Session) -> date | None:
     return date(loaded.year, (loaded.month - 1) // 3 * 3 + 1, 1)
 
 
+def _last_loaded(db: Session) -> date | None:
+    package = db.execute(
+        text("SELECT package_id FROM meter_market_loads WHERE status = 'done' ORDER BY package_id DESC LIMIT 1")
+    ).scalar()
+    return datetime.strptime(package, "%Y%m%d").date() if package else None
+
+
 def parse_period(value: str | None, edge: date | None) -> Period:
     """`year:2026`, `ytd:2026`, `quarter:2026-3`, `month:2026-09`, `all`. Без значения — год
     последнего полного квартала с начала года («2026 г., 1–3 кв.»)."""
@@ -163,6 +170,9 @@ def status(db: Session) -> dict[str, Any]:
         "pending_package": dict(running) if running else None,
         "edge": edge,
         "edge_label": _edge_label(edge) if edge else None,
+        # Месяц последнего пакета: за него поверки уже есть, хотя он ещё неполный (замечание
+        # аналитика 06.11.2026: «выбрать октябрь не получается»).
+        "loaded_month": date(loaded.year, loaded.month, 1) if (loaded := _last_loaded(db)) else None,
         "new_types": db.execute(text("SELECT count(*) FROM meter_market_types WHERE review_status = 'new'")).scalar(),
         "unmapped_variants": db.execute(
             text(
@@ -556,6 +566,58 @@ def variant_samples(db: Session, variant_id: int, period: Period, limit: int = 1
         {"v": variant_id, "s": period.start, "e": period.end, "l": limit},
     ).mappings()
     return [dict(r) for r in rows]
+
+
+def powerbi_rows(db: Session, period: Period) -> list[list[Any]]:
+    """Плоская таблица для Power BI (замечание аналитика 06.11.2026): строка = модификация ×
+    месяц. Баллы и «в РПП» — по модификации справочника (без истории записей РПП)."""
+
+    names = _manufacturer_names(db)
+    limits = thresholds(db)
+    rows = db.execute(
+        text(
+            f"SELECT {_MANUFACTURER_SQL} AS manufacturer_id, t.mit_number, "
+            "m.design, m.phase, m.interface, "
+            "mv.month, m.in_rpp, m.score, (v.modification_id IS NULL) AS unmapped, sum(mv.count) AS count "
+            f"{_BASE_FROM} WHERE mv.month >= :start AND mv.month < :end "
+            "GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9 "
+            "ORDER BY 2, 6, 1"
+        ),
+        {"start": period.start, "end": period.end},
+    ).mappings()
+    result: list[list[Any]] = []
+    for r in rows:
+        unmapped = r["unmapped"]
+        year = requirement_year(r["score"], limits)
+        result.append(
+            [
+                names.get(r["manufacturer_id"], "н/д"),
+                r["mit_number"],
+                UNMAPPED if unmapped else (r["phase"] or "н/д"),
+                UNMAPPED if unmapped else DESIGN_LABELS.get(r["design"] or "nd", "н/д"),
+                r["month"].strftime("%m.%Y"),
+                int(r["count"]),
+                UNMAPPED if unmapped else (r["interface"] or "н/д"),
+                "н/д" if unmapped else ("да" if r["in_rpp"] else "нет"),
+                year if year is not None else "",
+                r["score"] if r["score"] is not None else "",
+            ]
+        )
+    return result
+
+
+POWERBI_HEADER = [
+    "Производитель",
+    "Регистрационный номер типа СИ",
+    "Тип ПУ",
+    "Исполнение",
+    "Период",
+    "Количество",
+    "Интерфейс",
+    "В Реестре российской промышленной продукции",
+    "Соответствие требованиям года",
+    "Кол-во баллов",
+]
 
 
 # ── Выгрузка в Excel ───────────────────────────────────────────────────────────────────────

@@ -43,8 +43,22 @@ function lastFullMonth(edge: string): { year: number; month: number } {
   return m === 1 ? { year: y - 1, month: 12 } : { year: y, month: m - 1 };
 }
 
-function PeriodPicker({ edge, value, onChange }: { edge: string; value: string; onChange: (v: string) => void }) {
-  const last = lastFullMonth(edge);
+function PeriodPicker({
+  edge,
+  loadedMonth,
+  value,
+  onChange,
+}: {
+  edge: string;
+  loadedMonth: string | null;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const fullMonth = lastFullMonth(edge);
+  // Месяц последнего пакета доступен, даже если он ещё неполный (замечание аналитика 06.11.2026).
+  const [ly, lm] = (loadedMonth ?? "").split("-").map(Number);
+  const last = ly && (ly > fullMonth.year || (ly === fullMonth.year && lm > fullMonth.month)) ? { year: ly, month: lm } : fullMonth;
+  const monthOpen = (y: number, m: number) => y < last.year || (y === last.year && m <= last.month);
   const years = Array.from({ length: last.year - 2021 + 1 }, (_, i) => last.year - i);
   const [kind, arg] = value.split(":") as [PeriodKind, string | undefined];
   const year = Number((arg ?? String(last.year)).slice(0, 4));
@@ -91,8 +105,8 @@ function PeriodPicker({ edge, value, onChange }: { edge: string; value: string; 
       {kind === "month" && (
         <select className={INPUT} value={month} onChange={(e) => set(kind, year, quarter, Number(e.target.value))}>
           {MONTHS.map((label, i) => (
-            <option key={label} value={i + 1} className="bg-zinc-900" disabled={year === last.year && i + 1 > last.month}>
-              {label}
+            <option key={label} value={i + 1} className="bg-zinc-900" disabled={!monthOpen(year, i + 1)}>
+              {label}{year === last.year && i + 1 === last.month && last.month !== fullMonth.month ? " (неполный)" : ""}
             </option>
           ))}
         </select>
@@ -127,7 +141,7 @@ export function MarketReport({ status }: { status: MarketStatus }) {
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <SegmentedControl<Screen> value={screen} onChange={setScreen} segments={SCREENS} ariaLabel="Экран отчёта" />
-        {screen === "overview" && <PeriodPicker edge={status.edge!} value={period} onChange={setPeriod} />}
+        {screen === "overview" && <PeriodPicker edge={status.edge!} loadedMonth={status.loaded_month} value={period} onChange={setPeriod} />}
       </div>
       {error && (
         <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">{error}</div>
@@ -213,7 +227,12 @@ function OverviewScreen({
         <Panel
           title="Производители"
           subtitle="владелец описания типа; клик — фильтр, стрелка — подробности"
-          actions={<ExportButton query={exportQuery("manufacturers")} onError={onError} />}
+          actions={
+            <div className="flex gap-2">
+              <ExportButton query={exportQuery("powerbi")} onError={onError} label="Для Power BI" />
+              <ExportButton query={exportQuery("manufacturers")} onError={onError} />
+            </div>
+          }
         >
           <table className="w-full text-sm">
             <thead>

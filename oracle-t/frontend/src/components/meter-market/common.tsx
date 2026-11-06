@@ -35,7 +35,7 @@ export function Panel({
 }
 
 /** Выгрузка таблицы экрана в Excel с теми же фильтрами (раздел 8 ТЗ). */
-export function ExportButton({ query, onError }: { query: string; onError: (message: string) => void }) {
+export function ExportButton({ query, onError, label = "Excel" }: { query: string; onError: (message: string) => void; label?: string }) {
   const [busy, setBusy] = useState(false);
   return (
     <button
@@ -55,7 +55,7 @@ export function ExportButton({ query, onError }: { query: string; onError: (mess
       className="flex shrink-0 items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-200 disabled:opacity-50"
     >
       <Download size={13} />
-      {busy ? "Формирую…" : "Excel"}
+      {busy ? "Формирую…" : label}
     </button>
   );
 }
