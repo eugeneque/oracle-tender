@@ -126,9 +126,6 @@ def _chat_completion(
     response_format: dict[str, Any] | None,
     timeout: float,
     extra_body: dict[str, Any] | None = None,
-    # Клиент общий с запасной моделью Yandex AI Studio. Текст ошибки обязан называть того, кто
-    # отказал: журнал 06.11.2026 советовал проверить ключ RouterAI при отказе Yandex.
-    provider: str = "RouterAI",
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "model": model,
@@ -157,25 +154,15 @@ def _chat_completion(
             response.status_code == 429
             and any(marker in detail.lower() for marker in _QUOTA_MARKERS)
         ):
-            advice = (
-                "поднимите лимит в кабинете RouterAI или переключитесь на YandexGPT"
-                if provider == "RouterAI"
-                else f"проверьте квоты и баланс в кабинете {provider}"
-            )
             raise RouterAiQuotaError(
-                f"{provider} отказал: исчерпан лимит расходов ключа или баланс "
-                f"(HTTP {response.status_code}: {detail}). Повтор не поможет — {advice}"
+                f"RouterAI отказал: исчерпан лимит расходов ключа или баланс "
+                f"(HTTP {response.status_code}: {detail}). Повтор не поможет — поднимите лимит "
+                f"в кабинете RouterAI или переключитесь на YandexGPT"
             )
         if response.status_code in (401, 403):
-            if provider == "RouterAI":
-                raise RouterAiUnavailableError(
-                    f"RouterAI отклонил ключ (HTTP {response.status_code}: {detail}). Повтор не "
-                    f"поможет — проверьте ключ на странице «Модели ИИ»"
-                )
             raise RouterAiUnavailableError(
-                f"{provider} отклонил запрос (HTTP {response.status_code}: {detail}). Повтор не "
-                f"поможет — проверьте роли ключа и доступ каталога к этой модели в кабинете "
-                f"{provider}; ключ RouterAI здесь ни при чём"
+                f"RouterAI отклонил ключ (HTTP {response.status_code}: {detail}). Повтор не "
+                f"поможет — проверьте ключ на странице «Модели ИИ»"
             )
         raise RouterAiError(f"HTTP {response.status_code}: {detail}")
     return response.json()

@@ -24,10 +24,16 @@ from loguru import logger
 from sqlalchemy.orm import Session
 
 from app.models.integration_setting import YandexAiStudioSettings
-from app.services.ai_provider_service import PROVIDER_YANDEX, AiNotConfiguredError, get_model_limits
+from app.services.ai_provider_service import (
+    PROVIDER_QWEN,
+    PROVIDER_YANDEX,
+    AiNotConfiguredError,
+    get_model_limits,
+    is_provider_enabled,
+)
 from app.models.log import LogLevel
 from app.services.ai_log_service import log_ai_event
-from app.services.ai_usage_service import record_call, usage_from_openai, usage_from_yandex
+from app.services.ai_usage_service import record_call, usage_from_yandex
 from app.services.yandex_ai_service import _SINGLETON_ID
 
 # Модель по умолчанию. `yandexgpt` (Pro) — а не `yandexgpt-lite`: задачи раздела 5.4-5.5 ТЗ
@@ -65,13 +71,13 @@ ResponseT = TypeVar("ResponseT", bound=pydantic.BaseModel)
 # Порядок после отказа:
 # 1. тот же YandexGPT с деловой преамбулой и смягчёнными формулировками (`soften_for_filter`)
 #    — факты те же, меняются слова, на которые реагирует фильтр;
-# 2. запасная модель каталога Yandex AI Studio на том же ключе и в том же каталоге
-#    (`FILTER_FALLBACK_MODEL`, по умолчанию Qwen3-235B) — через OpenAI-совместимый API,
-#    по gRPC она недоступна. У неё свой, заметно менее строгий фильтр; на отказном
-#    контексте ответила по схеме за 10 с.
+# 2. запасная модель — Qwen через RouterAI (06.11.2026), исходный текст целиком. Раньше здесь
+#    была Qwen3-235B из каталога Yandex на том же ключе, но Yandex отвечал на неё HTTP 403, хотя
+#    YandexGPT на том же ключе работал (проверено на сервере), и ячейки матрицы оставались без
+#    ответа — раздел 88 ARCHITECTURE.md. Вызов идёт прямо в `routerai_client`, мимо `ai_client`:
+#    обратный переход «RouterAI → YandexGPT» живёт там, и цикла моделей быть не может.
 
-FILTER_FALLBACK_MODEL = "qwen3-235b-a22b-fp8/latest"
-OPENAI_COMPATIBLE_URL = "https://llm.api.cloud.yandex.net/v1"
+FILTER_FALLBACK_LABEL = "Qwen (RouterAI)"
 
 # Отказ бывает и без статуса (старые версии модели, OpenAI-режим отдаёт его текстом).
 _REFUSAL_RE = re.compile(
@@ -221,31 +227,27 @@ def run_structured(
     except YandexContentFilterError:
         logger.warning(
             f"YandexGPT отказал и на деловую формулировку ({response_model.__name__}) — "
-            f"запасная модель {FILTER_FALLBACK_MODEL}"
+            f"запасная модель {FILTER_FALLBACK_LABEL}"
         )
     except Exception as exc:  # noqa: BLE001 - переходим к запасной модели
         logger.warning(f"Деловая формулировка для YandexGPT не удалась: {exc}")
 
-    # Вариант 2: запасная модель каталога Yandex AI Studio, исходный текст целиком.
+    # Вариант 2: запасная модель, исходный текст целиком.
     try:
-        answer = _run_openai_compatible(
-            api_key=api_key,
-            folder_id=folder_id,
-            model_name=FILTER_FALLBACK_MODEL,
+        answer = _run_filter_fallback(
+            db,
             system_prompt=system_prompt,
             user_text=user_text,
             response_model=response_model,
             temperature=temperature,
-            db=db,
-            max_tokens=max_tokens,
         )
     except Exception as exc:  # noqa: BLE001
         raise YandexContentFilterError(
             f"YandexGPT отказал по фильтру тематики («{first_refusal}»), запасная модель "
-            f"{FILTER_FALLBACK_MODEL} не ответила: {exc}"
+            f"{FILTER_FALLBACK_LABEL} не ответила: {exc}"
         ) from exc
     _note_fallback(
-        f"ответ дала запасная модель {FILTER_FALLBACK_MODEL.split('/')[0]} — YandexGPT "
+        f"ответ дала запасная модель {FILTER_FALLBACK_LABEL} — YandexGPT "
         "отказал по фильтру тематики"
     )
     return answer
@@ -336,99 +338,29 @@ def _run_with_retries(
     raise last_error if last_error else RuntimeError("Обращение к YandexGPT не выполнено")
 
 
-def _run_openai_compatible(
+def _run_filter_fallback(
+    db: Session,
     *,
-    api_key: str,
-    folder_id: str,
-    model_name: str,
     system_prompt: str,
     user_text: str,
     response_model: type[ResponseT],
     temperature: float,
-    attempts: int = 2,
-    db: Session | None = None,
-    max_tokens: int = 8000,
 ) -> ResponseT:
-    """Модель каталога Yandex AI Studio через OpenAI-совместимый API (Qwen, gpt-oss): ключ и
-    каталог те же, что у YandexGPT. Тело запроса и разбор ответа — как у RouterAI."""
+    """Запрос к запасной модели после отказа фильтра. Модель, которую отключил администратор,
+    не используется и здесь: выключатель на странице «Модели ИИ» значит «данные туда не идут»."""
 
-    from app.services.routerai_client import (
-        _chat_completion,
-        _coerce_shape,
-        _message_text,
-        _strict_schema,
-        _strip_fences,
+    from app.services import routerai_client
+
+    if not is_provider_enabled(db, PROVIDER_QWEN):
+        raise RuntimeError("Qwen отключена администратором на странице «Модели ИИ»")
+    return routerai_client.run_structured(
+        db,
+        system_prompt=system_prompt,
+        user_text=user_text,
+        response_model=response_model,
+        temperature=temperature,
+        provider=PROVIDER_QWEN,
     )
-
-    response_format = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": response_model.__name__,
-            "strict": True,
-            "schema": _strict_schema(response_model.model_json_schema()),
-        },
-    }
-    last_error: Exception | None = None
-    raw_text = ""
-    prompt_chars = len(system_prompt) + len(user_text)
-    for attempt in range(1, attempts + 1):
-        started = time.monotonic()
-        payload = None
-        raw_text = ""
-
-        def _record(status: str, error: Exception | None = None) -> None:
-            if db is None:
-                return
-            record_call(
-                db,
-                provider=PROVIDER_YANDEX,
-                model=model_name,
-                operation=response_model.__name__,
-                prompt_chars=prompt_chars,
-                completion_chars=len(raw_text),
-                usage=usage_from_openai(payload),
-                duration_s=time.monotonic() - started,
-                status=status,
-                attempt=attempt,
-                attempts=attempts,
-                error=str(error) if error else None,
-            )
-
-        try:
-            payload = _chat_completion(
-                api_key=api_key,
-                model=f"gpt://{folder_id}/{model_name}",
-                base_url=OPENAI_COMPATIBLE_URL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text},
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-                response_format=response_format,
-                timeout=DEFAULT_TIMEOUT_SECONDS,
-                provider="Yandex",
-            )
-            choice = payload["choices"][0]
-            raw_text = _strip_fences(_message_text(choice.get("message") or {}))
-            if choice.get("finish_reason") == "content_filter" or is_refusal(raw_text):
-                raise YandexContentFilterError(raw_text[:120] or "content_filter")
-            answer = response_model.model_validate(_coerce_shape(raw_text, response_model))
-            _record("success")
-            return answer
-        except YandexContentFilterError as exc:
-            _record("filter", exc)
-            raise
-        except Exception as exc:  # noqa: BLE001
-            _record("invalid" if payload is not None else "error", exc)
-            last_error = exc
-            logger.warning(
-                f"Запасная модель {model_name} не ответила (попытка {attempt} из {attempts}): "
-                f"{exc}; начало ответа: {raw_text[:200]!r}"
-            )
-        if attempt < attempts:
-            time.sleep(RETRY_BACKOFF_SECONDS)
-    raise last_error if last_error else RuntimeError(f"Модель {model_name} не ответила")
 
 
 def chunk_text(text: str, *, max_chars: int, overlap: int = 200) -> list[str]:

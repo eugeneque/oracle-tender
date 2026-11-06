@@ -77,14 +77,25 @@ def test_refusal_is_not_retried_and_softened_prompt_is_tried(fake_sdk):
 
 
 def test_second_refusal_goes_to_fallback_model(fake_sdk, monkeypatch):
+    """Запасная модель — Qwen через RouterAI (06.11.2026): Qwen из каталога Yandex отвечала 403,
+    и ячейки матрицы оставались без ответа. Клиент вызывается напрямую, мимо `ai_client`, поэтому
+    обратного перехода на YandexGPT и цикла моделей нет."""
+
+    from app.services import ai_client, routerai_client
+
     fake_sdk["model"] = _FakeModel([(REFUSAL, "CONTENT_FILTER"), (REFUSAL, "CONTENT_FILTER")])
     calls = []
 
-    def _fallback(**kwargs):
-        calls.append(kwargs["model_name"])
+    def _fallback(db, **kwargs):
+        calls.append((kwargs["provider"], kwargs["user_text"]))
         return Answer(fit="fit")
 
-    monkeypatch.setattr(client, "_run_openai_compatible", _fallback)
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError("запасной вызов не должен идти через ai_client")
+
+    monkeypatch.setattr(routerai_client, "run_structured", _fallback)
+    monkeypatch.setattr(ai_client, "run_structured", _must_not_be_called)
+    monkeypatch.setattr(client, "is_provider_enabled", lambda db, provider: True)
     client.drain_fallback_notes()
 
     answer = client.run_structured(
@@ -92,8 +103,26 @@ def test_second_refusal_goes_to_fallback_model(fake_sdk, monkeypatch):
     )
 
     assert answer.fit == "fit"
-    assert calls == [client.FILTER_FALLBACK_MODEL]
+    # Запасной модели уходит исходный текст, а не смягчённый.
+    assert calls == [("qwen", "u")]
     assert any("запасная модель" in note for note in client.drain_fallback_notes())
+
+
+def test_fallback_respects_disabled_qwen(fake_sdk, monkeypatch):
+    """Администратор отключил Qwen — данные туда не уходят, а ошибка называет причину."""
+
+    from app.services import routerai_client
+
+    fake_sdk["model"] = _FakeModel([(REFUSAL, "CONTENT_FILTER"), (REFUSAL, "CONTENT_FILTER")])
+
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError("отключённой модели запрос уходить не должен")
+
+    monkeypatch.setattr(routerai_client, "run_structured", _must_not_be_called)
+    monkeypatch.setattr(client, "is_provider_enabled", lambda db, provider: False)
+
+    with pytest.raises(client.YandexContentFilterError, match="Qwen отключена администратором"):
+        client.run_structured(None, system_prompt="s", user_text="u", response_model=Answer)
 
 
 def test_refusal_recognised_by_text_without_status():
@@ -142,43 +171,3 @@ def test_routerai_quota_falls_back_to_yandex(monkeypatch):
     with pytest.raises(RouterAiQuotaError):
         ai_client.run_structured(None, system_prompt="s", user_text="u", response_model=Answer)
 
-
-@pytest.mark.parametrize(
-    ("provider", "expected", "unexpected"),
-    [
-        ("RouterAI", "RouterAI отклонил ключ", "Yandex"),
-        ("Yandex", "Yandex отклонил запрос", "проверьте ключ на странице"),
-    ],
-)
-def test_forbidden_error_names_the_real_provider(monkeypatch, provider, expected, unexpected):
-    """Журнал 06.11.2026: 403 от Yandex AI Studio советовал проверить ключ RouterAI — запасная
-    модель идёт через общий клиент, и текст ошибки был зашит под RouterAI."""
-
-    from app.services import routerai_client
-    from app.services.routerai_client import RouterAiUnavailableError
-
-    monkeypatch.setattr(
-        routerai_client.httpx,
-        "post",
-        lambda *args, **kwargs: SimpleNamespace(
-            status_code=403,
-            text='{"message": "Forbidden"}',
-            json=lambda: {"message": "Forbidden"},
-        ),
-    )
-
-    with pytest.raises(RouterAiUnavailableError) as error:
-        routerai_client._chat_completion(
-            api_key="test",
-            model="m",
-            base_url="https://example.test/v1",
-            messages=[],
-            temperature=0,
-            max_tokens=10,
-            response_format=None,
-            timeout=1,
-            provider=provider,
-        )
-
-    assert expected in str(error.value)
-    assert unexpected not in str(error.value)
