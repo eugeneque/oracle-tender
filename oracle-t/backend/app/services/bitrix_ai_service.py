@@ -792,12 +792,14 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
         ("special_conditions", "contract", "obligation", "requirement", "Обязательство"),
         ("application_requirements", "preparation", "checklist", "document", "Состав заявки"),
     ):
-        for text in extra_sections.get(source_key) or []:
+        for number, text in enumerate(extra_sections.get(source_key) or [], start=1):
+            # Наименование — короткая подпись с номером, а не сам текст: иначе в таблице
+            # портала «Наименование» и «Требование» показывают одно и то же (06.11.2026).
             sections[section].append(
                 _row(
                     _key(source_key, text),
                     type_,
-                    _clip(text, 120) or title,
+                    f"{title} {number}",
                     {field: _clip(text)},
                     updated_at=extra_at,
                 )
