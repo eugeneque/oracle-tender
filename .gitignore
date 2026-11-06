@@ -37,3 +37,6 @@ oracle-t/backend/storage/
 # --- Вне скоупа сканера тендеров ---
 transcriber/
 ТЗ/
+
+# --- Эталоны evals (выгружаются из БД) ---
+oracle-t/backend/golden/
