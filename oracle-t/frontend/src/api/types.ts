@@ -2431,6 +2431,9 @@ export interface MarketModification {
   rpp_included_at: string | null;
   rpp_record_number: string | null;
   localization_source: string | null;
+  smart_890: boolean | null;
+  smart_890_source: string | null;
+  smart_890_note: string | null;
   variants: number;
   count: number;
 }

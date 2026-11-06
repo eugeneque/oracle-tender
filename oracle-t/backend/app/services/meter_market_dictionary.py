@@ -171,6 +171,17 @@ def update_modification(
             if key in values:
                 setattr(modification, key, values[key])
         modification.localization_source = LocalizationSource.MANUAL.value
+    if "smart_890" in values:
+        # Решение аналитика: переопределяет ИИ и им не перезаписывается; None — вернуть решение ИИ.
+        # Форма правки шлёт поле всегда: без решения аналитика None — «не трогать ИИ».
+        if values["smart_890"] is not None:
+            modification.smart_890 = values["smart_890"]
+            modification.smart_890_source = "manual"
+        elif modification.smart_890_source == "manual":
+            modification.smart_890 = None
+            modification.smart_890_source = None
+            modification.smart_890_note = None
+            modification.smart_890_at = None  # ИИ оценит заново при следующем запуске
     if add:
         db.add(modification)
     db.flush()

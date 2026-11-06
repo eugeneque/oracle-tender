@@ -217,7 +217,7 @@ function UnmappedRow({
   );
 }
 
-type ModValues = Partial<Pick<MarketModification, "name" | "phase" | "design" | "interface" | "mpi_years" | "comment" | "in_rpp" | "score" | "rpp_included_at">>;
+type ModValues = Partial<Pick<MarketModification, "name" | "phase" | "design" | "interface" | "mpi_years" | "comment" | "in_rpp" | "score" | "rpp_included_at" | "smart_890">>;
 
 function ModificationForm({
   initial,
@@ -230,7 +230,13 @@ function ModificationForm({
   onSubmit: (values: ModValues) => Promise<void>;
   onCancel: () => void;
 }) {
-  const [values, setValues] = useState<ModValues>({ design: "nd", phase: "1ф", ...initial });
+  const [values, setValues] = useState<ModValues>({
+    design: "nd",
+    phase: "1ф",
+    ...initial,
+    // В форме — только ручное решение; вердикт ИИ показан в таблице и не должен стать ручным при правке.
+    smart_890: (initial as Partial<MarketModification>).smart_890_source === "manual" ? initial.smart_890 : null,
+  });
   const [busy, setBusy] = useState(false);
   const set = (patch: ModValues) => setValues((prev) => ({ ...prev, ...patch }));
   return (
@@ -273,6 +279,18 @@ function ModificationForm({
       <label className="flex items-end gap-2 pb-2 text-xs text-zinc-400">
         <input type="checkbox" className="h-4 w-4 accent-indigo-500" checked={!!values.in_rpp} onChange={(e) => set({ in_rpp: e.target.checked })} />
         в РПП
+      </label>
+      <label className="text-xs text-zinc-500">
+        Соответствие ПП 890
+        <select
+          className={`${INPUT} mt-1 w-full`}
+          value={values.smart_890 === true ? "yes" : values.smart_890 === false ? "no" : ""}
+          onChange={(e) => set({ smart_890: e.target.value === "" ? null : e.target.value === "yes" })}
+        >
+          <option value="" className="bg-zinc-900">решает ИИ</option>
+          <option value="yes" className="bg-zinc-900">да (интеллектуальный)</option>
+          <option value="no" className="bg-zinc-900">нет (простейший)</option>
+        </select>
       </label>
       {values.in_rpp && (
         <>
@@ -431,6 +449,7 @@ function Modifications({ typeId, canEdit, report, fail }: EditProps & { typeId: 
             <th className="px-3 py-2 text-left font-medium">Исполнение</th>
             <th className="px-3 py-2 text-left font-medium">Интерфейс</th>
             <th className="px-3 py-2 text-left font-medium">РПП</th>
+            <th className="px-3 py-2 text-left font-medium">ПП 890</th>
             <th className="px-3 py-2 text-right font-medium">Написаний</th>
             <th className="px-3 py-2 text-right font-medium">Поверок</th>
             <th />
@@ -447,6 +466,10 @@ function Modifications({ typeId, canEdit, report, fail }: EditProps & { typeId: 
                 <td className="px-3 py-1.5">
                   {m.in_rpp ? `${m.score ?? "?"} б.${m.rpp_included_at ? ` с ${m.rpp_included_at.split("-").reverse().join(".")}` : ""}` : "нет"}
                 </td>
+                <td className="px-3 py-1.5" title={m.smart_890_note ?? undefined}>
+                  {m.smart_890 === null ? "—" : m.smart_890 ? "да" : "нет"}
+                  {m.smart_890_source === "manual" && <span className="ml-1 text-zinc-500">(вручную)</span>}
+                </td>
                 <td className="px-3 py-1.5 text-right">
                   <button type="button" className="tabular-nums text-indigo-300 hover:underline" onClick={() => showVariants(m.id)}>
                     {m.variants}
@@ -462,7 +485,7 @@ function Modifications({ typeId, canEdit, report, fail }: EditProps & { typeId: 
               </tr>
               {variants[m.id] && (
                 <tr key={`${m.id}-v`}>
-                  <td colSpan={8} className="px-6 pb-2 text-zinc-500">
+                  <td colSpan={9} className="px-6 pb-2 text-zinc-500">
                     {variants[m.id].map((v) => (
                       <div key={v.id} className="flex justify-between gap-3">
                         <span className="whitespace-pre-wrap font-mono">«{v.raw}»</span>
@@ -474,7 +497,7 @@ function Modifications({ typeId, canEdit, report, fail }: EditProps & { typeId: 
               )}
               {editing === m.id && (
                 <tr key={`${m.id}-e`}>
-                  <td colSpan={8} className="px-3 pb-3">
+                  <td colSpan={9} className="px-3 pb-3">
                     <ModificationForm
                       initial={m}
                       submitLabel="Сохранить"

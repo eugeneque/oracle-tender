@@ -25,6 +25,7 @@ class ModificationIn(BaseModel):
     score: float | None = None
     rpp_included_at: date | None = None
     rpp_record_number: str | None = None
+    smart_890: bool | None = None
 
 
 class ModificationFromVariantIn(ModificationIn):

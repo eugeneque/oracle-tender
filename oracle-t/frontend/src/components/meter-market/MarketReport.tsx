@@ -120,8 +120,10 @@ interface Filters {
   design: string | null;
   phase: string | null;
   interface: string | null;
+  smart: "yes" | "no" | "unknown" | null;
 }
-const NO_FILTERS: Filters = { manufacturer_id: null, design: null, phase: null, interface: null };
+const NO_FILTERS: Filters = { manufacturer_id: null, design: null, phase: null, interface: null, smart: null };
+const SMART_LABELS = { yes: "Соответствуют ПП 890", no: "Не соответствуют ПП 890", unknown: "ПП 890 не определено" } as const;
 
 function query(params: Record<string, string | number | null | undefined>): string {
   const search = new URLSearchParams();
@@ -209,6 +211,20 @@ function OverviewScreen({
         )}
       </div>
 
+      <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+        <span>Постановление 890 (интеллектуальные ПУ):</span>
+        <select
+          className={INPUT}
+          value={filters.smart ?? ""}
+          onChange={(e) => set({ smart: (e.target.value || null) as Filters["smart"] })}
+        >
+          <option value="" className="bg-zinc-900">все поверки</option>
+          <option value="yes" className="bg-zinc-900">{SMART_LABELS.yes}</option>
+          <option value="no" className="bg-zinc-900">{SMART_LABELS.no}</option>
+          <option value="unknown" className="bg-zinc-900">{SMART_LABELS.unknown}</option>
+        </select>
+      </div>
+
       {active.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 text-xs">
           {filters.manufacturer_id !== null && (
@@ -217,6 +233,7 @@ function OverviewScreen({
           {filters.design && <Chip label={filters.design} onClear={() => set({ design: null })} />}
           {filters.phase && <Chip label={filters.phase} onClear={() => set({ phase: null })} />}
           {filters.interface && <Chip label={filters.interface} onClear={() => set({ interface: null })} />}
+          {filters.smart && <Chip label={SMART_LABELS[filters.smart]} onClear={() => set({ smart: null })} />}
           <button type="button" className="text-zinc-500 hover:text-zinc-300" onClick={() => setFilters(NO_FILTERS)}>
             сбросить всё
           </button>

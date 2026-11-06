@@ -202,6 +202,11 @@ class MeterMarketModification(Base):
     rpp_included_at: Mapped[date | None] = mapped_column(Date, nullable=True)
     rpp_record_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
     localization_source: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Соответствие ПП 890 (интеллектуальный ПУ, раздел III) — отдельно от локализации (06.11.2026).
+    smart_890: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    smart_890_source: Mapped[str | None] = mapped_column(String(10), nullable=True)  # ai | manual
+    smart_890_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    smart_890_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

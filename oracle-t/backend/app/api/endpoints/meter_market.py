@@ -52,8 +52,16 @@ def _period(db: Session, value: str | None) -> report.Period:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-def _filters(manufacturer_id: int | None, design: str | None, phase: str | None, interface: str | None) -> report.Filters:
-    return report.Filters(manufacturer_id=manufacturer_id, design=design, phase=phase, interface=interface)
+def _filters(
+    manufacturer_id: int | None,
+    design: str | None,
+    phase: str | None,
+    interface: str | None,
+    smart: str | None = None,
+) -> report.Filters:
+    if smart not in (None, "yes", "no", "unknown"):
+        raise HTTPException(status_code=422, detail="Соответствие ПП 890 — yes, no или unknown")
+    return report.Filters(manufacturer_id=manufacturer_id, design=design, phase=phase, interface=interface, smart=smart)
 
 
 # ── Отчёт ──────────────────────────────────────────────────────────────────────────────────
@@ -73,10 +81,11 @@ def get_overview(
     design: str | None = None,
     phase: str | None = None,
     interface: str | None = None,
+    smart: str | None = None,
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    return report.overview(db, _period(db, period), _filters(manufacturer_id, design, phase, interface))
+    return report.overview(db, _period(db, period), _filters(manufacturer_id, design, phase, interface, smart))
 
 
 @router.get("/designs")
@@ -142,6 +151,7 @@ def export_table(
     design: str | None = None,
     phase: str | None = None,
     interface: str | None = None,
+    smart: str | None = None,
     requirement: int | None = None,
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
@@ -158,7 +168,7 @@ def export_table(
         return _xlsx_response(f"Рынок ПУ — для Power BI — {p.label}.xlsx", content)
     if table in ("manufacturers", "designs", "phases", "interfaces"):
         p = _period(db, period)
-        data = report.overview(db, p, _filters(manufacturer_id, design, phase, interface))
+        data = report.overview(db, p, _filters(manufacturer_id, design, phase, interface, smart))
         titles = {
             "manufacturers": "Производитель",
             "designs": "Исполнение",

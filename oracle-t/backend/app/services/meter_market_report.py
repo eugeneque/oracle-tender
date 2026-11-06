@@ -193,15 +193,16 @@ class Filters:
     design: str | None = None
     phase: str | None = None
     interface: str | None = None
+    smart: str | None = None  # yes | no | unknown — соответствие ПП 890 (06.11.2026)
 
 
 def _cells(db: Session, period: Period, extra_group: str = "", extra_select: str = "") -> list[dict[str, Any]]:
     rows = db.execute(
         text(
             f"SELECT {_MANUFACTURER_SQL} AS manufacturer_id, m.design, m.phase, m.interface, "
-            f"(v.modification_id IS NULL) AS unmapped{extra_select}, sum(mv.count) AS count "
+            f"(v.modification_id IS NULL) AS unmapped, m.smart_890 AS smart{extra_select}, sum(mv.count) AS count "
             f"{_BASE_FROM} WHERE mv.month >= :start AND mv.month < :end "
-            f"GROUP BY 1, 2, 3, 4, 5{extra_group}"
+            f"GROUP BY 1, 2, 3, 4, 5, 6{extra_group}"
         ),
         {"start": period.start, "end": period.end},
     ).mappings()
@@ -222,6 +223,12 @@ def _interface_label(cell: dict[str, Any]) -> str:
     return UNMAPPED if cell["unmapped"] else (cell["interface"] or "н/д")
 
 
+def smart_label(cell: dict[str, Any]) -> str:
+    if cell["unmapped"] or cell["smart"] is None:
+        return "unknown"
+    return "yes" if cell["smart"] else "no"
+
+
 def _keep(cell: dict[str, Any], filters: Filters, names: dict[int, str], skip: str) -> bool:
     if skip != "manufacturer" and filters.manufacturer_id is not None and cell["manufacturer_id"] != filters.manufacturer_id:
         return False
@@ -230,6 +237,8 @@ def _keep(cell: dict[str, Any], filters: Filters, names: dict[int, str], skip: s
     if skip != "phase" and filters.phase is not None and _phase_label(cell) != filters.phase:
         return False
     if skip != "interface" and filters.interface is not None and _interface_label(cell) != filters.interface:
+        return False
+    if filters.smart is not None and smart_label(cell) != filters.smart:
         return False
     return True
 
@@ -281,7 +290,7 @@ def designs_by_year(db: Session, edge: date, phase: str | None = None) -> dict[s
 
     names = _manufacturer_names(db)
     period = Period(date(FIRST_YEAR, 1, 1), edge, f"{FIRST_YEAR} г. – {_edge_label(edge)}")
-    cells = _cells(db, period, ", 6", ", extract(year FROM mv.month)::int AS year")
+    cells = _cells(db, period, ", 7", ", extract(year FROM mv.month)::int AS year")
     years = _years(edge)
     table: dict[int, dict[str, dict[int, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     for cell in cells:
@@ -578,9 +587,10 @@ def powerbi_rows(db: Session, period: Period) -> list[list[Any]]:
         text(
             f"SELECT {_MANUFACTURER_SQL} AS manufacturer_id, t.mit_number, "
             "m.design, m.phase, m.interface, "
-            "mv.month, m.in_rpp, m.score, (v.modification_id IS NULL) AS unmapped, sum(mv.count) AS count "
+            "mv.month, m.in_rpp, m.score, m.smart_890, (v.modification_id IS NULL) AS unmapped, "
+            "sum(mv.count) AS count "
             f"{_BASE_FROM} WHERE mv.month >= :start AND mv.month < :end "
-            "GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9 "
+            "GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 "
             "ORDER BY 2, 6, 1"
         ),
         {"start": period.start, "end": period.end},
@@ -601,6 +611,7 @@ def powerbi_rows(db: Session, period: Period) -> list[list[Any]]:
                 "н/д" if unmapped else ("да" if r["in_rpp"] else "нет"),
                 year if year is not None else "",
                 r["score"] if r["score"] is not None else "",
+                "н/д" if unmapped or r["smart_890"] is None else ("да" if r["smart_890"] else "нет"),
             ]
         )
     return result
@@ -617,6 +628,7 @@ POWERBI_HEADER = [
     "В Реестре российской промышленной продукции",
     "Соответствие требованиям года",
     "Кол-во баллов",
+    "Соответствие ПП 890",
 ]
 
 
