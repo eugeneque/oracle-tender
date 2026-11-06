@@ -43,7 +43,7 @@ def main() -> None:
             )
         )
         print(f"  Размечено человеком (relevance_marked_at): {marked}")
-        print("  Из них отсеяно профилями (нужна аудит-выборка):",
+        print("  Всего отсеяно профилями (специалисты их не видят):",
               db.scalar(select(func.count()).select_from(Tender).where(
                   Tender.passed_relevance_filter.is_(False)
               )))

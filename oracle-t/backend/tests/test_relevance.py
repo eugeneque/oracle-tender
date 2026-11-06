@@ -94,6 +94,29 @@ def test_exclusion_beats_positive_keyword():
     assert "исключено" in outcome.reason
 
 
+def test_exclusion_ignores_customer_name():
+    """Слово-исключение в названии заказчика не отсеивает закупку (06.11.2026)."""
+
+    group = _group(keywords=["счетчик*"], exclusion_keywords=["водоснабж*"])
+    text = "Поставка электрических счетчиков ФГУП Управление энергетики и водоснабжения"
+    title = "Поставка электрических счетчиков"
+
+    outcome = evaluate(tokenize(text), [group], exclusion_tokens=tokenize(title))
+
+    assert outcome.passed is True
+
+
+def test_exclusion_still_applies_to_title():
+    """Закупка про воду отсеивается и при новой логике."""
+
+    group = _group(keywords=["счетчик*"], exclusion_keywords=["воды"])
+    title = "Поставка счетчиков воды"
+
+    outcome = evaluate(tokenize(title), [group], exclusion_tokens=tokenize(title))
+
+    assert outcome.passed is False
+
+
 def test_keyword_match_wins_over_okpd2_match():
     """Группу-победителя выбирает совпадение по смыслу, а не по коду.
 

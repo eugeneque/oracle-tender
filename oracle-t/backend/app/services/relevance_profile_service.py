@@ -20,7 +20,7 @@ from app.models.relevance_profile import RelevanceProfile, RelevanceProfileMatch
 from app.models.tender import Tender
 from app.models.user import User, UserRole
 from app.services import relevance_service
-from app.services.relevance_service import match_profile, tender_text, tokenize
+from app.services.relevance_service import exclusion_text, match_profile, tender_text, tokenize
 
 BATCH = 2000
 
@@ -32,7 +32,12 @@ def has_rules(profile: RelevanceProfile) -> bool:
 def profile_matches(profile, tender) -> bool:
     """Подходит ли закупка профилю. `tender` — Tender или строка с теми же полями."""
 
-    return match_profile(tokenize(tender_text(tender)), profile, tender.okpd2_code).matched
+    return match_profile(
+        tokenize(tender_text(tender)),
+        profile,
+        tender.okpd2_code,
+        exclusion_tokens=tokenize(exclusion_text(tender)),
+    ).matched
 
 
 PREVIEW_SAMPLES = 8

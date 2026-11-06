@@ -195,7 +195,11 @@ OKPD2_EITHER = "either"
 
 
 def match_profile(
-    tokens: list[str], profile, okpd2_code: str | None = None
+    tokens: list[str],
+    profile,
+    okpd2_code: str | None = None,
+    *,
+    exclusion_tokens: list[str] | None = None,
 ) -> GroupMatch:
     """Единый движок: подходит ли закупка профилю.
 
@@ -204,11 +208,16 @@ def match_profile(
     `okpd2_mode`: `narrow` — нужно и то и другое из заданного, `either` — достаточно одного
     (так работали группы системного профиля: код товара ловит безликое «Поставка
     оборудования»).
+
+    `exclusion_tokens` — текст, по которому проверяются исключения (06.11.2026, раздел 86
+    ARCHITECTURE.md): исключение говорит о предмете закупки, а не о том, кто её проводит.
+    Не передан — исключения проверяются по `tokens`.
     """
 
     name = profile.name
+    excluded_in = tokens if exclusion_tokens is None else exclusion_tokens
     for excluded in profile.exclusion_keywords or []:
-        if matches_keyword(tokens, excluded):
+        if matches_keyword(excluded_in, excluded):
             return GroupMatch(profile.id, name, False, f"исключено ключом «{excluded}»")
 
     keywords = profile.keywords or []
@@ -258,6 +267,7 @@ def evaluate(
     groups: list,
     *,
     okpd2_code: str | None = None,
+    exclusion_tokens: list[str] | None = None,
 ) -> RelevanceOutcome:
     """Применяет набор профилей. Достаточно одного сработавшего.
 
@@ -270,7 +280,7 @@ def evaluate(
     rejected: list[str] = []
     by_code: GroupMatch | None = None
     for group in active:
-        result = match_profile(tokens, group, okpd2_code)
+        result = match_profile(tokens, group, okpd2_code, exclusion_tokens=exclusion_tokens)
         if result.matched and result.via == "keywords":
             return RelevanceOutcome(True, result.group_id, result.group_name, result.reason)
         if result.matched and by_code is None:
@@ -390,6 +400,16 @@ def tender_text(tender: Tender) -> str:
     return " ".join(part for part in parts if part)
 
 
+def exclusion_text(tender: Tender) -> str:
+    """Текст для слов-исключений: только название закупки.
+
+    Заказчик сюда не входит: ФГУП «Управление энергетики и водоснабжения», покупавшее
+    электросчётчики на 2,7 млн ₽, отсеивалось исключением «водоснабж*» из-за своего названия.
+    """
+
+    return tender.title or ""
+
+
 def _applicable(profiles: list, source_key: str | None) -> list:
     """Профили, которые действуют на площадку: без привязки — на все."""
 
@@ -406,7 +426,12 @@ def _decide(profiles: list, tender, source_key: str | None) -> RelevanceOutcome 
         # Ни один общий профиль не привязан к этой площадке — она не сужается (то же правило,
         # что на странице тендеров). Закупка считается прошедшей, иначе модель её не проверит.
         return RelevanceOutcome(True, None, None, "на эту площадку общие профили не действуют")
-    return evaluate(tokenize(tender_text(tender)), applicable, okpd2_code=tender.okpd2_code)
+    return evaluate(
+        tokenize(tender_text(tender)),
+        applicable,
+        okpd2_code=tender.okpd2_code,
+        exclusion_tokens=tokenize(exclusion_text(tender)),
+    )
 
 
 def _set_mark(tender: Tender, outcome: RelevanceOutcome) -> None:
