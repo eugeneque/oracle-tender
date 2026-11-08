@@ -3,6 +3,7 @@ import { Clock, Sparkles, Star } from "lucide-react";
 
 import type { Tender } from "../../api/types";
 import { DecisionMark } from "../DecisionMark";
+import { FoundInSources } from "../FoundInSources";
 import { RelevanceMark } from "../RelevanceMark";
 import { TenderDetailPanel } from "../TenderDetailPanel";
 import { TagRow } from "../tags/TagChip";
@@ -109,6 +110,9 @@ function SplitListItem({
           )}
         </span>
       </div>
+
+      {/* Канал «Все»: откуда закупка — ЕИС, Госплан, Тендерплан, площадка. */}
+      <FoundInSources tender={tender} className="mt-1.5 pl-[30px]" />
 
       {tender.tags.length > 0 && (
         <div className="mt-1.5 pl-[30px]">

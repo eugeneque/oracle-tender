@@ -15,7 +15,7 @@ from app.models.job import JobKind
 from app.models.market import NicheStatistics, SimilarTender
 from app.models.tender import Tender
 from app.models.tender_document import DOCUMENT_CLASS_LABELS, DocumentClass, TenderDocument
-from app.models.source import FEED_PATTERN
+from app.models.source import FEED_ALL, FEED_PATTERN
 from app.models.user import User
 from app.schemas.job import BackgroundJobOut
 from app.schemas.tender import (
@@ -94,6 +94,7 @@ from app.services.tender_service import (
     count_tenders,
     count_tenders_by_stage,
     count_tenders_by_status,
+    feed_sources_by_tender,
     get_tender_by_id,
     list_board_columns,
     get_tender_stats,
@@ -152,7 +153,7 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
     feed: str | None = Query(
         default=None,
         pattern=FEED_PATTERN,
-        description="Канал сбора: standard — площадки из настроек, gosplan/tenderplan — внешний сервис",
+        description="Канал сбора: all — все без дублей, standard — площадки из настроек, gosplan/tenderplan — внешний сервис",
     ),
 ) -> TenderFilters:
     """Общий разбор фильтров для списка и доски.
@@ -201,6 +202,20 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
     )
 
 
+def _with_found_in(
+    db: Session, tenders: list, enriched: list[dict], filters: TenderFilters
+) -> list[dict]:
+    """Метка «Ресурсы» на карточках канала «Все» (08.11.2026): дубли между каналами там
+    схлопнуты в одну строку, и без метки не видно, что закупку нашли и ЕИС, и Госплан."""
+
+    if filters.feed != FEED_ALL:
+        return enriched
+    found = feed_sources_by_tender(db, tenders)
+    for row in enriched:
+        row["found_in"] = found.get(row["id"], [])
+    return enriched
+
+
 @router.get("", response_model=TenderPageOut)
 def get_tenders(
     limit: int = Query(default=50, ge=1, le=1000),
@@ -225,7 +240,7 @@ def get_tenders(
     # Процент победителя и число требований живут в отдельных таблицах (этапы 5-6), но
     # нужны на каждой карточке списка — досыпаются одним запросом на всю выдачу.
     return TenderPageOut(
-        items=attach_analysis_fields(db, tenders, user_id=user.id),
+        items=_with_found_in(db, tenders, attach_analysis_fields(db, tenders, user_id=user.id), filters),
         total=count_tenders(db, filters=filters),
         limit=limit,
         offset=offset,
@@ -267,8 +282,9 @@ def get_tenders_board(
     # Проценты победителя досыпаются одним запросом на всю доску, а не по колонке.
     # `attach_analysis_fields` отдаёт словари, а не ORM-объекты, — раскладываем их обратно
     # по колонкам по идентификатору.
-    enriched = attach_analysis_fields(
-        db, [t for column in columns.values() for t in column], user_id=user.id
+    board_tenders = [t for column in columns.values() for t in column]
+    enriched = _with_found_in(
+        db, board_tenders, attach_analysis_fields(db, board_tenders, user_id=user.id), filters
     )
     by_id = {row["id"]: row for row in enriched}
 

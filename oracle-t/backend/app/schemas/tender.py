@@ -40,6 +40,9 @@ class TenderOut(BaseModel):
     okpd2_code: str | None
     source_url: str | None
     source: TenderSourceOut
+    # Все ресурсы, где нашлась закупка (канал «Все», 08.11.2026): своя площадка первой, затем
+    # источники записей с тем же реестровым номером. В остальных каналах — пусто.
+    found_in: list[TenderSourceOut] = Field(default_factory=list)
     # Поля этапа 5: заполняются ИИ-анализом документации, до него остаются пустыми.
     tender_type: str | None = None
     # Типы приборов учёта из одиннадцати (файл «Параметры для ПУ»); коды —

@@ -81,10 +81,13 @@ export function isExternalFeedSource(type: string): boolean {
 }
 
 /** Канал сбора закупок: площадки из «Источников тендеров» или один из внешних сервисов. */
-export type TenderFeed = "standard" | ExternalFeed;
+/** «all» (08.11.2026) — все каналы разом, одна закупка одной строкой. */
+export type TenderFeed = "all" | "standard" | ExternalFeed;
 
 export function parseTenderFeed(value: string | null): TenderFeed | null {
-  return value === "standard" || (EXTERNAL_FEEDS as readonly string[]).includes(value ?? "")
+  return value === "all" ||
+    value === "standard" ||
+    (EXTERNAL_FEEDS as readonly string[]).includes(value ?? "")
     ? (value as TenderFeed)
     : null;
 }
@@ -904,6 +907,9 @@ export interface Tender {
   okpd2_code: string | null;
   source_url: string | null;
   source: TenderSourceRef;
+  /** Все ресурсы, где нашлась закупка (канал «Все», 08.11.2026): своя площадка первой.
+   * В остальных каналах пусто. */
+  found_in?: TenderSourceRef[];
   // Поля этапов 5-6: до запуска анализа документации остаются пустыми.
   tender_type: TenderTypeCode | null;
   /** Типы закупаемых приборов учёта (коды `METER_KINDS`); null — не определено. */

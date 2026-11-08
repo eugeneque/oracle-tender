@@ -58,11 +58,14 @@ class SourceType(str, enum.Enum):
 FEED_STANDARD = "standard"
 FEED_GOSPLAN = "gosplan"
 FEED_TENDERPLAN = "tenderplan"
+# «Все» (08.11.2026): все каналы разом, одна закупка — одной строкой, на карточке — все
+# ресурсы, где она нашлась (`tender_service.feed_condition_for`, раздел 89 ARCHITECTURE.md).
+FEED_ALL = "all"
 # Типы источников, которые образуют отдельный канал и не смешиваются со стандартным.
 SEPARATE_FEED_SOURCE_TYPES: frozenset[str] = frozenset(
     {SourceType.GOSPLAN.value, SourceType.TENDERPLAN.value}
 )
-FEEDS: tuple[str, ...] = (FEED_STANDARD, FEED_GOSPLAN, FEED_TENDERPLAN)
+FEEDS: tuple[str, ...] = (FEED_ALL, FEED_STANDARD, FEED_GOSPLAN, FEED_TENDERPLAN)
 # Для `Query(pattern=...)` эндпоинтов списка, доски, выгрузки и статистики.
 FEED_PATTERN = "^(" + "|".join(FEEDS) + ")$"
 GOSPLAN_SOURCE_KEY = "gosplan"

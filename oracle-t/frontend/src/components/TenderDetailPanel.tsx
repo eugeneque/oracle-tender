@@ -39,6 +39,7 @@ import type {
   TenderUpdate,
 } from "../api/types";
 import { STAGE_LABELS, STAGE_ORDER } from "../api/types";
+import { foundInLabel } from "./FoundInSources";
 import { DecisionMark } from "./DecisionMark";
 import { DropdownMenu } from "./DropdownMenu";
 import { TenderAiScorePanel } from "./tender-detail/TenderAiScorePanel";
@@ -272,10 +273,13 @@ export function TenderDetailPanel({
 
   const applyTender = useCallback(
     (updated: Tender) => {
-      setTender(updated);
-      onChanged?.(updated);
+      // Ответы действий карточки не знают канала, и `found_in` в них пуст — метку ресурсов
+      // канала «Все» сохраняем от выдачи, иначе после «Релевантна» она пропадала бы.
+      const merged = updated.found_in?.length ? updated : { ...updated, found_in: initialTender.found_in };
+      setTender(merged);
+      onChanged?.(merged);
     },
-    [onChanged],
+    [onChanged, initialTender.found_in],
   );
 
   // Свежая версия той же закупки (родитель перечитал её после правки или разбора) — только
@@ -887,7 +891,7 @@ export function TenderDetailPanel({
       <div className="shrink-0 px-6 pt-4">
         <div className="mb-2 flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2 text-xs text-zinc-500">
-            <span className="font-medium text-zinc-400">{tender.source.name}</span>
+            <span className="font-medium text-zinc-400">{foundInLabel(tender)}</span>
             <span className="text-zinc-700">·</span>
             <span className="truncate tabular-nums">№ {tender.external_id}</span>
           </div>

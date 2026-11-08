@@ -25,18 +25,20 @@ from decimal import Decimal
 from typing import Callable
 
 from loguru import logger
-from sqlalchemy import Date, and_, cast, func, or_, select, true
+from sqlalchemy import Date, String, and_, case, cast, func, or_, select, true
 from sqlalchemy.orm import Session
 
 from app.adapters.base import PollError, TenderSummary
 from app.adapters.registry import get_adapter
 from app.models.log import LogLevel
 from app.models.source import (
+    FEED_ALL,
     FEED_STANDARD,
     POLL_EXCLUDED_SOURCE_TYPES,
     SEPARATE_FEED_SOURCE_TYPES,
     Source,
     SourceStatus,
+    SourceType,
 )
 from app.models.tender import RelevanceStatus, Tender, TenderStatus
 from app.services import notification_service
@@ -585,7 +587,8 @@ class TenderFilters:
     tag_ids: list[uuid.UUID] = field(default_factory=list)
     # Канал сбора (переключатель на странице тендеров, 28.09.2026): `standard` — площадки
     # из «Источников тендеров» и ручные заявки, `gosplan`/`tenderplan` — внешний
-    # сервис с тем же именем (см. `FEEDS`), `None` — все.
+    # сервис с тем же именем (см. `FEEDS`), `all` — все каналы без дублей одной закупки
+    # (08.11.2026), `None` — все записи как есть (внутренние вызовы).
     feed: str | None = None
 
 
@@ -726,7 +729,94 @@ def feed_condition_for(feed: str | None):
     if feed == FEED_STANDARD:
         types = select(Source.id).where(Source.type.notin_(SEPARATE_FEED_SOURCE_TYPES))
         return Tender.source_id.in_(types)
+    if feed == FEED_ALL:
+        return Tender.id.in_(_all_feeds_representatives())
     return None
+
+
+def _all_feeds_representatives():
+    """Канал «Все» (08.11.2026): по одной записи на закупку из всех каналов.
+
+    Внутри канала дубли не создаются (`_upsert_tender`), но между каналами — намеренно:
+    одна закупка лежит строкой ЕИС, строкой Госплана и строкой Тендерплана. В общей куче
+    это три одинаковые карточки, поэтому из записей с одним реестровым номером остаётся
+    одна: сначала та, по которой человек уже вынес решение («Релевантна»/«Неактуально» —
+    его работа не должна пропасть из виду), затем запись стандартных ресурсов (там
+    площадка проведения и ссылка на неё), затем Госплан, Тендерплан, затем самая ранняя.
+    Записи без реестрового номера не склеиваются ни с чем — сравнивать их не по чему.
+    Где ещё нашлась закупка, карточке подсказывает `feed_sources_by_tender`."""
+
+    feed_rank = case(
+        (Source.type == SourceType.GOSPLAN.value, 1),
+        (Source.type == SourceType.TENDERPLAN.value, 2),
+        else_=0,
+    )
+    ranked = (
+        select(
+            Tender.id.label("id"),
+            func.row_number()
+            .over(
+                partition_by=func.coalesce(Tender.registry_number, cast(Tender.id, String)),
+                order_by=(
+                    Tender.relevance_marked_at.is_(None),
+                    feed_rank,
+                    Tender.created_at,
+                    Tender.id,
+                ),
+            )
+            .label("rn"),
+        )
+        .join(Source, Source.id == Tender.source_id)
+        .subquery()
+    )
+    return select(ranked.c.id).where(ranked.c.rn == 1)
+
+
+def _found_in_sources_condition(source_keys: list[str]):
+    """Фильтр площадок в канале «Все»: закупка нашлась хотя бы на одной из них.
+
+    Сама строка может быть записью другого канала (дубли схлопнуты в одну), поэтому
+    смотрим и на записи с тем же реестровым номером — иначе выбор «Госплан» терял бы все
+    закупки, которые Госплан нашёл вслед за ЕИС."""
+
+    selected = select(Source.id).where(Source.key.in_(source_keys))
+    return or_(
+        Tender.source_id.in_(selected),
+        and_(
+            Tender.registry_number.is_not(None),
+            Tender.registry_number.in_(
+                select(Tender.registry_number).where(
+                    Tender.source_id.in_(selected), Tender.registry_number.is_not(None)
+                )
+            ),
+        ),
+    )
+
+
+def feed_sources_by_tender(db: Session, tenders: list[Tender]) -> dict[uuid.UUID, list[Source]]:
+    """Все ресурсы, где нашлась закупка, — метка карточки в канале «Все».
+
+    Своя площадка записи — первой, остальные — источники записей с тем же реестровым
+    номером, без повторов. Один запрос на всю выдачу."""
+
+    numbers = {tender.registry_number for tender in tenders if tender.registry_number}
+    others: dict[str, list[Source]] = {}
+    if numbers:
+        for number, source in db.execute(
+            select(Tender.registry_number, Source)
+            .join(Source, Source.id == Tender.source_id)
+            .where(Tender.registry_number.in_(numbers))
+            .order_by(Tender.created_at)
+        ).all():
+            others.setdefault(number, []).append(source)
+    result: dict[uuid.UUID, list[Source]] = {}
+    for tender in tenders:
+        found = [tender.source]
+        for source in others.get(tender.registry_number or "", []):
+            if all(source.id != known.id for known in found):
+                found.append(source)
+        result[tender.id] = found
+    return result
 
 
 @dataclass(frozen=True)
@@ -790,7 +880,9 @@ def _build_conditions(filters: TenderFilters) -> list:
     feed_condition = feed_condition_for(filters.feed)
     if feed_condition is not None:
         conditions.append(feed_condition)
-    if filters.source_keys:
+    if filters.source_keys and filters.feed == FEED_ALL:
+        conditions.append(_found_in_sources_condition(filters.source_keys))
+    elif filters.source_keys:
         conditions.append(
             Tender.source_id.in_(select(Source.id).where(Source.key.in_(filters.source_keys)))
         )

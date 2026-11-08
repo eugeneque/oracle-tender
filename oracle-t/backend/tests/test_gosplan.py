@@ -130,3 +130,59 @@ def test_gosplan_feed_is_not_merged_with_standard_sources(monkeypatch):
         assert count("gosplan") == 1
     finally:
         db.close()
+
+
+def test_all_feed_shows_one_card_with_every_source(monkeypatch):
+    """Канал «Все» (08.11.2026): закупка из ЕИС и Госплана — одна строка, стандартная
+    запись — представитель, на метке оба ресурса; фильтр «Госплан» её не теряет."""
+
+    import app.services.tender_service as tender_service_module
+    from app.db.session import SessionLocal
+    from app.models.tender import Tender
+    from app.services.tender_service import feed_sources_by_tender
+
+    registry_number = _unique_registry_number()
+    db = SessionLocal()
+    try:
+        sources = [
+            Source(
+                key=f"stub_{kind}_{uuid.uuid4().hex[:8]}",
+                name=f"Тестовый {kind}",
+                url="https://example.test",
+                type=kind,
+                adapter_key="stub",
+                adapter_status="implemented",
+            )
+            for kind in ("gosplan", "eis")
+        ]
+        db.add_all(sources)
+        db.commit()
+        gosplan, standard = sources
+
+        monkeypatch.setattr(
+            tender_service_module,
+            "get_adapter",
+            lambda key, **kwargs: _StubRegistryAdapter(registry_number, title="Поставка ПУ"),
+        )
+        poll_source(db, gosplan)
+        poll_source(db, standard)
+
+        def shown(**extra):
+            return list(
+                db.scalars(
+                    select(Tender).where(
+                        Tender.registry_number == registry_number,
+                        *tender_service_module._build_conditions(
+                            tender_service_module.TenderFilters(feed="all", **extra)
+                        ),
+                    )
+                )
+            )
+
+        rows = shown()
+        assert [row.source_id for row in rows] == [standard.id]
+        assert [row.source_id for row in shown(source_keys=[gosplan.key])] == [standard.id]
+        labels = feed_sources_by_tender(db, rows)[rows[0].id]
+        assert [source.id for source in labels] == [standard.id, gosplan.id]
+    finally:
+        db.close()

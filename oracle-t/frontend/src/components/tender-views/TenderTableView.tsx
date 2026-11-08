@@ -1,5 +1,6 @@
 import { ArrowDown, ArrowUp, ArrowUpDown, Star } from "lucide-react";
 
+import { foundInLabel } from "../FoundInSources";
 import type { Tender } from "../../api/types";
 import { TruncatedText } from "./TruncatedText";
 import { TagRow } from "../tags/TagChip";
@@ -58,7 +59,7 @@ const COLUMNS: {
 
 /** Подпись под наименованием: источник, код ОКПД2 и тип конкурса одной строкой. */
 function metaLine(tender: Tender): string {
-  return [tender.source.name, tender.okpd2_code, tenderTypeLabel(tender.tender_type)]
+  return [foundInLabel(tender), tender.okpd2_code, tenderTypeLabel(tender.tender_type)]
     .filter(Boolean)
     .join(" · ");
 }

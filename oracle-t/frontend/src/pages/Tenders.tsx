@@ -67,6 +67,7 @@ import { TenderTableView } from "../components/tender-views/TenderTableView";
 import { METER_KINDS } from "../utils/meterKinds";
 import { loadTendersView } from "../utils/tendersView";
 import type { TenderViewKey } from "../utils/tendersView";
+import { foundInLabel } from "../components/FoundInSources";
 import type {
   SortDirection,
   SortKey,
@@ -79,7 +80,10 @@ import {
 } from "../utils/format";
 
 const SELECTED_SOURCES_STORAGE_KEY = "oraclet_selected_source_keys";
-const FEED_STORAGE_KEY = "oraclet_tender_feed";
+// `_v2` (08.11.2026): по умолчанию открываются «Все» — новый ключ, чтобы у всех, у кого
+// сохранились «Стандартные ресурсы», страница один раз открылась на «Всех»; дальше
+// выбор снова запоминается.
+const FEED_STORAGE_KEY = "oraclet_tender_feed_v2";
 // Закупка, открытая справа в двухпанельном режиме. sessionStorage, а не адрес: параметры
 // адреса здесь снимаются эффектами разделов («Избранное», канал), и выбор слетал бы вместе
 // с ними. Нужна только для F5 в той же вкладке браузера (замечание 13.10.2026).
@@ -105,8 +109,14 @@ function saveSelectedTenderId(id: string | null): void {
 /** Канал сбора (28.09.2026): «Стандартные ресурсы» — площадки из «Настройки → Источники
  * тендеров», остальные — закупки, собранные через API внешнего сервиса (Госплан, с 30.09 —
  * Тендерплан). Каналы не смешиваются, и выбор запоминается: кто сравнивает
- * каналы, возвращается к тому же. */
+ * каналы, возвращается к тому же. «Все» (08.11.2026) — все каналы в одной куче: закупка,
+ * найденная и ЕИС, и Госпланом, показывается одной карточкой с меткой обоих ресурсов. */
 const FEED_OPTIONS: { value: TenderFeed; label: string; hint: string }[] = [
+  {
+    value: "all",
+    label: "Все",
+    hint: "Закупки со всех площадок и сервисов, без повторов; на карточке — где нашлась",
+  },
   {
     value: "standard",
     label: "Стандартные ресурсы",
@@ -118,9 +128,9 @@ const FEED_OPTIONS: { value: TenderFeed; label: string; hint: string }[] = [
 
 function loadFeed(): TenderFeed {
   try {
-    return parseTenderFeed(localStorage.getItem(FEED_STORAGE_KEY)) ?? "standard";
+    return parseTenderFeed(localStorage.getItem(FEED_STORAGE_KEY)) ?? "all";
   } catch {
-    return "standard";
+    return "all";
   }
 }
 
@@ -197,7 +207,7 @@ function TenderCard({
       <div className="mb-2.5 flex items-center gap-1.5">
         <DecisionMark decision={tender.ai_decision} size="sm" />
         <span className="rounded-md bg-white/5 px-2 py-0.5 text-xs text-zinc-400">
-          {tender.source.name}
+          {foundInLabel(tender)}
         </span>
         <span
           className={`rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${scoreBadgeClass(
@@ -432,7 +442,7 @@ function parseMarkedList(value: string | null): MarkedList | null {
 // по ключевым словам, не только активные закупки, поэтому без этого фильтра список на 90%+
 // состоит из уже завершённых/исторических записей и создаёт впечатление, что "все просрочены".
 const DEFAULT_FILTERS: TendersFilters = {
-  feed: "standard",
+  feed: "all",
   search: "",
   sourceKeys: [],
   publishFrom: "",
@@ -1756,7 +1766,7 @@ export function TendersPage() {
                 hint: "Завести закупку, которую заказчик прислал напрямую, и приложить документы",
                 onSelect: () => setIsNewRequestOpen(true),
               },
-              ...(feed === "standard"
+              ...(feed === "standard" || feed === "all"
                 ? [
                     {
                       key: "resources",
@@ -1780,16 +1790,19 @@ export function TendersPage() {
           <button
             onClick={() =>
               // Имя внешнего канала — это и ключ его источника.
-              feed !== "standard"
+              // В «Всех» — выбранные площадки стандартного канала: внешние сервисы
+              // собираются своей кнопкой в своём канале (запросы к их API платные/лимитные).
+              feed !== "standard" && feed !== "all"
                 ? void syncSources([feed])
                 : selectedSourceKeys && void syncSources(selectedSourceKeys)
             }
             disabled={
               isSyncing ||
-              (feed === "standard" && (!selectedSourceKeys || selectedSourceKeys.length === 0))
+              ((feed === "standard" || feed === "all") &&
+                (!selectedSourceKeys || selectedSourceKeys.length === 0))
             }
             title={
-              feed !== "standard"
+              feed !== "standard" && feed !== "all"
                 ? `Собрать новые закупки через API: ${feedLabel}`
                 : !selectedSourceKeys || selectedSourceKeys.length === 0
                   ? "Сначала выберите площадки в меню «⋯»"
@@ -1965,7 +1978,7 @@ export function TendersPage() {
         {isFiltersOpen && (
         <FiltersPanel
           filters={filters}
-          sources={feed === "standard" ? standardSources : []}
+          sources={feed === "standard" ? standardSources : feed === "all" ? sources : []}
           regions={regions}
           tags={tags}
           onChange={updateFilters}
