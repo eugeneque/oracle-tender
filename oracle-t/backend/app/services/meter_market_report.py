@@ -11,8 +11,12 @@
 поэтому перекрёстные фильтры (клик по производителю сужает остальные блоки, как в Power BI)
 считаются в Python над этими строками, а не отдельным запросом на каждый блок.
 
-Неразмеченные варианты не пропадают: их поверки видны строкой «не размечено» (раздел 6.3 ТЗ),
+Неразмеченные варианты не пропадают: их поверки видны строкой «нет данных» (раздел 6.3 ТЗ),
 а их количество отдаётся отдельно — на экране видно, что итог неполный.
+
+Статусов у признака три — «Соответствует», «Не соответствует», «Нет данных» (замечание
+тестировщика 09.11.2026: «не определено» и «не размечено» отдельными значениями путали) — и у
+«Нет данных» всегда есть причина: её показывает детализация (`meter_market_explain`).
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import io
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
@@ -29,7 +33,10 @@ from sqlalchemy.orm import Session
 
 from app.models.meter_market import DESIGN_LABELS
 
-UNMAPPED = "не размечено"
+# «Не размечено» и «н/д» в отчёте — одно значение «нет данных» (замечание 09.11.2026): причина
+# (написание не размечено или признак пуст в справочнике) — в детализации показателя.
+NO_DATA = "нет данных"
+UNMAPPED = NO_DATA
 FIRST_YEAR = 2021
 
 _MANUFACTURER_SQL = "coalesce(m.manufacturer_override_id, t.manufacturer_id)"
@@ -240,7 +247,9 @@ class Filters:
     design: str | None = None
     phase: str | None = None
     interface: str | None = None
-    smart: str | None = None  # yes | no | unknown — соответствие ПП 890 (06.11.2026)
+    smart: str | None = None  # yes | no | nodata — соответствие ПП 890 (06.11.2026, 09.11.2026)
+    # Детализация «Группы компаний»: группа (или компания вне групп) на год поверки.
+    group: str | None = None
 
 
 def _cells(db: Session, period: Period, extra_group: str = "", extra_select: str = "") -> list[dict[str, Any]]:
@@ -260,21 +269,49 @@ def _cells(db: Session, period: Period, extra_group: str = "", extra_select: str
 def _design_label(cell: dict[str, Any]) -> str:
     if cell["unmapped"]:
         return UNMAPPED
-    return DESIGN_LABELS.get(cell["design"] or "nd", "н/д")
+    design = cell["design"] or "nd"
+    return NO_DATA if design == "nd" else DESIGN_LABELS.get(design, NO_DATA)
 
 
 def _phase_label(cell: dict[str, Any]) -> str:
-    return UNMAPPED if cell["unmapped"] else (cell["phase"] or "н/д")
+    return UNMAPPED if cell["unmapped"] else (cell["phase"] or NO_DATA)
 
 
 def _interface_label(cell: dict[str, Any]) -> str:
-    return UNMAPPED if cell["unmapped"] else (cell["interface"] or "н/д")
+    return UNMAPPED if cell["unmapped"] else (cell["interface"] or NO_DATA)
 
 
 def smart_label(cell: dict[str, Any]) -> str:
+    """yes / no / nodata. Третьего «не определено» нет (замечание 09.11.2026): пустой признак —
+    это «нет данных», а почему — пишет `meter_market_explain.smart_verdict`."""
+
     if cell["unmapped"] or cell["smart"] is None:
-        return "unknown"
+        return "nodata"
     return "yes" if cell["smart"] else "no"
+
+
+SMART_STATUS = {"yes": "Соответствует", "no": "Не соответствует", "nodata": "Нет данных"}
+
+
+def smart_verdict(
+    unmapped: bool, smart: bool | None, source: str | None, note: str | None, checked_at: Any
+) -> tuple[str, str, str]:
+    """Статус ПП 890 и причина его присвоения: (yes|no|nodata, подпись, причина).
+
+    Причина нужна всегда (замечание 09.11.2026): «Нет данных» без объяснения выглядит как
+    ошибка алгоритма, а это либо неразмеченное написание, либо ИИ ещё не проверял, либо в
+    описании типа не хватило сведений."""
+
+    note = (note or "").strip()
+    if unmapped:
+        return "nodata", SMART_STATUS["nodata"], "написание модификации не размечено — признаки прибора неизвестны"
+    if smart is None:
+        if checked_at is None and source is None:
+            return "nodata", SMART_STATUS["nodata"], "проверка по разделу III ПП 890 ещё не выполнялась"
+        return "nodata", SMART_STATUS["nodata"], f"ИИ не хватило сведений в описании типа{': ' + note if note else ''}"
+    key = "yes" if smart else "no"
+    who = "решение аналитика в справочнике" if source == "manual" else "вывод ИИ по разделу III ПП 890"
+    return key, SMART_STATUS[key], f"{who}{': ' + note if note else ''}"
 
 
 def _keep(cell: dict[str, Any], filters: Filters, names: dict[int, str], skip: str) -> bool:
@@ -287,6 +324,8 @@ def _keep(cell: dict[str, Any], filters: Filters, names: dict[int, str], skip: s
     if skip != "interface" and filters.interface is not None and _interface_label(cell) != filters.interface:
         return False
     if filters.smart is not None and smart_label(cell) != filters.smart:
+        return False
+    if filters.group is not None and cell.get("group") != filters.group:
         return False
     return True
 
@@ -323,7 +362,19 @@ def overview(db: Session, period: Period, filters: Filters) -> dict[str, Any]:
         "designs": _breakdown(block("design", _design_label)),
         "phases": _breakdown(block("phase", _phase_label)),
         "interfaces": _breakdown(block("interface", _interface_label)),
+        # Сколько поверок в каждом статусе ПП 890 при остальных фильтрах: «Нет данных» видно
+        # числом, а не прячется в разнице «всего − соответствуют − не соответствуют».
+        "smart_counts": {
+            key: sum(
+                int(c["count"]) for c in cells if smart_label(c) == key and _keep(c, _without_smart(filters), names, "")
+            )
+            for key in ("yes", "no", "nodata")
+        },
     }
+
+
+def _without_smart(filters: Filters) -> Filters:
+    return Filters(filters.manufacturer_id, filters.design, filters.phase, filters.interface, None, filters.group)
 
 
 # ── Экраны 2 и 3: по годам ─────────────────────────────────────────────────────────────────
@@ -384,6 +435,19 @@ def group_for(manufacturer_id: int | None, year: int, members: list[tuple[int, i
     return None
 
 
+def group_label(
+    manufacturer_id: int | None,
+    year: int,
+    names: dict[int, str],
+    groups: dict[int, str],
+    members: list[tuple[int, int, int | None, int | None]],
+) -> str:
+    """Строка экрана «Группы компаний»: группа на год поверки или сама компания вне групп."""
+
+    group_id = group_for(manufacturer_id, year, members)
+    return groups[group_id] if group_id is not None else names.get(manufacturer_id, "Производитель не указан")
+
+
 def groups_by_year(db: Session, edge: date) -> dict[str, Any]:
     """Группа → входящие компании, столбцы — годы и «Всего» (экран 3). Состав группы — на год
     поверки: АтомЦифроСбыт в 2022–2025 в «Энергомере», с 2026 — в «Заводе НАРТИС»."""
@@ -400,11 +464,11 @@ def groups_by_year(db: Session, edge: date) -> dict[str, Any]:
         {"start": period.start, "end": period.end},
     ).all()
     table: dict[str, dict[str, dict[int, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    ids: dict[str, int | None] = {}
     for manufacturer_id, year, count in rows:
         name = names.get(manufacturer_id, "Производитель не указан")
-        group_id = group_for(manufacturer_id, year, members)
-        group = groups[group_id] if group_id is not None else name
-        table[group][name][year] += int(count)
+        ids[name] = manufacturer_id
+        table[group_label(manufacturer_id, year, names, groups, members)][name][year] += int(count)
     result = []
     for group, companies in table.items():
         by_year = {y: sum(c.get(y, 0) for c in companies.values()) for y in years}
@@ -415,7 +479,12 @@ def groups_by_year(db: Session, edge: date) -> dict[str, Any]:
                 "total": sum(by_year.values()),
                 "companies": sorted(
                     (
-                        {"name": company, "years": {y: v.get(y, 0) for y in years}, "total": sum(v.values())}
+                        {
+                            "name": company,
+                            "manufacturer_id": ids.get(company),
+                            "years": {y: v.get(y, 0) for y in years},
+                            "total": sum(v.values()),
+                        }
                         for company, v in companies.items()
                     ),
                     key=lambda r: -r["total"],
@@ -432,63 +501,132 @@ def groups_by_year(db: Session, edge: date) -> dict[str, Any]:
 LOCALIZATION_FROM_YEAR = 2025
 
 
-def localization(db: Session, edge: date, requirement: int | None = None) -> dict[str, Any]:
-    """Поверенные локализованные ПУ: производитель → баллы, столбцы — кварталы с 2025 года.
+@dataclass(frozen=True)
+class RppRecord:
+    """Запись РПП исполнения: с какого дня, по какой (включительно), баллы, номер."""
 
-    Точка отсчёта — дата внесения исполнения в РПП (правило 4 ТЗ): поверки раньше неё не
-    считаются. Если у исполнения есть история записей ГИСП (`meter_market_rpp_records`: 83 →
-    95 → 113 баллов), поверка относится к записи, действовавшей на дату поверки, — и к её
-    «требованиям года». Без истории — баллы модификации с даты `rpp_included_at`; если и даты
-    нет (в файле аналитика её нет), поверки считаются с начала периода, а их количество
-    отдаётся отдельно (`undated`) — расхождение видно, а не спрятано. Месяц, внутри которого
-    меняется запись, делится точно — по сырым поверкам."""
+    issued: date
+    valid_to: date | None
+    score: float | None
+    number: str | None = None
 
-    names = _manufacturer_names(db)
-    limits = thresholds(db)
-    start = date(LOCALIZATION_FROM_YEAR, 1, 1)
+    def label(self) -> str:
+        parts = [f"№ {self.number}" if self.number else "запись РПП"]
+        if self.issued != date.min:
+            parts.append(f"от {self.issued:%d.%m.%Y}")
+        if self.valid_to:
+            parts.append(f"до {self.valid_to:%d.%m.%Y}")
+        return " ".join(parts)
+
+
+@dataclass(frozen=True)
+class LocVerdict:
+    """Решение по поверке на дату: учтена ли, с какими баллами и почему."""
+
+    included: bool
+    score: float | None
+    reason: str
+    record: RppRecord | None
+
+
+REASON_IN_RPP = "в РПП на дату поверки"
+REASON_UNDATED = "в РПП, дата внесения неизвестна — учтено с начала периода"
+
+
+def rpp_verdict(records: list[RppRecord], day: date) -> LocVerdict:
+    """Какая запись РПП действует на дату поверки (правило 4 ТЗ, проверка 09.11.2026).
+
+    Действует самая поздняя из внесённых к этой дате записей с баллами, чей срок не истёк. Так
+    раньше не считалось: бралась последняя внесённая запись, даже без баллов и с истёкшим
+    сроком. В ГИСП у НАРТИС-И100-W113-2 есть запись 22.09–07.10.2025 без баллов — из-за неё все
+    поверки после 22.09.2025 молча выпадали из локализации, хотя запись с 83 баллами ещё
+    действовала. Теперь запись без баллов не перекрывает предыдущую, а поверки после окончания
+    срока последней записи исключаются с причиной «срок истёк»."""
+
+    issued = [r for r in records if r.issued <= day]
+    if not issued:
+        first = min(records, key=lambda r: r.issued)
+        return LocVerdict(False, None, f"поверка до внесения в РПП ({first.issued:%d.%m.%Y})", first)
+    valid = [r for r in issued if r.valid_to is None or day <= r.valid_to]
+    scored = [r for r in valid if r.score is not None]
+    if scored:
+        record = max(scored, key=lambda r: r.issued)
+        reason = REASON_UNDATED if record.issued == date.min else REASON_IN_RPP
+        return LocVerdict(True, float(record.score), reason, record)
+    if valid:
+        return LocVerdict(False, None, "в действующей записи РПП нет баллов", max(valid, key=lambda r: r.issued))
+    last = max(issued, key=lambda r: r.valid_to or date.max)
+    return LocVerdict(False, None, f"срок записи РПП истёк {last.valid_to:%d.%m.%Y}", last)
+
+
+@dataclass
+class LocPiece:
+    """Часть поверок исполнения за месяц с одним решением — строка «бухгалтерии» локализации."""
+
+    modification_id: int
+    manufacturer_id: int | None
+    month: date
+    count: int
+    verdict: LocVerdict
+
+    @property
+    def quarter(self) -> str:
+        return f"{self.month.year}-{(self.month.month - 1) // 3 + 1}"
+
+
+def localization_quarters(edge: date) -> list[str]:
     quarters: list[str] = []
-    cursor = start
+    cursor = date(LOCALIZATION_FROM_YEAR, 1, 1)
     while cursor < edge:
         quarters.append(f"{cursor.year}-{(cursor.month - 1) // 3 + 1}")
         cursor = _add_months(cursor, 3)
+    return quarters
 
+
+def localization_ledger(
+    db: Session, edge: date, *, manufacturer_id: int | None = None
+) -> tuple[list[LocPiece], dict[int, dict[str, Any]], set[int]]:
+    """Все поверки исполнений «в РПП» с 2025 года, разложенные по решениям: учтена (с какими
+    баллами и по какой записи) или исключена (почему). Таблица экрана «Локализация» и её
+    детализация считаются из одной бухгалтерии — число в ячейке и сумма «учтено» в
+    детализации совпадают по построению.
+
+    Возвращает части, сведения об исполнениях и исполнения без даты внесения."""
+
+    start = date(LOCALIZATION_FROM_YEAR, 1, 1)
+    manufacturer_sql = f" AND {_MANUFACTURER_SQL} = :mf" if manufacturer_id is not None else ""
     mods = db.execute(
         text(
-            f"SELECT m.id, {_MANUFACTURER_SQL} AS manufacturer_id, m.score, m.rpp_included_at "
+            f"SELECT m.id, {_MANUFACTURER_SQL} AS manufacturer_id, m.score, m.rpp_included_at, m.rpp_record_number "
             "FROM meter_market_modifications m JOIN meter_market_types t ON t.id = m.type_id AND t.in_report "
-            "WHERE m.in_rpp"
-        )
+            f"WHERE m.in_rpp{manufacturer_sql}"
+        ),
+        {"mf": manufacturer_id},
     ).mappings().all()
-    history: dict[int, list[tuple[date, float | None]]] = defaultdict(list)
-    for mod_id, issued, score in db.execute(
-        text("SELECT modification_id, issued_at, score FROM meter_market_rpp_records ORDER BY issued_at")
+    history: dict[int, list[RppRecord]] = defaultdict(list)
+    for mod_id, issued, valid_to, score, number in db.execute(
+        text(
+            "SELECT modification_id, issued_at, valid_to, score, record_number FROM meter_market_rpp_records "
+            "ORDER BY issued_at"
+        )
     ):
-        history[mod_id].append((issued, score))
+        history[mod_id].append(RppRecord(issued, valid_to, score, number))
 
-    # Отрезки «с даты — баллы» по каждому исполнению.
-    segments: dict[int, list[tuple[date, float | None]]] = {}
+    records: dict[int, list[RppRecord]] = {}
     undated_mods: set[int] = set()
     for mod in mods:
         if history.get(mod["id"]):
-            segments[mod["id"]] = history[mod["id"]]
-        elif mod["score"] is not None:
+            records[mod["id"]] = history[mod["id"]]
+        else:
+            # Без истории ГИСП — баллы модификации (даже пустые: исключение будет с причиной).
             if mod["rpp_included_at"] is None:
                 undated_mods.add(mod["id"])
-            segments[mod["id"]] = [(mod["rpp_included_at"] or date.min, mod["score"])]
-    by_id = {mod["id"]: mod for mod in mods if mod["id"] in segments}
-    empty = {"quarters": quarters, "rows": [], "totals": {q: 0 for q in quarters}, "total": 0, "undated": 0,
-             "requirement": requirement, "requirement_years": sorted({y for y, _ in limits})}
-    if not by_id:
-        return empty
-
-    def active(mod_id: int, day: date) -> float | None | bool:
-        """Баллы записи, действующей на дату; `False` — исполнение ещё не внесено."""
-
-        current: float | None | bool = False
-        for issued, score in segments[mod_id]:
-            if issued <= day:
-                current = score
-        return current
+            records[mod["id"]] = [
+                RppRecord(mod["rpp_included_at"] or date.min, None, mod["score"], mod["rpp_record_number"])
+            ]
+    by_id = {mod["id"]: dict(mod) for mod in mods}
+    if not records:
+        return [], by_id, undated_mods
 
     monthly = db.execute(
         text(
@@ -496,32 +634,20 @@ def localization(db: Session, edge: date, requirement: int | None = None) -> dic
             "JOIN meter_market_variants v ON v.id = mv.variant_id "
             "WHERE v.modification_id = ANY(:ids) AND mv.month >= :start AND mv.month < :end GROUP BY 1, 2"
         ),
-        {"ids": list(by_id), "start": start, "end": edge},
+        {"ids": list(records), "start": start, "end": edge},
     ).all()
 
-    table: dict[int, dict[float, dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-    undated = 0
-
-    def add(mod_id: int, month: date, score: float | None, count: int) -> None:
-        nonlocal undated
-        if score is None or count <= 0:
-            return
-        if requirement is not None and requirement_year(score, limits) != requirement:
-            return
-        if mod_id in undated_mods:
-            undated += count
-        key = f"{month.year}-{(month.month - 1) // 3 + 1}"
-        table[by_id[mod_id]["manufacturer_id"]][float(score)][key] += count
-
+    pieces: list[LocPiece] = []
     for mod_id, month, count in monthly:
         month_end = _add_months(month, 1)
-        inside = [issued for issued, _ in segments[mod_id] if month < issued < month_end]
-        if not inside:
-            score = active(mod_id, month)
-            if score is not False:
-                add(mod_id, month, score, int(count))
+        manufacturer = by_id[mod_id]["manufacturer_id"]
+        bounds = {r.issued for r in records[mod_id]} | {
+            r.valid_to + timedelta(days=1) for r in records[mod_id] if r.valid_to
+        }
+        if not any(month < b < month_end for b in bounds):
+            pieces.append(LocPiece(mod_id, manufacturer, month, int(count), rpp_verdict(records[mod_id], month)))
             continue
-        # Запись сменилась внутри месяца — делим поверки месяца по дням.
+        # Запись сменилась (или истекла) внутри месяца — делим поверки месяца по дням.
         days = db.execute(
             text(
                 "SELECT mv.verification_date, count(*) FROM meter_verifications mv "
@@ -531,10 +657,53 @@ def localization(db: Session, edge: date, requirement: int | None = None) -> dic
             ),
             {"m": mod_id, "s": month, "e": month_end},
         ).all()
+        merged: dict[LocVerdict, int] = defaultdict(int)
         for day, day_count in days:
-            score = active(mod_id, day)
-            if score is not False:
-                add(mod_id, month, score, int(day_count))
+            merged[rpp_verdict(records[mod_id], day)] += int(day_count)
+        pieces.extend(LocPiece(mod_id, manufacturer, month, n, verdict) for verdict, n in merged.items())
+    return pieces, by_id, undated_mods
+
+
+def requirement_reason(score: float, requirement: int, limits: list[tuple[int, float]]) -> str | None:
+    """Причина исключения по фильтру «Требования года»; None — проходит."""
+
+    year = requirement_year(score, limits)
+    if year == requirement:
+        return None
+    return f"{score:g} баллов — требования {year} г., выбраны {requirement} г." if year else (
+        f"{score:g} баллов — ниже порога любого года"
+    )
+
+
+def localization(db: Session, edge: date, requirement: int | None = None) -> dict[str, Any]:
+    """Поверенные локализованные ПУ: производитель → баллы, столбцы — кварталы с 2025 года.
+
+    Точка отсчёта — дата внесения исполнения в РПП (правило 4 ТЗ): поверки раньше неё не
+    считаются. Если у исполнения есть история записей ГИСП (`meter_market_rpp_records`: 83 →
+    95 → 113 баллов), поверка относится к записи, действовавшей на дату поверки, — и к её
+    «требованиям года» (`rpp_verdict`). Без истории — баллы модификации с даты
+    `rpp_included_at`; если и даты нет (в файле аналитика её нет), поверки считаются с начала
+    периода, а их количество отдаётся отдельно (`undated`) — расхождение видно, а не спрятано.
+    Месяц, внутри которого меняется запись, делится точно — по сырым поверкам."""
+
+    names = _manufacturer_names(db)
+    limits = thresholds(db)
+    quarters = localization_quarters(edge)
+    pieces, _, undated_mods = localization_ledger(db, edge)
+    empty = {"quarters": quarters, "rows": [], "totals": {q: 0 for q in quarters}, "total": 0, "undated": 0,
+             "requirement": requirement, "requirement_years": sorted({y for y, _ in limits})}
+
+    table: dict[int, dict[float, dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    undated = 0
+    for piece in pieces:
+        verdict = piece.verdict
+        if not verdict.included or piece.count <= 0:
+            continue
+        if requirement is not None and requirement_reason(verdict.score, requirement, limits):
+            continue
+        if piece.modification_id in undated_mods:
+            undated += piece.count
+        table[piece.manufacturer_id][verdict.score][piece.quarter] += piece.count
 
     rows = []
     for manufacturer_id, scores in table.items():
@@ -594,7 +763,7 @@ def drill(
                 "SELECT m.id, coalesce(m.name, :unmapped) AS name, m.phase, m.design, m.interface, sum(mv.count) AS count "
                 f"{_BASE_FROM} WHERE t.id = :t AND {period_where} GROUP BY 1, 2, 3, 4, 5 ORDER BY 6 DESC"
             ),
-            {**params, "t": type_id, "unmapped": UNMAPPED},
+            {**params, "t": type_id, "unmapped": "нет данных — написания не размечены"},
         ).mappings()
         return {"level": "modifications", "type_id": type_id, "rows": [dict(r) for r in rows]}
     if manufacturer_id is not None:
@@ -622,7 +791,29 @@ def variant_samples(db: Session, variant_id: int, period: Period, limit: int = 1
         ),
         {"v": variant_id, "l": limit, **sample_params},
     ).mappings()
-    return [dict(r) for r in rows]
+    return [{**dict(r), "url": fgis_record_url(r["global_id"])} for r in rows]
+
+
+def modification_samples(db: Session, modification_id: int, period: Period, limit: int = 10) -> list[dict[str, Any]]:
+    """Примеры поверок исполнения (все его написания) — документ-основание в детализации."""
+
+    sample_sql, sample_params = period.where("mv.verification_date")
+    rows = db.execute(
+        text(
+            "SELECT mv.global_id, o.title AS org, mv.mi_number, mv.verification_date, mv.applicable, mv.annulled, "
+            "v.raw FROM meter_verifications mv JOIN meter_market_variants v ON v.id = mv.variant_id "
+            "LEFT JOIN meter_market_orgs o ON o.id = mv.org_id "
+            f"WHERE v.modification_id = :m AND {sample_sql} ORDER BY mv.verification_date DESC LIMIT :l"
+        ),
+        {"m": modification_id, "l": limit, **sample_params},
+    ).mappings()
+    return [{**dict(r), "url": fgis_record_url(r["global_id"])} for r in rows]
+
+
+def fgis_record_url(global_id: int) -> str:
+    """Карточка поверки во ФГИС «Аршин»: `global_id` открытых данных — номер записи ВРИ."""
+
+    return f"https://fgis.gost.ru/fundmetrology/cm/results/1-{global_id}"
 
 
 def powerbi_rows(db: Session, period: Period) -> list[list[Any]]:
@@ -637,9 +828,10 @@ def powerbi_rows(db: Session, period: Period) -> list[list[Any]]:
             f"SELECT {_MANUFACTURER_SQL} AS manufacturer_id, t.mit_number, "
             "m.design, m.phase, m.interface, "
             "mv.month, m.in_rpp, m.score, m.smart_890, (v.modification_id IS NULL) AS unmapped, "
+            "m.smart_890_source, m.smart_890_note, m.smart_890_at, "
             "sum(mv.count) AS count "
             f"{_BASE_FROM} WHERE {period_sql} "
-            "GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 "
+            "GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 "
             "ORDER BY 2, 6, 1"
         ),
         period_params,
@@ -648,19 +840,24 @@ def powerbi_rows(db: Session, period: Period) -> list[list[Any]]:
     for r in rows:
         unmapped = r["unmapped"]
         year = requirement_year(r["score"], limits)
+        _, smart_status, smart_reason = smart_verdict(
+            unmapped, r["smart_890"], r["smart_890_source"], r["smart_890_note"], r["smart_890_at"]
+        )
+        cell = {"unmapped": unmapped, "design": r["design"], "phase": r["phase"], "interface": r["interface"]}
         result.append(
             [
-                names.get(r["manufacturer_id"], "н/д"),
+                names.get(r["manufacturer_id"], "Производитель не указан"),
                 r["mit_number"],
-                UNMAPPED if unmapped else (r["phase"] or "н/д"),
-                UNMAPPED if unmapped else DESIGN_LABELS.get(r["design"] or "nd", "н/д"),
+                _phase_label(cell),
+                _design_label(cell),
                 r["month"].strftime("%m.%Y"),
                 int(r["count"]),
-                UNMAPPED if unmapped else (r["interface"] or "н/д"),
-                "н/д" if unmapped else ("да" if r["in_rpp"] else "нет"),
+                _interface_label(cell),
+                NO_DATA if unmapped else ("да" if r["in_rpp"] else "нет"),
                 year if year is not None else "",
                 r["score"] if r["score"] is not None else "",
-                "н/д" if unmapped or r["smart_890"] is None else ("да" if r["smart_890"] else "нет"),
+                smart_status,
+                smart_reason,
             ]
         )
     return result
@@ -678,6 +875,7 @@ POWERBI_HEADER = [
     "Соответствие требованиям года",
     "Кол-во баллов",
     "Соответствие ПП 890",
+    "ПП 890: причина",
 ]
 
 

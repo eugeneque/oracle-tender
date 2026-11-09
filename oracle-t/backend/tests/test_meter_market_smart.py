@@ -1,4 +1,4 @@
-"""Фильтр «соответствие ПП 890» в отчёте «Рынок ПУ» (06.11.2026): неразмеченное — «не определено»."""
+"""Фильтр «соответствие ПП 890» в отчёте «Рынок ПУ» (06.11.2026): неразмеченное — «нет данных» (09.11.2026)."""
 
 from app.services.meter_market_report import Filters, _keep, smart_label
 
@@ -10,8 +10,8 @@ def _cell(smart, unmapped=False):
 def test_smart_label():
     assert smart_label(_cell(True)) == "yes"
     assert smart_label(_cell(False)) == "no"
-    assert smart_label(_cell(None)) == "unknown"
-    assert smart_label(_cell(True, unmapped=True)) == "unknown"
+    assert smart_label(_cell(None)) == "nodata"
+    assert smart_label(_cell(True, unmapped=True)) == "nodata"
 
 
 def test_keep_filters_by_smart():

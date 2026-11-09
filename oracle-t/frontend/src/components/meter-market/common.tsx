@@ -60,19 +60,40 @@ export function ExportButton({ query, onError, label = "Excel" }: { query: strin
   );
 }
 
-// Сегменты кольца — один акцент разной насыщенности, «не размечено» и «н/д» — серым:
-// цвет здесь не категория, а порядок по величине (правило «один акцент на экран»).
+// Сегменты кольца — один акцент разной насыщенности, «нет данных» — серым: цвет здесь не
+// категория, а порядок по величине (правило «один акцент на экран»). С 09.11.2026 «не
+// размечено» и «н/д» в отчёте — одно значение «нет данных» (причина — в детализации).
 const SHADES = [1, 0.72, 0.5, 0.32, 0.2, 0.12];
-const NEUTRAL = new Set(["не размечено", "н/д"]);
+const NEUTRAL = new Set(["нет данных"]);
+
+/** Число, по клику открывающее детализацию (замечание 09.11.2026). */
+export function ExplainNumber({ value, onClick, className = "" }: { value: string; onClick?: () => void; className?: string }) {
+  if (!onClick) return <span className={className}>{value}</span>;
+  return (
+    <button
+      type="button"
+      title="Детализация: из чего сложилось число"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      className={`rounded underline decoration-white/15 decoration-dotted underline-offset-4 hover:text-indigo-300 hover:decoration-indigo-300/60 ${className}`}
+    >
+      {value}
+    </button>
+  );
+}
 
 export function Donut({
   rows,
   selected,
   onSelect,
+  onExplain,
 }: {
   rows: { key: string; count: number; share: number }[];
   selected: string | null;
   onSelect: (key: string | null) => void;
+  onExplain?: (key: string) => void;
 }) {
   const total = rows.reduce((sum, row) => sum + row.count, 0);
   const radius = 52;
@@ -111,17 +132,21 @@ export function Donut({
       </svg>
       <ul className="min-w-0 flex-1 space-y-1.5">
         {rows.map((row) => (
-          <li key={row.key}>
-            <button
-              type="button"
-              onClick={() => onSelect(selected === row.key ? null : row.key)}
-              className={`flex w-full items-baseline justify-between gap-3 rounded-md px-2 py-1 text-left text-sm transition-colors ${
-                selected === row.key ? "bg-indigo-500/10 text-zinc-100" : "text-zinc-400 hover:bg-white/[0.04]"
-              }`}
-            >
-              <span className="truncate">{row.key}</span>
-              <span className="shrink-0 tabular-nums text-zinc-500">{fmtShare(row.share)}</span>
+          <li
+            key={row.key}
+            className={`flex items-baseline justify-between gap-3 rounded-md px-2 py-1 text-sm transition-colors ${
+              selected === row.key ? "bg-indigo-500/10 text-zinc-100" : "text-zinc-400 hover:bg-white/[0.04]"
+            }`}
+          >
+            <button type="button" className="min-w-0 flex-1 truncate text-left" onClick={() => onSelect(selected === row.key ? null : row.key)}>
+              {row.key}
             </button>
+            <ExplainNumber
+              value={fmt(row.count)}
+              onClick={onExplain && (() => onExplain(row.key))}
+              className="shrink-0 tabular-nums text-xs text-zinc-400"
+            />
+            <span className="w-16 shrink-0 text-right tabular-nums text-zinc-500">{fmtShare(row.share)}</span>
           </li>
         ))}
       </ul>
@@ -134,10 +159,12 @@ export function BarList({
   rows,
   selected,
   onSelect,
+  onExplain,
 }: {
   rows: { key: string; count: number }[];
   selected: string | null;
   onSelect: (key: string | null) => void;
+  onExplain?: (key: string) => void;
 }) {
   const max = Math.max(1, ...rows.map((row) => row.count));
   return (
@@ -164,7 +191,11 @@ export function BarList({
                 style={{ width: `${Math.max(1, (row.count / max) * 100)}%` }}
               />
             </span>
-            <span className="text-right tabular-nums text-zinc-400">{fmt(row.count / 1000)} тыс.</span>
+            <ExplainNumber
+              value={`${fmt(row.count / 1000)} тыс.`}
+              onClick={onExplain && (() => onExplain(row.key))}
+              className="text-right tabular-nums text-zinc-400"
+            />
           </button>
         );
       })}
@@ -181,6 +212,7 @@ export function MatrixTable({
   total,
   firstHeader,
   onRowClick,
+  onCellClick,
 }: {
   columns: string[];
   columnLabel: (column: string) => string;
@@ -189,6 +221,8 @@ export function MatrixTable({
   total: number;
   firstHeader: string;
   onRowClick?: (key: string) => void;
+  /** Клик по числу — детализация: строка (null — итог), вложенная строка, столбец (null — «Всего»). */
+  onCellClick?: (row: string | null, child: string | null, column: string | null) => void;
 }) {
   const [open, setOpen] = useState<Set<string>>(new Set());
   const toggle = (key: string) =>
@@ -222,6 +256,7 @@ export function MatrixTable({
               isOpen={open.has(row.key)}
               onToggle={() => toggle(row.key)}
               onRowClick={onRowClick}
+              onCellClick={onCellClick}
               cell={cell}
             />
           ))}
@@ -229,10 +264,12 @@ export function MatrixTable({
             <td className="px-3 py-2">Всего</td>
             {columns.map((column) => (
               <td key={column} className={cell}>
-                {fmt(totals[column] ?? 0)}
+                <ExplainNumber value={fmt(totals[column] ?? 0)} onClick={onCellClick && (() => onCellClick(null, null, column))} />
               </td>
             ))}
-            <td className={cell}>{fmt(total)}</td>
+            <td className={cell}>
+              <ExplainNumber value={fmt(total)} onClick={onCellClick && (() => onCellClick(null, null, null))} />
+            </td>
           </tr>
         </tbody>
       </table>
@@ -246,6 +283,7 @@ function FragmentRows({
   isOpen,
   onToggle,
   onRowClick,
+  onCellClick,
   cell,
 }: {
   row: { key: string; label: ReactNode; values: Record<string, number>; total: number; children: { key: string; label: ReactNode; values: Record<string, number>; total: number }[] };
@@ -253,6 +291,7 @@ function FragmentRows({
   isOpen: boolean;
   onToggle: () => void;
   onRowClick?: (key: string) => void;
+  onCellClick?: (row: string | null, child: string | null, column: string | null) => void;
   cell: string;
 }) {
   return (
@@ -279,10 +318,15 @@ function FragmentRows({
         </td>
         {columns.map((column) => (
           <td key={column} className={cell}>
-            {fmt(row.values[column] ?? 0)}
+            <ExplainNumber
+              value={fmt(row.values[column] ?? 0)}
+              onClick={onCellClick && (row.values[column] ? () => onCellClick(row.key, null, column) : undefined)}
+            />
           </td>
         ))}
-        <td className={`${cell} font-medium`}>{fmt(row.total)}</td>
+        <td className={`${cell} font-medium`}>
+          <ExplainNumber value={fmt(row.total)} onClick={onCellClick && (() => onCellClick(row.key, null, null))} />
+        </td>
       </tr>
       {isOpen &&
         row.children.map((child) => (
@@ -290,10 +334,15 @@ function FragmentRows({
             <td className="py-1.5 pl-12 pr-3 text-xs">{child.label}</td>
             {columns.map((column) => (
               <td key={column} className={`${cell} py-1.5 text-xs`}>
-                {fmt(child.values[column] ?? 0)}
+                <ExplainNumber
+                  value={fmt(child.values[column] ?? 0)}
+                  onClick={onCellClick && (child.values[column] ? () => onCellClick(row.key, child.key, column) : undefined)}
+                />
               </td>
             ))}
-            <td className={`${cell} py-1.5 text-xs`}>{fmt(child.total)}</td>
+            <td className={`${cell} py-1.5 text-xs`}>
+              <ExplainNumber value={fmt(child.total)} onClick={onCellClick && (() => onCellClick(row.key, child.key, null))} />
+            </td>
           </tr>
         ))}
     </>

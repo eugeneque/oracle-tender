@@ -2309,6 +2309,8 @@ export interface MarketOverview {
   designs: MarketShareRow[];
   phases: MarketShareRow[];
   interfaces: MarketShareRow[];
+  /** Поверки по статусам ПП 890 при остальных фильтрах (09.11.2026). */
+  smart_counts: { yes: number; no: number; nodata: number };
 }
 
 export interface MarketYearRow {
@@ -2317,7 +2319,7 @@ export interface MarketYearRow {
   years: Record<string, number>;
   total: number;
   designs?: { design: string; years: Record<string, number>; total: number }[];
-  companies?: { name: string; years: Record<string, number>; total: number }[];
+  companies?: { name: string; manufacturer_id?: number | null; years: Record<string, number>; total: number }[];
 }
 
 export interface MarketByYear {
@@ -2390,6 +2392,47 @@ export interface MarketSample {
   verification_date: string;
   applicable: boolean;
   annulled: boolean;
+  /** Карточка поверки во ФГИС «Аршин». */
+  url?: string;
+  /** Написание модификации — в примерах по исполнению. */
+  raw?: string;
+}
+
+/** Позиция детализации показателя: написание (или исполнение в локализации). */
+export interface MarketExplainPosition {
+  key: string;
+  variant_id: number | null;
+  modification_id: number | null;
+  type_id: number;
+  mit_number: string;
+  notation: string | null;
+  type_title: string | null;
+  modification: string | null;
+  raw: string | null;
+  mapped_by: string | null;
+  manufacturer: string;
+  phase: string;
+  design: string;
+  interface: string;
+  counted: number;
+  excluded: number;
+  basis: string;
+  exclusions: { reason: string; count: number }[];
+  smart: { key: "yes" | "no" | "nodata"; status: string; reason: string };
+  rpp: { in_rpp: boolean | null; score: number | null; requirement_year: number | null; included_at: string | null; record_number: string | null };
+  rules: string[];
+  documents: { label: string; url?: string }[];
+}
+
+export interface MarketExplain {
+  title: string;
+  period: string;
+  value: number;
+  excluded: number;
+  reasons: { reason: string; included: boolean; count: number }[];
+  positions: MarketExplainPosition[];
+  tolerance_pct: number;
+  late_publication: string;
 }
 
 export interface MarketUnmappedItem {

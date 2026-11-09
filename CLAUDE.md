@@ -70,7 +70,9 @@ oracle-tender-main/            ← не git-репозиторий (git status/d
 - Рынок ПУ по поверкам ФГИС «Аршин» («Аналитика → Рынок ПУ», ТЗ `ARSHIN_ANALYTICS.md`) —
   `meter_market_loader` (слепок/изменения, CLI `catchup`), `meter_market_import` (справочник
   из Excel), `meter_market_report`, `meter_market_dictionary`; фронт `components/meter-market/`;
-  раздел 79 ARCHITECTURE.md.
+  раздел 79 ARCHITECTURE.md. Детализация любого числа отчёта (учтено/исключено с причинами,
+  Excel, сравнение, допуск 2 %) — `meter_market_explain` + `ExplainPanel.tsx`; статусы ПП 890 —
+  yes/no/nodata с причиной (`smart_verdict`); раздел 92.
 - Обновление из интерфейса («Система → Обновление», только админ) — `system_update_service`
   (проверка через `update.sh --check` + git; установка — файл-запрос `.update-request` →
   юнит `oracle-t-update-web.path` → `update.sh --web` от root), фронт `pages/SystemUpdate.tsx`;

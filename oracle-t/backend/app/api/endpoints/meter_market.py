@@ -5,6 +5,7 @@ ARCHITECTURE.md). Раздел «Аналитика» — у ролей «Ана
 from __future__ import annotations
 
 import io
+import re
 from datetime import date
 from typing import Any
 from urllib.parse import quote
@@ -27,6 +28,7 @@ from app.schemas.meter_market import (
     VariantMapIn,
 )
 from app.services import meter_market_dictionary as dictionary
+from app.services import meter_market_explain as explain
 from app.services import meter_market_report as report
 from app.services.audit import log_action
 from app.services.meter_market_import import import_file
@@ -59,10 +61,15 @@ def _filters(
     phase: str | None,
     interface: str | None,
     smart: str | None = None,
+    group: str | None = None,
 ) -> report.Filters:
-    if smart not in (None, "yes", "no", "unknown"):
-        raise HTTPException(status_code=422, detail="Соответствие ПП 890 — yes, no или unknown")
-    return report.Filters(manufacturer_id=manufacturer_id, design=design, phase=phase, interface=interface, smart=smart)
+    # «unknown» («ПП 890 не определено») убран 09.11.2026: статусы — yes, no и nodata («Нет
+    # данных», с причиной в детализации); фильтра «нет данных» на экране нет.
+    if smart not in (None, "yes", "no", "nodata"):
+        raise HTTPException(status_code=422, detail="Соответствие ПП 890 — «соответствует», «не соответствует» или «нет данных»")
+    return report.Filters(
+        manufacturer_id=manufacturer_id, design=design, phase=phase, interface=interface, smart=smart, group=group
+    )
 
 
 # ── Отчёт ──────────────────────────────────────────────────────────────────────────────────
@@ -134,6 +141,86 @@ def get_samples(
     variant_id: int, period: str | None = None, db: Session = Depends(get_db), _: User = Depends(get_current_user)
 ) -> list[dict[str, Any]]:
     return report.variant_samples(db, variant_id, _period(db, period))
+
+
+@router.get("/modifications/{modification_id}/samples")
+def get_modification_samples(
+    modification_id: int, period: str | None = None, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+) -> list[dict[str, Any]]:
+    return report.modification_samples(db, modification_id, _period(db, period))
+
+
+def _explain(
+    db: Session,
+    kind: str,
+    period: str | None,
+    manufacturer_id: int | None,
+    design: str | None,
+    phase: str | None,
+    interface: str | None,
+    smart: str | None,
+    group: str | None,
+    score: float | None,
+    quarter: str | None,
+    requirement: int | None,
+    title: str | None,
+) -> dict[str, Any]:
+    if kind == "localization":
+        if quarter is not None and not re.fullmatch(r"\d{4}-[1-4]", quarter):
+            raise HTTPException(status_code=422, detail="Квартал — в виде 2026-3")
+        return explain.explain_localization(
+            db, _edge(db), manufacturer_id=manufacturer_id, score=score, quarter=quarter, requirement=requirement,
+            title=title or "",
+        )
+    return explain.explain_overview(
+        db, _period(db, period), _filters(manufacturer_id, design, phase, interface, smart, group), title or ""
+    )
+
+
+@router.get("/explain")
+def get_explain(
+    kind: str = Query("overview", pattern="^(overview|localization)$"),
+    period: str | None = None,
+    manufacturer_id: int | None = None,
+    design: str | None = None,
+    phase: str | None = None,
+    interface: str | None = None,
+    smart: str | None = None,
+    group: str | None = None,
+    score: float | None = None,
+    quarter: str | None = None,
+    requirement: int | None = None,
+    title: str | None = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Детализация итогового числа: учтённые и исключённые позиции с причинами (09.11.2026)."""
+
+    return _explain(db, kind, period, manufacturer_id, design, phase, interface, smart, group, score, quarter,
+                    requirement, title)
+
+
+@router.get("/explain.xlsx")
+def export_explain(
+    kind: str = Query("overview", pattern="^(overview|localization)$"),
+    period: str | None = None,
+    manufacturer_id: int | None = None,
+    design: str | None = None,
+    phase: str | None = None,
+    interface: str | None = None,
+    smart: str | None = None,
+    group: str | None = None,
+    score: float | None = None,
+    quarter: str | None = None,
+    requirement: int | None = None,
+    title: str | None = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> Response:
+    result = _explain(db, kind, period, manufacturer_id, design, phase, interface, smart, group, score, quarter,
+                      requirement, title)
+    subtitle = f"{SOURCE_NOTE}, данные на {report.status(db)['edge_label']}"
+    return _xlsx_response(explain.file_name(result), explain.to_xlsx(result, subtitle))
 
 
 def _xlsx_response(filename: str, content: bytes) -> Response:

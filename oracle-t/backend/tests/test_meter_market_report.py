@@ -86,7 +86,7 @@ def test_overview_counts_report_types_only_and_keeps_unmapped_visible(market, db
     assert data["unmapped"] == 5
     by_name = {r["name"]: r["count"] for r in data["manufacturers"]}
     assert by_name == {"Завод НАРТИС": 145, "АтомЦифроСбыт": 20}
-    assert {r["key"]: r["count"] for r in data["designs"]} == {"DIN-рейка": 140, "Сплит": 20, "не размечено": 5}
+    assert {r["key"]: r["count"] for r in data["designs"]} == {"DIN-рейка": 140, "Сплит": 20, "нет данных": 5}
 
 
 def test_cross_filter_narrows_other_blocks_but_not_its_own(market, db_session):
@@ -128,7 +128,7 @@ def test_drill_goes_manufacturer_type_modification_variants(market, db_session):
     types = report.drill(db_session, period, manufacturer_id=market["nartis"])["rows"]
     assert [(t["mit_number"], t["count"]) for t in types] == [("77904-20", 145)]
     mods = report.drill(db_session, period, type_id=market["t_nartis"])["rows"]
-    assert {m["name"]: m["count"] for m in mods} == {"НАРТИС-100.121RIL": 140, "не размечено": 5}
+    assert {m["name"]: m["count"] for m in mods} == {"НАРТИС-100.121RIL": 140, "нет данных — написания не размечены": 5}
     variants = report.drill(db_session, period, modification_id=market["m_din"])["rows"]
     assert {v["raw"]: v["count"] for v in variants} == {"НАРТИС-100.121RIL": 100, "HAPTИC-100.121RIL": 40}
 
@@ -257,3 +257,71 @@ def test_localization_follows_rpp_record_history(market, db_session):
     assert by_score == {95.0: 110, 113.0: 30}
     only_2025 = report.localization(db_session, date(2026, 10, 1), requirement=2025)
     assert next(r for r in only_2025["rows"] if r["name"] == "Завод НАРТИС")["total"] == 30
+
+
+# ── Детализация показателей и статусы (замечания 09.11.2026) ────────────────────────────────
+
+
+def test_overview_has_no_undetermined_status_and_counts_nodata(market, db_session):
+    data = report.overview(db_session, report.parse_period("quarter:2026-3", date(2026, 10, 1)), report.Filters())
+    # Признак ПП 890 в фикстуре не проставлен — всё «нет данных», и это видно числом.
+    assert data["smart_counts"] == {"yes": 0, "no": 0, "nodata": 165}
+    keys = {r["key"] for block in ("designs", "phases", "interfaces") for r in data[block]}
+    assert "не размечено" not in keys and "н/д" not in keys
+
+
+def test_explain_overview_sums_to_shown_number_and_lists_exclusions(market, db_session):
+    from app.services import meter_market_explain as explain
+
+    db_session.execute(text(
+        "INSERT INTO meter_verifications (global_id, variant_id, verification_date, applicable, annulled) VALUES "
+        "(5001, :v, '2026-08-10', false, false), (5002, :v, '2026-08-11', true, true)"
+    ), {"v": market["variants"]["din"]})
+    period = report.parse_period("quarter:2026-3", date(2026, 10, 1))
+    result = explain.explain_overview(db_session, period, report.Filters())
+    assert result["value"] == report.overview(db_session, period, report.Filters())["total"] == 165
+    reasons = {r["reason"]: r["count"] for r in result["reasons"] if not r["included"]}
+    assert reasons[explain.REASON_NOT_IN_REPORT] == 999
+    assert reasons[explain.REASON_UNFIT] == 1 and reasons[explain.REASON_ANNULLED] == 1
+    unmapped = next(p for p in result["positions"] if p.get("raw") == "НАРТИС ???")
+    assert unmapped["smart"]["status"] == "Нет данных" and "не размечено" in unmapped["smart"]["reason"]
+    # С фильтром по производителю — только его позиции, сумма совпадает с таблицей.
+    narrowed = explain.explain_overview(db_session, period, report.Filters(manufacturer_id=market["nartis"]))
+    assert narrowed["value"] == 145
+    assert explain.to_xlsx(result, "тест")[:2] == b"PK"
+
+
+def test_explain_groups_follow_membership_year(market, db_session):
+    from app.services import meter_market_explain as explain
+
+    edge = date(2026, 10, 1)
+    result = explain.explain_overview(db_session, report.parse_period("year:2025", edge), report.Filters(group="Энергомера"))
+    assert result["value"] == report.groups_by_year(db_session, edge)["rows"][1]["years"][2025] == 30
+
+
+def test_explain_localization_matches_cell_and_names_reasons(market, db_session):
+    from app.services import meter_market_explain as explain
+
+    edge = date(2026, 10, 1)
+    result = explain.explain_localization(db_session, edge, manufacturer_id=market["nartis"], quarter="2026-3")
+    assert result["value"] == 30
+    reasons = {r["reason"]: r["count"] for r in result["reasons"] if not r["included"]}
+    assert reasons["поверка до внесения в РПП (15.08.2026)"] == 110  # июль 100 + 10 до 15 августа
+    assert reasons[explain.REASON_UNMAPPED_LOC] == 5
+    only_score = explain.explain_localization(db_session, edge, manufacturer_id=market["nartis"], score=114.0, quarter="2026-3")
+    assert only_score["value"] == 30 and only_score["excluded"] == 0
+
+
+def test_rpp_record_without_score_or_expired_does_not_hide_valid_one():
+    """НАРТИС-И100-W113-2 в ГИСП: 83 балла с 2023 года и запись 22.09–07.10.2025 без баллов.
+    Раньше всё после 22.09.2025 выпадало; теперь действует запись с баллами, пока не истекла."""
+
+    records = [
+        report.RppRecord(date(2023, 12, 21), date(2026, 3, 1), 83.0, "1"),
+        report.RppRecord(date(2025, 9, 22), date(2025, 10, 7), None, "2"),
+    ]
+    assert report.rpp_verdict(records, date(2025, 9, 30)).score == 83.0
+    assert report.rpp_verdict(records, date(2025, 12, 1)).included
+    expired = report.rpp_verdict(records, date(2026, 3, 2))
+    assert not expired.included and expired.reason == "срок записи РПП истёк 01.03.2026"
+    assert report.rpp_verdict(records, date(2023, 1, 1)).reason.startswith("поверка до внесения")

@@ -32,7 +32,7 @@ const DESIGNS: { value: string; label: string }[] = [
   { value: "din", label: "DIN-рейка" },
   { value: "cabinet", label: "Шкафное" },
   { value: "split", label: "Сплит" },
-  { value: "nd", label: "н/д" },
+  { value: "nd", label: "нет данных" },
 ];
 const NO_RIGHT = "Справочник правят аналитик и администратор";
 

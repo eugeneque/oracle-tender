@@ -14,7 +14,8 @@ import type {
 } from "../../api/types";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { Tooltip } from "../ui/Tooltip";
-import { BarList, Donut, ExportButton, MatrixTable, Panel } from "./common";
+import { BarList, Donut, ExplainNumber, ExportButton, MatrixTable, Panel } from "./common";
+import { ExplainPanel, type ExplainScope } from "./ExplainPanel";
 import { fmt, fmtShare, quarterLabel } from "./format";
 
 /**
@@ -165,10 +166,13 @@ interface Filters {
   design: string | null;
   phase: string | null;
   interface: string | null;
-  smart: "yes" | "no" | "unknown" | null;
+  smart: "yes" | "no" | null;
 }
 const NO_FILTERS: Filters = { manufacturer_id: null, design: null, phase: null, interface: null, smart: null };
-const SMART_LABELS = { yes: "Соответствуют ПП 890", no: "Не соответствуют ПП 890", unknown: "ПП 890 не определено" } as const;
+// Фильтра «ПП 890 не определено» нет (замечание 09.11.2026): статусы — «Соответствует», «Не
+// соответствует» и «Нет данных»; последнее не фильтр, а число с причинами в детализации.
+const SMART_LABELS = { yes: "Соответствуют ПП 890", no: "Не соответствуют ПП 890" } as const;
+type OnExplain = (scope: ExplainScope) => void;
 
 function query(params: Record<string, string | number | null | undefined>): string {
   const search = new URLSearchParams();
@@ -183,6 +187,7 @@ export function MarketReport({ status }: { status: MarketStatus }) {
   const [period, setPeriod] = useState(() => `ytd:${lastFullMonth(status.edge!).year}`);
   const [error, setError] = useState<string | null>(null);
   const [drill, setDrill] = useState<{ manufacturerId: number; name: string } | null>(null);
+  const [explain, setExplain] = useState<ExplainScope | null>(null);
 
   return (
     <div className="space-y-5">
@@ -194,12 +199,18 @@ export function MarketReport({ status }: { status: MarketStatus }) {
         <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-400">{error}</div>
       )}
       {screen === "overview" && (
-        <OverviewScreen period={period} onError={setError} onDrill={(id, name) => setDrill({ manufacturerId: id, name })} />
+        <OverviewScreen
+          period={period}
+          onError={setError}
+          onDrill={(id, name) => setDrill({ manufacturerId: id, name })}
+          onExplain={setExplain}
+        />
       )}
-      {screen === "designs" && <DesignsScreen onError={setError} />}
-      {screen === "groups" && <GroupsScreen onError={setError} />}
-      {screen === "localization" && <LocalizationScreen status={status} onError={setError} />}
+      {screen === "designs" && <DesignsScreen onError={setError} onExplain={setExplain} />}
+      {screen === "groups" && <GroupsScreen onError={setError} onExplain={setExplain} />}
+      {screen === "localization" && <LocalizationScreen status={status} onError={setError} onExplain={setExplain} />}
       {drill && <DrillPanel period={period} start={drill} onClose={() => setDrill(null)} />}
+      {explain && <ExplainPanel scope={explain} onClose={() => setExplain(null)} />}
     </div>
   );
 }
@@ -225,10 +236,12 @@ function OverviewScreen({
   period,
   onError,
   onDrill,
+  onExplain,
 }: {
   period: string;
   onError: (message: string) => void;
   onDrill: (manufacturerId: number, name: string) => void;
+  onExplain: OnExplain;
 }) {
   const [filters, setFilters] = useState<Filters>(NO_FILTERS);
   const params = useMemo(() => query({ period, ...filters }), [period, filters]);
@@ -239,10 +252,17 @@ function OverviewScreen({
   if (!data) return <div className="py-24 text-center text-sm text-zinc-600">Считаю поверки…</div>;
   const manufacturerName = data.manufacturers.find((m) => m.key === filters.manufacturer_id)?.name;
   const exportQuery = (table: string) => `table=${table}&${params}`;
+  // Детализация числа: текущие фильтры экрана плюс уточнение (строка таблицы, сегмент).
+  const explain = (title: string, patch: Partial<Filters> | { smart: "nodata" } = {}) =>
+    onExplain({ kind: "overview", title, params: { period, ...filters, ...patch } });
   return (
     <div className="space-y-5">
       <div>
-        <div className="text-5xl font-semibold tracking-tight text-white tabular-nums">{fmt(data.total)}</div>
+        <ExplainNumber
+          value={fmt(data.total)}
+          onClick={() => explain("Поверенные счётчики электроэнергии")}
+          className="text-5xl font-semibold tracking-tight text-white tabular-nums"
+        />
         <p className="mt-2 text-sm text-zinc-400">
           поверенных счётчиков электроэнергии · {data.period.label}
           {active.length > 0 && " · с фильтром"}
@@ -271,7 +291,10 @@ function OverviewScreen({
                 Его выставляет ИИ по тексту раздела III, а аналитик может задать своё решение в справочнике — оно
                 важнее.
               </p>
-              <p>«Не определено» — ИИ не хватило данных или написание модификации ещё не размечено.</p>
+              <p>
+                «Нет данных» — написание модификации ещё не размечено, проверка не выполнялась или ИИ не хватило
+                сведений в описании типа. Причину по каждой позиции показывает детализация числа.
+              </p>
             </div>
           }
         >
@@ -287,8 +310,35 @@ function OverviewScreen({
           <option value="" className="bg-zinc-900">все поверки</option>
           <option value="yes" className="bg-zinc-900">{SMART_LABELS.yes}</option>
           <option value="no" className="bg-zinc-900">{SMART_LABELS.no}</option>
-          <option value="unknown" className="bg-zinc-900">{SMART_LABELS.unknown}</option>
         </select>
+        {data.smart_counts && (
+          <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span>
+              соответствует{" "}
+              <ExplainNumber
+                value={fmt(data.smart_counts.yes)}
+                onClick={() => explain("Соответствуют ПП 890", { smart: "yes" })}
+                className="tabular-nums text-zinc-300"
+              />
+            </span>
+            <span>
+              не соответствует{" "}
+              <ExplainNumber
+                value={fmt(data.smart_counts.no)}
+                onClick={() => explain("Не соответствуют ПП 890", { smart: "no" })}
+                className="tabular-nums text-zinc-300"
+              />
+            </span>
+            <span>
+              нет данных{" "}
+              <ExplainNumber
+                value={fmt(data.smart_counts.nodata)}
+                onClick={() => explain("ПП 890: нет данных — причины", { smart: "nodata" })}
+                className="tabular-nums text-zinc-300"
+              />
+            </span>
+          </span>
+        )}
       </div>
 
       {active.length > 0 && (
@@ -344,7 +394,9 @@ function OverviewScreen({
                         {row.name}
                       </button>
                     </td>
-                    <td className="py-1.5 text-right tabular-nums text-zinc-200">{fmt(row.count)}</td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-200">
+                      <ExplainNumber value={fmt(row.count)} onClick={() => explain(row.name ?? "Производитель", { manufacturer_id: id })} />
+                    </td>
                     <td className="py-1.5 text-right tabular-nums text-zinc-500">{fmtShare(row.share)}</td>
                     <td className="py-1.5 text-right">
                       <button
@@ -362,7 +414,10 @@ function OverviewScreen({
               <tr className="border-t border-white/[0.12] font-semibold text-zinc-100">
                 <td className="py-2">Всего</td>
                 <td className="py-2 text-right tabular-nums">
-                  {fmt(data.manufacturers.reduce((sum, row) => sum + row.count, 0))}
+                  <ExplainNumber
+                    value={fmt(data.manufacturers.reduce((sum, row) => sum + row.count, 0))}
+                    onClick={() => explain("Поверенные счётчики электроэнергии")}
+                  />
                 </td>
                 <td className="py-2 text-right tabular-nums text-zinc-500">100,00 %</td>
                 <td />
@@ -377,6 +432,7 @@ function OverviewScreen({
               rows={data.designs.map((r) => ({ key: String(r.key), count: r.count, share: r.share }))}
               selected={filters.design}
               onSelect={(design) => set({ design })}
+              onExplain={(design) => explain(`Исполнение: ${design}`, { design })}
             />
           </Panel>
           <Panel title="Тип ПУ" actions={<ExportButton query={exportQuery("phases")} onError={onError} />}>
@@ -384,6 +440,7 @@ function OverviewScreen({
               rows={data.phases.map((r) => ({ key: String(r.key), count: r.count, share: r.share }))}
               selected={filters.phase}
               onSelect={(phase) => set({ phase })}
+              onExplain={(phase) => explain(`Тип ПУ: ${phase}`, { phase })}
             />
           </Panel>
         </div>
@@ -398,6 +455,7 @@ function OverviewScreen({
           rows={data.interfaces.map((r) => ({ key: String(r.key), count: r.count }))}
           selected={filters.interface}
           onSelect={(value) => set({ interface: value })}
+          onExplain={(value) => explain(`Интерфейс: ${value}`, { interface: value })}
         />
       </Panel>
     </div>
@@ -417,9 +475,26 @@ function Chip({ label, onClear }: { label: string; onClear: () => void }) {
 
 // ── Экраны 2–3 ─────────────────────────────────────────────────────────────────────────────
 
-function DesignsScreen({ onError }: { onError: (message: string) => void }) {
+/** Период детализации ячейки «по годам»: год столбца или все годы для «Всего». */
+const yearPeriod = (column: string | null) => (column ? `year:${column}` : "all");
+
+function DesignsScreen({ onError, onExplain }: { onError: (message: string) => void; onExplain: OnExplain }) {
   const [phase, setPhase] = useState<string>("");
   const data = useLoad<MarketByYear>(`/meter-market/designs?${query({ phase })}`, onError);
+  const explainCell = (row: string | null, child: string | null, column: string | null) => {
+    const manufacturer = data?.rows.find((r) => String(r.manufacturer_id ?? r.name) === row);
+    const title = [manufacturer?.name ?? "Все производители", child, phase || null, column ?? "все годы"].filter(Boolean).join(" · ");
+    onExplain({
+      kind: "overview",
+      title,
+      params: {
+        period: yearPeriod(column),
+        manufacturer_id: manufacturer?.manufacturer_id ?? null,
+        design: child,
+        phase: phase || null,
+      },
+    });
+  };
   return (
     <Panel
       title={`Исполнения и типы приборов учёта ЭЭ. ${data?.label ?? ""}`}
@@ -454,6 +529,7 @@ function DesignsScreen({ onError }: { onError: (message: string) => void }) {
           }))}
           totals={data.totals}
           total={data.total}
+          onCellClick={explainCell}
         />
       ) : (
         <div className="py-16 text-center text-sm text-zinc-600">Считаю…</div>
@@ -462,8 +538,16 @@ function DesignsScreen({ onError }: { onError: (message: string) => void }) {
   );
 }
 
-function GroupsScreen({ onError }: { onError: (message: string) => void }) {
+function GroupsScreen({ onError, onExplain }: { onError: (message: string) => void; onExplain: OnExplain }) {
   const data = useLoad<MarketByYear>("/meter-market/groups", onError);
+  const explainCell = (row: string | null, child: string | null, column: string | null) => {
+    const company = child ? data?.rows.find((r) => r.name === row)?.companies?.find((c) => c.name === child) : undefined;
+    onExplain({
+      kind: "overview",
+      title: [row ?? "Все группы", child, column ?? "все годы"].filter(Boolean).join(" · "),
+      params: { period: yearPeriod(column), group: row, manufacturer_id: company?.manufacturer_id ?? null },
+    });
+  };
   return (
     <Panel
       title={`Данные о поверке ПУ ЭЭ за ${data?.label ?? ""} в рамках групп компаний`}
@@ -484,6 +568,7 @@ function GroupsScreen({ onError }: { onError: (message: string) => void }) {
           }))}
           totals={data.totals}
           total={data.total}
+          onCellClick={explainCell}
         />
       ) : (
         <div className="py-16 text-center text-sm text-zinc-600">Считаю…</div>
@@ -494,9 +579,33 @@ function GroupsScreen({ onError }: { onError: (message: string) => void }) {
 
 // ── Экран 4 ────────────────────────────────────────────────────────────────────────────────
 
-function LocalizationScreen({ status, onError }: { status: MarketStatus; onError: (message: string) => void }) {
+function LocalizationScreen({
+  status,
+  onError,
+  onExplain,
+}: {
+  status: MarketStatus;
+  onError: (message: string) => void;
+  onExplain: OnExplain;
+}) {
   const [requirement, setRequirement] = useState<string>("");
   const data = useLoad<MarketLocalization>(`/meter-market/localization?${query({ requirement })}`, onError);
+  const explainCell = (row: string | null, child: string | null, column: string | null) => {
+    const manufacturer = data?.rows.find((r) => String(r.manufacturer_id ?? r.name) === row);
+    const title = [
+      manufacturer?.name ?? "Все производители",
+      child ? `${child} баллов` : null,
+      column ? quarterLabel(column) : "все кварталы",
+      requirement ? `требования ${requirement}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    onExplain({
+      kind: "localization",
+      title: `Локализация: ${title}`,
+      params: { manufacturer_id: manufacturer?.manufacturer_id ?? null, score: child, quarter: column, requirement: requirement || null },
+    });
+  };
   const years = status.thresholds.map((t) => String(t.year));
   return (
     <div className="space-y-4">
@@ -543,6 +652,7 @@ function LocalizationScreen({ status, onError }: { status: MarketStatus; onError
               }))}
               totals={data.totals}
               total={data.total}
+              onCellClick={explainCell}
             />
           </>
         ) : (
