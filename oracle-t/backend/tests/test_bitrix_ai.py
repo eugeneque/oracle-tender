@@ -243,8 +243,9 @@ def test_retry_resends_same_bytes_after_server_error(db_session, client, admin_u
         db_session, uuid.UUID(failed["id"]), actor=admin_user, transport=httpx.MockTransport(receiver)
     )
     assert retried["accepted"] is True and retried["attempts"] == 2
-    assert receiver.requests[0]["body"] == receiver.requests[1]["body"]
-    assert receiver.requests[0]["payload"]["request_id"] == retried["request_id"]
+    # На 500 уходят полный и минимальный пакеты (09.11.2026); повторяется последний — теми же байтами.
+    assert receiver.requests[1]["body"] == receiver.requests[2]["body"]
+    assert receiver.requests[1]["payload"]["request_id"] == retried["request_id"]
 
 
 def test_rejected_package_is_not_retried(db_session, client, admin_user):
@@ -409,3 +410,54 @@ def test_portal_500_on_new_rows_falls_back_to_package_without_them(db_session, c
         select(Log).where(Log.action == "push_bitrix24_ai_package").order_by(Log.timestamp.desc())
     ).first()
     assert "без условий поставки и документов" in log.details
+
+
+def test_portal_500_without_new_rows_falls_back_to_minimal_package(db_session, client, admin_user):
+    """Замечание 09.11.2026 (повтор): 32616544947 падал с 500 и без строк 1.7.0, а пакеты
+    из одной выжимки портал принимал. Тогда уходит минимальный пакет — поля сделки и
+    выжимка, без полного снимка; сделка создаётся, в журнале — пометка."""
+
+    tender = _tender(db_session)
+    _configure(db_session, admin_user)
+
+    class FailsOnDetails(FakeReceiver):
+        def __call__(self, request):
+            payload = json.loads(request.content)
+            if sum(len(rows) for rows in payload["sections"].values()) > 1:
+                self.requests.append({"payload": payload, "body": request.content})
+                return httpx.Response(500, json={"ok": False, "error": {"message": "Внутренняя ошибка обработки"}})
+            return super().__call__(request)
+
+    receiver = FailsOnDetails()
+    result = service.send(
+        db_session, tender, actor=admin_user, full_snapshot=True, transport=httpx.MockTransport(receiver)
+    )
+
+    assert result["accepted"] is True and result["deal_id"] == 1984
+    full, minimal = (item["payload"] for item in receiver.requests)
+    assert minimal["request_id"] != full["request_id"]
+    assert minimal["full_snapshot"] is False
+    assert [row["type"] for row in minimal["sections"]["technical_specification"]] == ["technical_summary"]
+    assert minimal["deal_fields"] == full["deal_fields"] and minimal["lookup"] == full["lookup"]
+    log = db_session.scalars(
+        select(Log).where(Log.action == "push_bitrix24_ai_package").order_by(Log.timestamp.desc())
+    ).first()
+    assert "минимальный пакет" in log.details and full["request_id"] in log.details
+
+
+def test_portal_500_on_minimal_package_names_portal_side(db_session, client, admin_user):
+    """Если портал не принимает и минимальный пакет, дело не в строках анализа — окно говорит
+    это прямо, с номером процедуры, ИНН заказчика и request_id для администратора портала."""
+
+    tender = _tender(db_session)
+    _configure(db_session, admin_user)
+    receiver = FakeReceiver(fail_with=500)
+    result = service.send(
+        db_session, tender, actor=admin_user, full_snapshot=True, transport=httpx.MockTransport(receiver)
+    )
+
+    assert result["accepted"] is False
+    assert len(receiver.requests) == 2
+    assert "даже минимальный пакет" in result["error"]
+    assert "2460069527" in result["error"]
+    assert receiver.requests[-1]["payload"]["request_id"] in result["error"]

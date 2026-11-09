@@ -1145,32 +1145,97 @@ def send(
     record = _record(tender, payload, actor)
     db.add(record)
     _post(settings, record, transport)
-    if record.accepted or record.http_status != 500 or not _has_new_rows(payload):
+
+    # Запасные пакеты при HTTP 500 (замечания 09.11.2026). Портал отвечает «Внутренняя ошибка
+    # обработки» на часть закупок, а пакеты из одной выжимки («строк 1») принимает. Первая
+    # гипотеза — строки 1.7.0 (условия поставки, документы процедуры) — подтвердилась не
+    # везде: 32616549050 упал в 10:14 ещё до разбора, а 32616544947 после обновления сервера
+    # падал без второй записи в журнале, то есть строк 1.7.0 в его пакете не было. Поэтому
+    # ступени: сначала без строк 1.7.0, затем минимальный пакет — поля сделки и выжимка.
+    # Каждая ступень — новый запрос (повтор теми же байтами 500 не лечит); отклонённые
+    # запросы остаются в истории, их request_id передают администратору портала.
+    original = record
+    if not record.accepted and record.http_status == 500 and _has_new_rows(payload):
+        _finish(db, tender, record, actor)
+        reduced = _without_new_rows(payload)
+        record = _record(tender, reduced, actor)
+        db.add(record)
+        _post(settings, record, transport)
+        if record.accepted or record.http_status != 500 or items_count(reduced) <= items_count(
+            _minimal(payload)
+        ):
+            return _finish(
+                db,
+                tender,
+                record,
+                actor,
+                note=(
+                    f"без условий поставки и документов процедуры: на полный пакет {original.request_id} "
+                    "портал ответил HTTP 500"
+                    + (" — без них пакет принят" if record.accepted else " — и без них тоже не принят")
+                ),
+            )
+
+    minimal = _minimal(payload)
+    if record.accepted or record.http_status != 500 or items_count(payload) <= items_count(minimal):
+        if not record.accepted and record.http_status == 500:
+            record.error = _minimal_failed_text(db, tender, record)
         return _finish(db, tender, record, actor)
 
-    # Замечание 09.11.2026: портал отвечает «HTTP 500: Внутренняя ошибка обработки» на пакеты
-    # закупок с полным разбором, а пакеты из одной выжимки принимает. Строки 1.7.0 (условия
-    # поставки, документы процедуры) идут только у разобранных закупок, а их приём на живом
-    # PHP сам Bitrix24 не проверял (`AI_API.md` 1.7.0: «проверка через настоящий
-    # PHP/Bitrix24 … не выполнена»). Повтор теми же байтами ошибку не лечит (повтор 11:19 по
-    # 32616544947 — снова 500), поэтому сразу отправляем тот же анализ без этих строк новым
-    # запросом: менеджер получает сделку, а журнал показывает, на чём падает портал. Первый
-    # запрос остаётся в истории с ошибкой — его request_id передают администратору портала.
     _finish(db, tender, record, actor)
-    reduced = _without_new_rows(payload)
-    fallback = _record(tender, reduced, actor)
+    fallback = _record(tender, minimal, actor)
     db.add(fallback)
     _post(settings, fallback, transport)
+    if not fallback.accepted and fallback.http_status == 500:
+        fallback.error = _minimal_failed_text(db, tender, fallback)
     return _finish(
         db,
         tender,
         fallback,
         actor,
         note=(
-            f"без условий поставки и документов процедуры: на полный пакет {record.request_id} "
-            "портал ответил HTTP 500"
-            + (" — без них пакет принят" if fallback.accepted else " — и без них тоже не принят")
+            f"минимальный пакет (поля сделки и выжимка, строк {fallback.items_count} из "
+            f"{original.items_count}): на полный пакет {original.request_id} портал ответил HTTP 500"
+            + (
+                " — минимальный принят, подробные строки передайте администратору портала"
+                if fallback.accepted
+                else " — и минимальный не принят"
+            )
         ),
+    )
+
+
+def _minimal(payload: dict[str, Any]) -> dict[str, Any]:
+    """Самый простой пакет, который портал принимает: поля сделки и одна строка «Краткая
+    выжимка по ТЗ» — как у закупок без разбора («строк 1»). Остальные разделы не передаются:
+    отсутствующий раздел портал не трогает. `full_snapshot` снят, чтобы на уже созданной
+    сделке не скрылись строки прошлых выгрузок."""
+
+    summary = [
+        row
+        for row in (payload.get("sections") or {}).get("technical_specification", [])
+        if row.get("type") == "technical_summary"
+    ]
+    return {
+        **payload,
+        "request_id": f"sova-{uuid.uuid4()}",
+        "analysis_id": f"{payload['analysis_id']}-m{uuid.uuid4().hex[:4]}",
+        "full_snapshot": False,
+        "sections": {"technical_specification": summary} if summary else {},
+    }
+
+
+def _minimal_failed_text(db: Session, tender: Tender, record: BitrixAiRequest) -> str:
+    """Минимальный пакет тоже не принят — значит, портал падает не на строках анализа, а на
+    поиске или создании сделки и компании. Это и пишем: тогда понятно, что чинить на портале,
+    а не в пакете."""
+
+    inn = customer_inn(db, tender)
+    return (
+        f"{record.error or 'HTTP 500'}. Портал не принял даже минимальный пакет (поля сделки и "
+        "выжимка) — сбой на стороне Bitrix24 при поиске или создании сделки/компании "
+        f"(номер процедуры {procedure_number(tender)}, ИНН заказчика {inn or 'не найден'}). "
+        f"request_id для администратора портала: {record.request_id}"
     )
 
 
