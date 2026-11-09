@@ -1094,7 +1094,9 @@ def _describe(status_code: int, answer: Any) -> str:
     return f"HTTP {status_code}: {hint}" + (f". Ответ портала: {detail}" if detail else "")
 
 
-def _finish(db: Session, tender: Tender, record: BitrixAiRequest, actor: User) -> dict[str, Any]:
+def _finish(
+    db: Session, tender: Tender, record: BitrixAiRequest, actor: User, *, note: str | None = None
+) -> dict[str, Any]:
     if record.accepted and record.deal_id:
         link = db.get(BitrixDealLink, tender.id) or BitrixDealLink(tender_id=tender.id)
         link.deal_id = record.deal_id
@@ -1116,6 +1118,7 @@ def _finish(db: Session, tender: Tender, record: BitrixAiRequest, actor: User) -
                 if record.accepted
                 else record.error or "ошибка"
             )
+            + (f" ({note})" if note else "")
         ),
         user_id=actor.id,
     )
@@ -1139,10 +1142,43 @@ def send(
             "проверки адреса и секрета."
         )
     payload = build_payload(db, tender, full_snapshot=full_snapshot)
+    record = _record(tender, payload, actor)
+    db.add(record)
+    _post(settings, record, transport)
+    if record.accepted or record.http_status != 500 or not _has_new_rows(payload):
+        return _finish(db, tender, record, actor)
+
+    # Замечание 09.11.2026: портал отвечает «HTTP 500: Внутренняя ошибка обработки» на пакеты
+    # закупок с полным разбором, а пакеты из одной выжимки принимает. Строки 1.7.0 (условия
+    # поставки, документы процедуры) идут только у разобранных закупок, а их приём на живом
+    # PHP сам Bitrix24 не проверял (`AI_API.md` 1.7.0: «проверка через настоящий
+    # PHP/Bitrix24 … не выполнена»). Повтор теми же байтами ошибку не лечит (повтор 11:19 по
+    # 32616544947 — снова 500), поэтому сразу отправляем тот же анализ без этих строк новым
+    # запросом: менеджер получает сделку, а журнал показывает, на чём падает портал. Первый
+    # запрос остаётся в истории с ошибкой — его request_id передают администратору портала.
+    _finish(db, tender, record, actor)
+    reduced = _without_new_rows(payload)
+    fallback = _record(tender, reduced, actor)
+    db.add(fallback)
+    _post(settings, fallback, transport)
+    return _finish(
+        db,
+        tender,
+        fallback,
+        actor,
+        note=(
+            f"без условий поставки и документов процедуры: на полный пакет {record.request_id} "
+            "портал ответил HTTP 500"
+            + (" — без них пакет принят" if fallback.accepted else " — и без них тоже не принят")
+        ),
+    )
+
+
+def _record(tender: Tender, payload: dict[str, Any], actor: User) -> BitrixAiRequest:
     body = serialize(payload)
     if len(body) > MAX_BODY_BYTES:
         raise BitrixAiError(f"Пакет {len(body) // 1024} КБ больше предела портала 5 МБ.")
-    record = BitrixAiRequest(
+    return BitrixAiRequest(
         tender_id=tender.id,
         request_id=payload["request_id"],
         analysis_id=payload["analysis_id"],
@@ -1152,9 +1188,41 @@ def send(
         body=body.decode("utf-8"),
         sent_by_id=actor.id,
     )
-    db.add(record)
-    _post(settings, record, transport)
-    return _finish(db, tender, record, actor)
+
+
+# Типы строк, появившиеся в приложении портала 1.7.0 (раздел 85 ARCHITECTURE.md).
+NEW_ROW_TYPES = {
+    "supply_model",
+    "delivery_point",
+    "delivery_schedule",
+    "delivery_request_terms",
+    "procurement_document",
+}
+
+
+def _has_new_rows(payload: dict[str, Any]) -> bool:
+    return any(
+        row.get("type") in NEW_ROW_TYPES for rows in (payload.get("sections") or {}).values() for row in rows
+    )
+
+
+def _without_new_rows(payload: dict[str, Any]) -> dict[str, Any]:
+    """Тот же анализ без строк 1.7.0 — новым запросом (`request_id`/`analysis_id` новые:
+    повтор старого `request_id` с другим телом портал отклонил бы как конфликт). Раздел
+    `documents` убирается целиком: отсутствующий раздел портал не трогает даже при
+    `full_snapshot`, а пустой при полном снимке очистил бы."""
+
+    sections = {
+        name: [row for row in rows if row.get("type") not in NEW_ROW_TYPES]
+        for name, rows in payload["sections"].items()
+        if name != "documents"
+    }
+    return {
+        **payload,
+        "request_id": f"sova-{uuid.uuid4()}",
+        "analysis_id": f"{payload['analysis_id']}-r{uuid.uuid4().hex[:4]}",
+        "sections": sections,
+    }
 
 
 def retry(

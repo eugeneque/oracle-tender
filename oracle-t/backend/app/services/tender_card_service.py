@@ -269,6 +269,17 @@ def sync_card(
         return existing
 
     platform_card, platform_number = _platform_card(tender)
+    if platform_number and not tender.registry_number:
+        # 09.11.2026: номер ЕИС процедуры Сбербанк-АСТ (SBR003-…) виден только в карточке —
+        # без него в канале «Все» запись лежала рядом со своей же строкой из ЕИС/ГПБ.
+        from app.services import tender_twins
+
+        tender.registry_number = platform_number
+        db.add(tender)
+        db.flush()
+        primary = tender_twins.link(db, tender)
+        if primary.id != tender.id:
+            tender_twins.share_fields(db, primary)
     url = _card_url(tender, platform_number)
     if url is None and platform_card is None:
         return existing

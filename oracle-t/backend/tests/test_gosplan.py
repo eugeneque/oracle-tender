@@ -186,3 +186,76 @@ def test_all_feed_shows_one_card_with_every_source(monkeypatch):
         assert [source.id for source in labels] == [standard.id, gosplan.id]
     finally:
         db.close()
+
+
+def test_all_feed_merges_republished_procedure_without_eis_number():
+    """Замечание 09.11.2026: ценовой запрос «Транснефть – Дружба» лежал на ЭТП ГПБ и на
+    Сбербанк-АСТ без номера ЕИС — в «Всех» две карточки. Совпадают наименование, заказчик
+    (кавычки разные) и день публикации — карточка одна, на метке обе площадки, фильтр по
+    второй площадке её не теряет. Записи одной площадки и другой день не склеиваются."""
+
+    from datetime import date
+
+    import app.services.tender_service as tender_service_module
+    from app.db.session import SessionLocal
+    from app.models.tender import Tender
+    from app.services.tender_service import feed_sources_by_tender
+
+    marker = uuid.uuid4().hex[:10]
+    title = f"Счетчики электроэнергии 0,4кВ. (СЭТ, ПСЧ) {marker}"
+    db = SessionLocal()
+    try:
+        gpb, sber = [
+            Source(
+                key=f"stub_{name}_{uuid.uuid4().hex[:8]}",
+                name=f"Тестовый {name}",
+                url="https://example.test",
+                type="etp",
+                adapter_key="stub",
+                adapter_status="implemented",
+            )
+            for name in ("gpb", "sber")
+        ]
+        db.add_all([gpb, sber])
+        db.flush()
+
+        def tender(source, number, customer, day):
+            row = Tender(
+                source_id=source.id,
+                external_id=f"{number}-{marker}",
+                registry_number=None if source is sber else f"{number}{marker}",
+                title=title,
+                customer_name=customer,
+                publish_date=day,
+                source_url="https://example.test/p",
+            )
+            db.add(row)
+            db.flush()
+            return row
+
+        today = date(2026, 11, 9)
+        first = tender(gpb, "1043057", "АО ТРАНСНЕФТЬ - ДРУЖБА", today)
+        tender(sber, "71349566", 'АО "ТРАНСНЕФТЬ - ДРУЖБА"', today)
+        second_lot = tender(gpb, "1043058", "АО ТРАНСНЕФТЬ - ДРУЖБА", today)
+        last_year = tender(sber, "61349566", "АО ТРАНСНЕФТЬ - ДРУЖБА", date(2025, 11, 9))
+        db.commit()
+
+        def shown(**extra):
+            return {
+                row.id
+                for row in db.scalars(
+                    select(Tender).where(
+                        Tender.title == title,
+                        *tender_service_module._build_conditions(
+                            tender_service_module.TenderFilters(feed="all", **extra)
+                        ),
+                    )
+                )
+            }
+
+        assert shown() == {first.id, second_lot.id, last_year.id}
+        assert first.id in shown(source_keys=[sber.key])
+        labels = feed_sources_by_tender(db, [first])[first.id]
+        assert [source.id for source in labels] == [gpb.id, sber.id]
+    finally:
+        db.close()

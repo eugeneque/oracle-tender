@@ -26,7 +26,7 @@ from typing import Callable
 
 from loguru import logger
 from sqlalchemy import Date, String, and_, case, cast, func, or_, select, true
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.adapters.base import PollError, TenderSummary
 from app.adapters.registry import get_adapter
@@ -743,7 +743,12 @@ def _all_feeds_representatives():
     одна: сначала та, по которой человек уже вынес решение («Релевантна»/«Неактуально» —
     его работа не должна пропасть из виду), затем запись стандартных ресурсов (там
     площадка проведения и ссылка на неё), затем Госплан, Тендерплан, затем самая ранняя.
-    Записи без реестрового номера не склеиваются ни с чем — сравнивать их не по чему.
+
+    Вторая ступень (09.11.2026) — закупки без номера ЕИС, см. `_twin_key`: из записей с
+    одним ключом остаются записи одной площадки — той, чья запись лучшая по тому же
+    порядку. Записи самой этой площадки не схлопываются между собой: на одной площадке
+    одинаковые наименование, заказчик и день — это разные процедуры (лоты отдельными
+    закупками), а не перепубликация.
     Где ещё нашлась закупка, карточке подсказывает `feed_sources_by_tender`."""
 
     feed_rank = case(
@@ -751,25 +756,71 @@ def _all_feeds_representatives():
         (Source.type == SourceType.TENDERPLAN.value, 2),
         else_=0,
     )
-    ranked = (
+    order = (Tender.relevance_marked_at.is_(None), feed_rank, Tender.created_at, Tender.id)
+    by_number = (
         select(
             Tender.id.label("id"),
             func.row_number()
             .over(
                 partition_by=func.coalesce(Tender.registry_number, cast(Tender.id, String)),
-                order_by=(
-                    Tender.relevance_marked_at.is_(None),
-                    feed_rank,
-                    Tender.created_at,
-                    Tender.id,
-                ),
+                order_by=order,
             )
             .label("rn"),
         )
         .join(Source, Source.id == Tender.source_id)
         .subquery()
     )
-    return select(ranked.c.id).where(ranked.c.rn == 1)
+    twin_key = _twin_key()
+    by_twin = (
+        select(
+            Tender.id.label("id"),
+            Tender.source_id.label("source_id"),
+            twin_key.label("twin_key"),
+            func.first_value(Tender.source_id)
+            .over(partition_by=twin_key, order_by=order)
+            .label("winner_source_id"),
+        )
+        .join(Source, Source.id == Tender.source_id)
+        .join(by_number, and_(by_number.c.id == Tender.id, by_number.c.rn == 1))
+        .subquery()
+    )
+    return select(by_twin.c.id).where(
+        or_(by_twin.c.twin_key.is_(None), by_twin.c.source_id == by_twin.c.winner_source_id)
+    )
+
+
+def _folded_key(column):
+    """Строка для сравнения: нижний регистр, «ё» → «е», только буквы и цифры — кавычки,
+    дефисы, точки и пробелы площадки расставляют по-разному («АО ТРАНСНЕФТЬ - ДРУЖБА» и
+    «АО "ТРАНСНЕФТЬ - ДРУЖБА"»)."""
+
+    return func.regexp_replace(
+        func.replace(func.lower(func.coalesce(column, "")), "ё", "е"), "[^0-9a-zа-я]+", "", "g"
+    )
+
+
+def _twin_key(model=Tender):
+    """Ключ перепубликации закупки на другой площадке — для записей без номера ЕИС.
+
+    Замечание 09.11.2026: ценовой запрос «АО Транснефть – Дружба» лежит на ЭТП ГПБ
+    (№1043057) и на Сбербанк-АСТ (№71349566) — коммерческая процедура, номера ЕИС у неё нет,
+    и склейка по реестровому номеру её не видит. Совпадают наименование, заказчик и день
+    публикации — по ним и сводим. День обязателен: тот же заказчик повторяет закупку с тем
+    же наименованием, и без даты прошлогодняя спряталась бы за свежей.
+    У записи с номером ЕИС ключа нет (`NULL`): её дубли надёжно ловит сам номер, а две
+    закупки с разными номерами ЕИС — заведомо разные, как бы ни совпадали названия."""
+
+    title = _folded_key(model.title)
+    customer = _folded_key(model.customer_name)
+    day = func.coalesce(model.publish_date, cast(model.created_at, Date))
+    has_eis_number = func.coalesce(model.registry_number, "").op("~")(_REGISTRY_NUMBER_RE.pattern)
+    return case(
+        (
+            and_(~has_eis_number, func.length(title) > 0, func.length(customer) > 0),
+            func.concat(title, "|", customer, "|", cast(day, String)),
+        ),
+        else_=None,
+    )
 
 
 def _found_in_sources_condition(source_keys: list[str]):
@@ -777,9 +828,11 @@ def _found_in_sources_condition(source_keys: list[str]):
 
     Сама строка может быть записью другого канала (дубли схлопнуты в одну), поэтому
     смотрим и на записи с тем же реестровым номером — иначе выбор «Госплан» терял бы все
-    закупки, которые Госплан нашёл вслед за ЕИС."""
+    закупки, которые Госплан нашёл вслед за ЕИС. То же для перепубликаций без номера ЕИС
+    (`_twin_key`): выбор «Сбербанк-АСТ» не должен терять закупку, представленную записью ГПБ."""
 
     selected = select(Source.id).where(Source.key.in_(source_keys))
+    twin_key = _twin_key()
     return or_(
         Tender.source_id.in_(selected),
         and_(
@@ -790,14 +843,24 @@ def _found_in_sources_condition(source_keys: list[str]):
                 )
             ),
         ),
+        and_(
+            twin_key.is_not(None),
+            twin_key.in_(
+                select(_twin_key(_TwinTender)).where(_TwinTender.source_id.in_(selected))
+            ),
+        ),
     )
+
+
+_TwinTender = aliased(Tender)
 
 
 def feed_sources_by_tender(db: Session, tenders: list[Tender]) -> dict[uuid.UUID, list[Source]]:
     """Все ресурсы, где нашлась закупка, — метка карточки в канале «Все».
 
     Своя площадка записи — первой, остальные — источники записей с тем же реестровым
-    номером, без повторов. Один запрос на всю выдачу."""
+    номером или тем же ключом перепубликации (`_twin_key`), без повторов. Два запроса на
+    всю выдачу."""
 
     numbers = {tender.registry_number for tender in tenders if tender.registry_number}
     others: dict[str, list[Source]] = {}
@@ -809,10 +872,24 @@ def feed_sources_by_tender(db: Session, tenders: list[Tender]) -> dict[uuid.UUID
             .order_by(Tender.created_at)
         ).all():
             others.setdefault(number, []).append(source)
+
+    twins: dict[uuid.UUID, list[Source]] = {}
+    ids = [tender.id for tender in tenders]
+    if ids:
+        own_key = _twin_key(_TwinTender)
+        for tender_id, source in db.execute(
+            select(_TwinTender.id, Source)
+            .join(Tender, and_(_twin_key() == own_key, Tender.id != _TwinTender.id))
+            .join(Source, Source.id == Tender.source_id)
+            .where(_TwinTender.id.in_(ids), own_key.is_not(None))
+            .order_by(Tender.created_at)
+        ).all():
+            twins.setdefault(tender_id, []).append(source)
+
     result: dict[uuid.UUID, list[Source]] = {}
     for tender in tenders:
         found = [tender.source]
-        for source in others.get(tender.registry_number or "", []):
+        for source in [*others.get(tender.registry_number or "", []), *twins.get(tender.id, [])]:
             if all(source.id != known.id for known in found):
                 found.append(source)
         result[tender.id] = found

@@ -364,3 +364,48 @@ def test_procedure_dates_come_from_eis_card(db_session, client, admin_user):
     assert fields["result_date"] == "2026-10-01T00:00:00+03:00"
     assert fields["rebid_date"] == "2026-10-03T10:00:00+03:00"
     assert "auction_date" not in fields
+
+
+def test_portal_500_on_new_rows_falls_back_to_package_without_them(db_session, client, admin_user):
+    """Замечание 09.11.2026: портал отвечает 500 на пакеты разобранных закупок. Тот же анализ
+    уходит новым запросом без строк 1.7.0 (документы, условия поставки) — сделка создаётся,
+    первый запрос остаётся в истории с ошибкой, в журнале — пометка, что отправлено урезанно."""
+
+    from app.models.tender_document import TenderDocument
+
+    tender = _tender(db_session)
+    db_session.add(
+        TenderDocument(
+            tender_id=tender.id,
+            file_name="ТЗ.pdf",
+            file_type="pdf",
+            source_url="https://zakupki.gov.ru/files/tz.pdf",
+        )
+    )
+    db_session.flush()
+    _configure(db_session, admin_user)
+
+    class FailsOnDocuments(FakeReceiver):
+        def __call__(self, request):
+            payload = json.loads(request.content)
+            if payload["sections"].get("documents"):
+                self.requests.append({"payload": payload, "body": request.content})
+                return httpx.Response(500, json={"ok": False, "error": {"message": "Внутренняя ошибка обработки"}})
+            return super().__call__(request)
+
+    receiver = FailsOnDocuments()
+    result = service.send(
+        db_session, tender, actor=admin_user, full_snapshot=True, transport=httpx.MockTransport(receiver)
+    )
+
+    assert result["accepted"] is True and result["deal_id"] == 1984
+    full, reduced = (item["payload"] for item in receiver.requests)
+    assert full["request_id"] != reduced["request_id"]
+    assert "documents" not in reduced["sections"]
+    assert reduced["sections"]["technical_specification"] == full["sections"]["technical_specification"]
+    history = service.list_requests(db_session)
+    assert [item["http_status"] for item in history[:2]] == [202, 500]
+    log = db_session.scalars(
+        select(Log).where(Log.action == "push_bitrix24_ai_package").order_by(Log.timestamp.desc())
+    ).first()
+    assert "без условий поставки и документов" in log.details
