@@ -2456,3 +2456,67 @@ export interface MarketGroup {
   name: string;
   members: { manufacturer_id: number; name: string | null; year_from: number | null; year_to: number | null }[];
 }
+
+// --- Обновление из интерфейса (09.11.2026, раздел 91 ARCHITECTURE.md) ---
+
+export interface SystemCommit {
+  sha: string;
+  short: string;
+  date: string;
+  subject: string;
+  author?: string;
+}
+
+export type SystemUpdateRunState = "idle" | "queued" | "running" | "success" | "failed" | "interrupted";
+
+export interface SystemUpdateRun {
+  state: SystemUpdateRunState;
+  /** updated — поставлена новая версия, uptodate — ставить было нечего, error — сбой. */
+  result: "updated" | "uptodate" | "error" | null;
+  code: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  requested_by: string | null;
+  from_version: SystemCommit | null;
+  to_version: SystemCommit | null;
+  queued_at: string | null;
+  queued_stale: boolean;
+  log: string;
+}
+
+export interface SystemUpdateStatus {
+  mode: "server" | "local" | "unavailable";
+  is_git: boolean;
+  branch: string;
+  remote_url: string | null;
+  current: SystemCommit | null;
+  can_check: boolean;
+  can_install: boolean;
+  unavailable_reason: string | null;
+  auto_update: boolean;
+  run: SystemUpdateRun;
+  history: string[];
+}
+
+export interface SystemUpdateRelease {
+  date: string;
+  title: string;
+  items: { kind: "new" | "improved" | "fixed"; text: string }[];
+}
+
+export interface SystemUpdateCheck {
+  state: "up_to_date" | "available" | "ahead" | "diverged" | "error";
+  checked_at: string;
+  console: string;
+  branch: string;
+  message?: string;
+  current?: SystemCommit | null;
+  remote?: SystemCommit;
+  commits?: SystemCommit[];
+  commit_count?: number | null;
+  files_changed?: number;
+  shortstat?: string;
+  migrations?: string[];
+  dependencies?: { python: boolean; npm: boolean; scripts: boolean };
+  releases?: SystemUpdateRelease[];
+}

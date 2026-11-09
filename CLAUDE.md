@@ -71,6 +71,10 @@ oracle-tender-main/            ← не git-репозиторий (git status/d
   `meter_market_loader` (слепок/изменения, CLI `catchup`), `meter_market_import` (справочник
   из Excel), `meter_market_report`, `meter_market_dictionary`; фронт `components/meter-market/`;
   раздел 79 ARCHITECTURE.md.
+- Обновление из интерфейса («Система → Обновление», только админ) — `system_update_service`
+  (проверка через `update.sh --check` + git; установка — файл-запрос `.update-request` →
+  юнит `oracle-t-update-web.path` → `update.sh --web` от root), фронт `pages/SystemUpdate.tsx`;
+  раздел 91 ARCHITECTURE.md.
 - `seed/snapshot.py` — наполнение базы «из коробки» (`python -m app.seed.snapshot prepare`).
 - `tests/` — pytest, ~77 файлов, против реальной БД `oraclet_test`.
 

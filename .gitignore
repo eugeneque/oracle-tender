@@ -40,3 +40,9 @@ transcriber/
 
 # --- Эталоны evals (выгружаются из БД) ---
 oracle-t/backend/golden/
+
+# --- Обновление из интерфейса (update.sh --web) ---
+update-web.state
+update-web.state.tmp
+.update-request
+.update.lock

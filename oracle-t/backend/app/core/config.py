@@ -154,6 +154,13 @@ class Settings(BaseSettings):
     notify_recipients: str = ""
     notify_admin_recipients: str = ""
 
+    # --- Обновление из интерфейса (09.11.2026, раздел 91 ARCHITECTURE.md) ---
+    # Корень установки (где лежат update.sh и .git). Пусто — вычисляется от расположения
+    # кода (oracle-t/backend/app/... → четыре уровня вверх); задавать нужно, только если
+    # backend запущен из другого каталога. Ветка — та же, что у update.sh (UPDATE_BRANCH).
+    update_root_dir: str = ""
+    update_branch: str = "main"
+
 
     @property
     def database_url(self) -> str:

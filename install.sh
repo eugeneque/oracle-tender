@@ -885,6 +885,40 @@ UNIT
   $SUDO systemctl daemon-reload
 }
 
+# Обновление из интерфейса Sova (09.11.2026, раздел 91 ARCHITECTURE.md): backend кладёт
+# файл-запрос .update-request в корень проекта, юнит .path замечает его и запускает
+# «update.sh --web» от root. Сам backend прав root не получает — он может только попросить
+# поставить то, что уже лежит в origin/main, ровно как «sudo ./update.sh».
+write_web_update_units() {
+  $SUDO tee "/etc/systemd/system/oracle-t-update-web.service" >/dev/null <<UNIT
+[Unit]
+Description=Sova Scanner: обновление по запросу из интерфейса
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$ROOT_DIR/update.sh --web
+Environment=NO_COLOR=1
+# Сборка интерфейса и pip на слабом сервере идут минутами.
+TimeoutStartSec=1h
+UNIT
+
+  $SUDO tee "/etc/systemd/system/oracle-t-update-web.path" >/dev/null <<UNIT
+[Unit]
+Description=Sova Scanner: ожидание запроса обновления из интерфейса
+
+[Path]
+PathExists=$ROOT_DIR/.update-request
+Unit=oracle-t-update-web.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable --now oracle-t-update-web.path
+}
+
 write_nginx_site() {
   publish_static
 
@@ -1007,6 +1041,7 @@ publish_static() {
 step_services_update() {
   step "Перезапуск"
   task "новая статика интерфейса ($WEB_ROOT)" publish_static
+  soft "обновление из интерфейса (oracle-t-update-web.path)" write_web_update_units
   task "перезапуск backend" $SUDO systemctl restart "$SERVICE_NAME"
   step_end
 }
@@ -1017,6 +1052,7 @@ step_services() {
   # restart, а не «enable --now»: на уже работающей службе «enable --now» ничего не делает,
   # и после повторного запуска установщика backend продолжал бы крутить старый код.
   task "автозапуск backend" $SUDO systemctl enable "$SERVICE_NAME"
+  soft "обновление из интерфейса (oracle-t-update-web.path)" write_web_update_units
   task "перезапуск backend" $SUDO systemctl restart "$SERVICE_NAME"
   soft "разрешение SELinux на проксирование" selinux_allow_proxy
   task "сайт nginx ($WEB_ROOT)" write_nginx_site

@@ -4807,3 +4807,45 @@ RouterAI из раздела 87: теперь этот клиент обраща
 
 Тесты — `test_all_feed_merges_republished_procedure_without_eis_number` (`test_gosplan.py`),
 `test_portal_500_on_new_rows_falls_back_to_package_without_them` (`test_bitrix_ai.py`).
+
+## 91. Обновление из интерфейса администратора (09.11.2026)
+
+Зачем: зайти на сервер и выполнить `sudo ./update.sh` удаётся не всегда. Раздел «Система →
+Обновление» (`/system-update`, только админ) делает то же самое из браузера.
+
+- **Проверка.** При открытии страница вызывает `POST /system/update/check`: backend запускает
+  настоящий `update.sh --check` (его вывод показывается как есть — «как в консоли») и затем
+  разбирает разницу средствами git: коммиты `HEAD..origin/main`, `--shortstat`, новые файлы
+  миграций, изменения `requirements.txt`/`package*.json`/`install.sh`/`update.sh`, а также
+  новые записи `changelog.ts` (сравниваются версии файла в HEAD и origin/main, запись той же
+  даты и заголовка — только дописанными пунктами). Root для этого не нужен: служба backend
+  работает от владельца каталога (install.sh, `SUDO_USER`), git — от него же.
+- **Установка без прав root у backend.** Дамп базы идёт от postgres, а install.sh
+  перезапускает саму службу backend — выполнять обновление внутри backend нельзя. Backend
+  атомарно (tmp + rename) кладёт файл-запрос `.update-request` в корень проекта; юнит
+  `oracle-t-update-web.path` (`PathExists`) запускает `oracle-t-update-web.service` →
+  `update.sh --web` от root. Backend может лишь попросить поставить то, что уже лежит в
+  `origin/main`, — ровно как ручной запуск. Содержимое запроса update.sh только читает
+  (`force=1`, имя пользователя через `tr -cd`), не исполняет, и удаляет сразу — иначе `.path`
+  перезапускал бы службу.
+- **Ход и итог.** `update.sh --web` пишет весь вывод (свой и install.sh) в `update-web.log`,
+  состояние — `update-web.state` (`ключ=значение`: running → success/failed, код, from/to,
+  кто запустил; итог дописывает `trap EXIT`). Страница опрашивает `GET /system/update/run`
+  раз в 2 с и переживает перезапуск backend (ошибки сети во время установки ожидаемы —
+  показывается «Sova перезапускается»). Состояние `running` при неактивной службе
+  (`systemctl is-active`) показывается как «прервано»; запрос, не забранный за минуту, — с
+  подсказкой проверить `.path`-юнит. Незабранный запрос можно отменить, идущее обновление —
+  нельзя (прерванные миграции/сборка хуже).
+- **Одновременные запуски** (таймер, консоль, кнопка) исключены `flock` на `.update.lock` в
+  `do_update`.
+- **Юниты ставит install.sh** (`write_web_update_units`, и при установке, и при `--update`,
+  мягким шагом). Поэтому кнопка заработает после первого обновления новой версией —
+  вручную или ночным автообновлением; до этого страница объясняет, что сделать.
+- Режимы: `server` — всё доступно; `local` (стенд run.sh) — только проверка; backend в
+  docker (нет `update.sh` рядом) — объяснение, что обновлять на хосте.
+- Код: `update.sh` (`--web`, `web_begin`/`web_finish`), `install.sh`
+  (`write_web_update_units`), `services/system_update_service.py`,
+  `api/endpoints/system_update.py`, `pages/SystemUpdate.tsx`. Тесты —
+  `tests/test_system_update_service.py`. Настройки `UPDATE_ROOT_DIR`, `UPDATE_BRANCH`.
+- Не сделано: включение/выключение ночного автообновления из интерфейса (только показ) и
+  значок «есть обновление» в меню.

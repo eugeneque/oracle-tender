@@ -12,6 +12,7 @@
 #      sudo ./update.sh --enable-auto    обновляться автоматически каждую ночь (02:30 МСК)
 #      sudo ./update.sh --disable-auto   выключить автообновление
 #      sudo ./update.sh --status         версия, наличие обновления, состояние автообновления
+#      update.sh --web                   запуск из интерфейса Sova (служба oracle-t-update-web, см. ниже)
 #      ./update.sh --help                остальные ключи
 #
 #  Старую версию удалять и ставить заново НЕ нужно — и нельзя: в каталоге проекта лежат
@@ -30,10 +31,20 @@ TIMER_NAME="oracle-t-update"
 AUTO_TIME="02:30"          # ночью: опрос площадок в 06:00 и 20:00, служебные задачи в 03:15 и 04:00
 KEEP_BACKUPS=10
 
+# Обновление из интерфейса (09.11.2026, раздел 91 ARCHITECTURE.md). Backend работает не от
+# root и сам обновиться не может (дамп от postgres, перезапуск собственной службы), поэтому
+# он лишь кладёт файл-запрос; юнит oracle-t-update-web.path (ставит install.sh) замечает его
+# и запускает «update.sh --web» от root. Ход и итог пишутся в файлы, которые читает backend.
+WEB_REQUEST="$ROOT_DIR/.update-request"
+WEB_LOG="$ROOT_DIR/update-web.log"
+WEB_STATE="$ROOT_DIR/update-web.state"
+
 ACTION="update"
 ASSUME_YES=0
 FORCE=0
 AUTO=0
+WEB=0
+WEB_RESULT="updated"
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -68,6 +79,7 @@ Sova Scanner — обновление с GitHub.
   -y, --yes            не спрашивать подтверждения
   --force              развернуть заново, даже если версия уже последняя
   --auto               режим таймера: без вопросов, молча выйти, если обновлений нет
+  --web                режим запуска из интерфейса: вывод в update-web.log, итог в update-web.state
 
 Переменные окружения: UPDATE_BRANCH (по умолчанию main), UPDATE_REPO_URL, NO_COLOR.
 Журнал: update.log в корне проекта.
@@ -87,6 +99,7 @@ parse_args() {
       -y|--yes) ASSUME_YES=1; shift ;;
       --force) FORCE=1; shift ;;
       --auto) AUTO=1; ASSUME_YES=1; shift ;;
+      --web) WEB=1; ASSUME_YES=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) printf 'Неизвестный ключ: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
     esac
@@ -233,6 +246,51 @@ backup_database() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
+#  Запуск из интерфейса (--web)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Состояние — «ключ=значение» построчно: backend читает его без bash. Пишем через
+# временный файл, чтобы интерфейс не застал файл наполовину записанным.
+web_state() {
+  local tmp="$WEB_STATE.tmp"
+  printf '%s\n' "$@" >"$tmp"
+  chmod 644 "$tmp"
+  mv -f "$tmp" "$WEB_STATE"
+}
+
+web_begin() {
+  local owner force=0 requested_by=""
+  owner="$(repo_owner)"
+  OWNER="$owner"   # git под root отказался бы читать «чужой» репозиторий (safe.directory)
+  # Запрос удаляем сразу: пока файл есть, юнит .path запускал бы обновление снова и снова.
+  # Содержимое только читаем построчно (grep), не исполняем — файл пишет backend.
+  if [ -f "$WEB_REQUEST" ]; then
+    grep -qx 'force=1' "$WEB_REQUEST" 2>/dev/null && force=1
+    requested_by="$(sed -n 's/^user=//p' "$WEB_REQUEST" 2>/dev/null | head -1 | tr -cd '[:alnum:]@._ -')"
+    rm -f "$WEB_REQUEST"
+  fi
+  [ "$force" = 1 ] && FORCE=1
+  WEB_STARTED="$(date -Iseconds)"
+  WEB_FROM="$(git_ rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+  WEB_BY="$requested_by"
+  : >"$WEB_LOG"
+  chmod 644 "$WEB_LOG"
+  chown "$owner" "$WEB_LOG" 2>/dev/null || true
+  exec >>"$WEB_LOG" 2>&1
+  web_state "state=running" "started=$WEB_STARTED" "from=$WEB_FROM" "by=$WEB_BY" "force=$force"
+  trap 'web_finish $?' EXIT
+  log_line "запуск из интерфейса${WEB_BY:+: $WEB_BY}"
+}
+
+web_finish() {
+  local rc="$1" state="success" to
+  [ "$rc" = 0 ] || state="failed"
+  to="$(git_ rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+  web_state "state=$state" "code=$rc" "result=$([ "$rc" = 0 ] && printf '%s' "$WEB_RESULT" || printf 'error')" \
+    "started=$WEB_STARTED" "finished=$(date -Iseconds)" "from=$WEB_FROM" "to=$to" "by=$WEB_BY"
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
 #  Действия
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -264,6 +322,12 @@ do_check() {
 
 do_update() {
   need_root
+  # Таймер, ручной запуск и кнопка в интерфейсе не должны обновлять одновременно: второй
+  # git merge и вторая сборка поверх первой оставили бы установку в непонятном состоянии.
+  if have flock; then
+    exec 9>"$ROOT_DIR/.update.lock"
+    flock -n 9 || die "Обновление уже идёт (запущено таймером, из интерфейса или вручную) — дождитесь его окончания."
+  fi
   adopt_checkout
   ADOPTED="${ADOPTED:-0}"
 
@@ -271,6 +335,7 @@ do_update() {
     "$C_B" "$C_OFF" "$C_DIM" "$MODE" "$BRANCH" "$C_OFF"
 
   if ! do_check && [ "$FORCE" != 1 ]; then
+    WEB_RESULT="uptodate"
     [ "$AUTO" = 1 ] || say ""
     return 0
   fi
@@ -409,6 +474,7 @@ do_disable_auto() {
 
 main() {
   parse_args "$@"
+  [ "$WEB" = 1 ] && web_begin
   have git || die "git не установлен: sudo apt install git"
   OWNER="$(repo_owner)"
   detect_mode

@@ -30,6 +30,7 @@ export const SECTION_ROLES: Record<string, UserRole[]> = {
   "/apps": ["admin", "user"],
   "/users": ["admin"],
   "/ai": ["admin"],
+  "/system-update": ["admin"],
 };
 
 export function canOpen(user: User | null | undefined, to: string): boolean {

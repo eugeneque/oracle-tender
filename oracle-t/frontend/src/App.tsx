@@ -15,6 +15,7 @@ import { HomePage } from "./pages/Home";
 import { LoginPage } from "./pages/Login";
 import { LogsPage } from "./pages/Logs";
 import { SettingsPage } from "./pages/Settings";
+import { SystemUpdatePage } from "./pages/SystemUpdate";
 import { TenderFullPage } from "./pages/TenderFull";
 import { TendersPage } from "./pages/Tenders";
 import { UsersPage } from "./pages/Users";
@@ -57,6 +58,14 @@ export default function App() {
             element={
               <ProtectedRoute requireRole="admin">
                 <AiSettingsPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/system-update"
+            element={
+              <ProtectedRoute requireRole="admin">
+                <SystemUpdatePage />
               </ProtectedRoute>
             }
           />

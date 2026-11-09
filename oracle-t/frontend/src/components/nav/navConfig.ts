@@ -3,6 +3,7 @@ import {
   Ban,
   BarChart3,
   CheckCircle2,
+  CloudDownload,
   Boxes,
   BrainCircuit,
   Building2,
@@ -88,6 +89,8 @@ export const NAV_ITEMS: NavItem[] = [
   // 23.10.2026: «Интеграции» разделены — ИИ отдельным пунктом, внешние сервисы — «Приложения».
   { label: "Модели ИИ", to: "/ai", icon: BrainCircuit, hint: "Ключи моделей и расход токенов", group: "system" },
   { label: "Приложения", to: "/apps", icon: LayoutGrid, hint: "Bitrix24, почта, Rusprofile", group: "system" },
+  // 09.11.2026: обновление с GitHub из интерфейса — без входа на сервер (раздел 91).
+  { label: "Обновление", to: "/system-update", icon: CloudDownload, hint: "Новая версия с GitHub", group: "system" },
   { label: "Логирование", to: "/logs", icon: ScrollText, hint: "Журнал операций системы", group: "system" },
   { label: "Настройки", to: "/settings", icon: Settings, hint: "Источники, профиль отбора, вид меню", group: "system", sidebarFooter: true },
 ];
