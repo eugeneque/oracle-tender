@@ -483,3 +483,39 @@ def test_delivery_region_from_delivery_point_address(db_session, client, admin_u
     fields = service.build_deal_fields(db_session, tender)
     assert fields["delivery_region"] == "Иркутская область"
     assert fields["customer_region"] == "Красноярский край"
+
+
+def test_twin_record_sends_analysis_of_primary_record(db_session, client, admin_user):
+    """32616544947 (10.11.2026): выгружали запись закупки, у которой разбор хранится у основной
+    записи (`analysis_tender_id`, tender_twins). Пакет собирался по самой записи — в сделку
+    ушла одна выжимка, без требований и документов. Разбор должен браться у основной записи,
+    а журнал запросов и сделка — оставаться у записи, с которой выгружали."""
+
+    _configure(db_session, admin_user)
+    primary = _tender(db_session)
+    primary.registry_number = primary.external_id
+    source = Source(key=f"b24tw_{uuid.uuid4().hex[:8]}", name="Госплан", url="https://example.test", type="eis")
+    db_session.add(source)
+    db_session.flush()
+    twin = Tender(
+        source_id=source.id,
+        external_id=primary.external_id,
+        registry_number=primary.external_id,
+        title=primary.title,
+        currency="RUB",
+        customer_name=primary.customer_name,
+        analysis_tender_id=primary.id,
+        stage="under_review",
+    )
+    db_session.add(twin)
+    db_session.flush()
+
+    receiver = FakeReceiver()
+    service.upload_from_card(db_session, twin, actor=admin_user, transport=httpx.MockTransport(receiver))
+
+    payload = receiver.requests[-1]["payload"]
+    rows = [row for rows in payload["sections"].values() for row in rows]
+    assert any("Класс точности" in json.dumps(row, ensure_ascii=False) for row in rows)
+    assert payload["lookup"]["customer_inn"] == "2460069527"
+    state = service.tender_state(db_session, twin)
+    assert state["last_request"]["accepted"] and state["deal_id"] == 1984

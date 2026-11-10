@@ -62,7 +62,7 @@ from app.models.tender import Tender, TenderStage, TenderStatus, TenderType
 from app.models.tender_card import TenderCard
 from app.models.tender_document import TenderDocument
 from app.models.user import User
-from app.services import tender_positions
+from app.services import tender_positions, tender_twins
 from app.services.audit import log_action
 from app.services.tender_key_facts import KeyFact, is_generic_norm, key_facts, priority, split_requirement
 
@@ -283,11 +283,11 @@ def customer_inn(db: Session, tender: Tender) -> str | None:
     В модели тендера ИНН нет, а портал ищет по нему компанию; сначала — раздел про
     заказчика, затем любой ИНН карточки. Только 10 или 12 цифр — иначе портал отклонит пакет."""
 
-    card = db.get(TenderCard, tender.id)
-    if card is None:
-        return None
+    # Карточка может лежать и у самой записи, и у основной записи закупки (tender_twins):
+    # Госплан и площадка карточку ЕИС не загружают.
+    cards = [db.get(TenderCard, item.id) for item in dict.fromkeys((tender, tender_twins.subject(db, tender)))]
     candidates: list[tuple[int, str]] = []
-    for section in (card.payload or {}).get("sections", []) or []:
+    for section in [s for card in cards if card is not None for s in (card.payload or {}).get("sections", []) or []]:
         title = str(section.get("title") or "").lower()
         for field in section.get("fields", []) or []:
             if not isinstance(field, (list, tuple)) or len(field) < 2:
@@ -988,13 +988,26 @@ def _brand_lock_signal(lock: "BrandLock | None", sections: dict[str, list]) -> N
 
 
 def _deal_id(db: Session, tender: Tender) -> int:
-    link = db.get(BitrixDealLink, tender.id)
-    return int(link.deal_id) if link and link.deal_id else 0
+    """Сделка закупки: выгружена с этой записи или с основной записи той же закупки."""
+
+    for item in dict.fromkeys((tender, tender_twins.subject(db, tender))):
+        link = db.get(BitrixDealLink, item.id)
+        if link and link.deal_id:
+            return int(link.deal_id)
+    return 0
 
 
 def build_payload(
     db: Session, tender: Tender, *, full_snapshot: bool = False, request_id: str | None = None
 ) -> dict[str, Any]:
+    # Разбор закупки — требования, матрица, документы, условия поставки, заключение ИИ —
+    # хранится у основной записи (tender_twins, 29.09.2026), а в Bitrix24 выгружают ту запись,
+    # которую открыл пользователь (ЕИС, площадка или Госплан). Пакет собирался по самой записи,
+    # и у 32616544947 (10.11.2026) в сделку ушли поля и пустая выжимка — без разбора ИИ и без
+    # документов. Теперь данные берутся у основной записи; журнал запросов и связь со сделкой —
+    # по-прежнему у записи, с которой выгружали.
+    deal_id = _deal_id(db, tender)
+    tender = tender_twins.subject(db, tender)
     sections = build_sections(db, tender)
     now = datetime.now(timezone.utc)
     digest = hashlib.sha1(
@@ -1003,7 +1016,7 @@ def build_payload(
     return {
         "schema_version": SCHEMA_VERSION,
         "request_id": request_id or f"sova-{uuid.uuid4()}",
-        "deal_id": _deal_id(db, tender),
+        "deal_id": deal_id,
         # Новая версия анализа на каждую отправку: портал ведёт по ней историю строк.
         "analysis_id": f"sova-{tender.id.hex[:12]}-{now:%Y%m%dT%H%M%SZ}-{digest}-{uuid.uuid4().hex[:6]}",
         "generated_at": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
