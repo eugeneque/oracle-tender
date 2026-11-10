@@ -160,6 +160,8 @@ def test_payload_shape_matches_portal_contract(db_session, client, admin_user):
     assert fields["application_end"] == "2026-10-30T10:00:00+03:00"
     # Пустые значения не передаются вовсе.
     assert "delivery_region" not in fields
+    # Регион заказчика — запасное значение для портала (10.11.2026): по коду в ИНН заказчика.
+    assert fields["customer_region"] == "Красноярский край"
 
     tz = payload["sections"]["technical_specification"]
     prep = payload["sections"]["preparation"]
@@ -461,3 +463,23 @@ def test_portal_500_on_minimal_package_names_portal_side(db_session, client, adm
     assert "даже минимальный пакет" in result["error"]
     assert "2460069527" in result["error"]
     assert receiver.requests[-1]["payload"]["request_id"] in result["error"]
+
+
+def test_delivery_region_from_delivery_point_address(db_session, client, admin_user):
+    """Замечание администратора Bitrix24 10.11.2026: порталу нужен регион поставки. Если в
+    разборе закупки его нет, он берётся по адресу места поставки из условий поставки."""
+
+    from app.models.tender_delivery import TenderDeliveryTerms
+
+    tender = _tender(db_session)
+    db_session.add(
+        TenderDeliveryTerms(
+            tender_id=tender.id,
+            payload={"points": [{"delivery_address": "664033, Иркутская область, г. Иркутск, ул. Лермонтова, 257"}]},
+        )
+    )
+    db_session.flush()
+
+    fields = service.build_deal_fields(db_session, tender)
+    assert fields["delivery_region"] == "Иркутская область"
+    assert fields["customer_region"] == "Красноярский край"

@@ -372,8 +372,40 @@ def build_lookup(db: Session, tender: Tender) -> dict[str, Any]:
 from app.services.eis_card_dates import card_dates, parse_card_datetime  # noqa: E402,F401
 
 
+def delivery_region(db: Session, tender: Tender) -> str | None:
+    """Регион поставки: код из разбора закупки, иначе — по адресу первого места поставки из
+    условий поставки (раздел 85). Замечание администратора Bitrix24 10.11.2026: поле нужно
+    порталу для обязательных полей новой компании, а у 32616544947 его в пакете не было."""
+
+    if tender.region_delivery_code:
+        region = db.get(Region, tender.region_delivery_code)
+        if region:
+            return region.name
+    from app.services.delivery_terms_service import get_terms
+    from app.services.region_resolver import region_from_address
+
+    for point in get_terms(db, tender)["points"]:
+        region = region_from_address(db, point.get("delivery_address"))
+        if region:
+            return region.name
+    return None
+
+
+def customer_region(db: Session, tender: Tender) -> str | None:
+    """Регион заказчика — запасное значение для портала, когда региона поставки нет
+    (замечание 10.11.2026): регион организатора из разбора, иначе по коду в ИНН заказчика."""
+
+    if tender.region_organizer_code:
+        region = db.get(Region, tender.region_organizer_code)
+        if region:
+            return region.name
+    from app.services.region_resolver import region_from_inn
+
+    region = region_from_inn(db, customer_inn(db, tender))
+    return region.name if region else None
+
+
 def build_deal_fields(db: Session, tender: Tender) -> dict[str, Any]:
-    region = db.get(Region, tender.region_delivery_code) if tender.region_delivery_code else None
     dates = card_dates(db, tender)
     subject = _clip(tender.title, 180) or "Закупка"
     return _compact(
@@ -384,7 +416,8 @@ def build_deal_fields(db: Session, tender: Tender) -> dict[str, Any]:
             "procedure_url": tender.source_url,
             "direction": _direction(tender),
             "tender_types": _tender_types(tender),
-            "delivery_region": region.name if region else None,
+            "delivery_region": delivery_region(db, tender),
+            "customer_region": customer_region(db, tender),
             "procurement_method": _clip(tender.procurement_method, 255),
             # Карточка точнее: окончание подачи в модели — дата из списка выдачи ЕИС без времени.
             "application_start": _iso(dates.get("application_start") or tender.application_start),

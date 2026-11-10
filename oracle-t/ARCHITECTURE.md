@@ -4827,6 +4827,21 @@ RouterAI из раздела 87: теперь этот клиент обраща
 Тесты — `test_portal_500_without_new_rows_falls_back_to_minimal_package`,
 `test_portal_500_on_minimal_package_names_portal_side`.
 
+### Регион поставки и регион заказчика (10.11.2026)
+
+Ответ администратора Bitrix24 по 500 у 32616544947: компании вручную заводятся с тремя
+обязательными полями, и портал падал, создавая компанию сам. На портале настроено
+автозаполнение этих полей; для него нужен регион.
+
+- `deal_fields.delivery_region` — `delivery_region()`: код из разбора закупки, иначе регион
+  по адресу первого места поставки (`tender_delivery_terms`, `region_from_address`).
+- `deal_fields.customer_region` (новое поле, имя согласовано с порталом) — `customer_region()`:
+  регион организатора из разбора, иначе по коду в ИНН заказчика (`region_from_inn`).
+  Передаётся всегда, портал берёт его, когда региона поставки нет.
+
+Тесты — `test_delivery_region_from_delivery_point_address`, проверка `customer_region` в
+`test_payload_shape_matches_portal_contract`.
+
 ## 91. Обновление из интерфейса администратора (09.11.2026)
 
 Зачем: зайти на сервер и выполнить `sudo ./update.sh` удаётся не всегда. Раздел «Система →
