@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from pathlib import Path
 import pydantic
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 
 from app.models.meter_market import MeterMarketModification, MeterMarketType
@@ -42,6 +44,15 @@ SYSTEM_PROMPT = f"""\
 профиль нагрузки, тарифное расписание, защищённый обмен с системой учёта, встроенный
 коммутационный аппарат для управления нагрузкой (для прямого включения) и т. п. Простейшие
 счётчики — без цифровых интерфейсов, журналов и профилей — не соответствуют.
+
+Как считать интерфейсы. Поле «интерфейс» у модификации перечисляет только каналы удалённой
+связи (GSM, RS-485, PLC, RF, LoRa, Ethernet и т. п.). Оптический порт в нём НЕ указывают никогда —
+его отсутствие в поле не значит, что оптопорта нет. Оптический порт — это уже один интерфейс:
+если оптопорт есть (так сказано в описании типа или ты знаешь это о линейке), модификация с одним
+удалённым каналом (например, «GSM») имеет два интерфейса. Не отвечай "no" только потому, что в
+поле «интерфейс» указан один канал. Если ниже приведён фрагмент «Описания типа», он важнее
+твоих общих знаний: что в нём сказано про состав счётчика (оптический порт, каналы связи, журнал,
+реле, профиль), то и считай общим для всех модификаций типа.
 
 Тебе дан тип средства измерений и список его модификаций (в одном описании типа бывают и
 интеллектуальные, и простейшие исполнения). По каждой модификации дай вердикт:
@@ -75,7 +86,35 @@ class TypeAnswer(pydantic.BaseModel):
     verdicts: list[ModificationVerdict]
 
 
-def _type_text(meter_type: MeterMarketType, modifications: list[MeterMarketModification]) -> str:
+# Сколько знаков «Описания типа» передавать модели: раздел «Описание средства измерений»
+# (состав, интерфейсы, функции) укладывается в 2–4 тыс. знаков.
+DESCRIPTION_CHARS = 4000
+_DESCRIPTION_HEAD = re.compile(r"описание\s+средства\s+измерени", re.IGNORECASE)
+
+
+def description_excerpt(db: Session, mit_number: str) -> str | None:
+    """Фрагмент «Описания типа» из Аршина (`si_types.description_type_text`) для модели.
+
+    Замечание тестировщика 11.11.2026: КПЗ M2M-1/M2M-3 соответствуют ПП 890, а ИИ ответил «не
+    соответствует» — видимо, по полю «интерфейс: GSM» решил, что интерфейс один. В описании типа
+    прямо сказано: «оптический порт, основной канал связи: 2G (GPRS)…», — это два интерфейса.
+    Модель видела только справочник, где оптопорт не указывают; теперь, если текст описания
+    загружен, она видит и его."""
+
+    text_value = db.execute(
+        sql_text("SELECT description_type_text FROM si_types WHERE si_code = :c AND description_type_text <> '' LIMIT 1"),
+        {"c": mit_number},
+    ).scalar()
+    if not text_value:
+        return None
+    head = _DESCRIPTION_HEAD.search(text_value)
+    start = head.start() if head else 0
+    return re.sub(r"[ \t]+", " ", text_value[start : start + DESCRIPTION_CHARS]).strip()
+
+
+def _type_text(
+    meter_type: MeterMarketType, modifications: list[MeterMarketModification], description: str | None = None
+) -> str:
     lines = [
         f"Тип СИ: {meter_type.mit_number}",
         f"Обозначение: {meter_type.notation or '—'}",
@@ -89,6 +128,10 @@ def _type_text(meter_type: MeterMarketType, modifications: list[MeterMarketModif
             f"- id={mod.id}; {mod.name}; фаза: {mod.phase or 'н/д'}; интерфейс: {mod.interface or 'н/д'}; "
             f"МПИ, лет: {mod.mpi_years if mod.mpi_years is not None else 'н/д'}"
         )
+    if description:
+        lines += ["", "Фрагмент «Описания типа» (ФГИС «Аршин»):", description]
+    else:
+        lines += ["", "«Описание типа» не загружено — суди по обозначению и знаниям о линейке."]
     return "\n".join(lines)
 
 
@@ -98,7 +141,7 @@ def classify_type(db: Session, meter_type: MeterMarketType, modifications: list[
     answer = run_structured(
         db,
         system_prompt=SYSTEM_PROMPT,
-        user_text=_type_text(meter_type, modifications),
+        user_text=_type_text(meter_type, modifications, description_excerpt(db, meter_type.mit_number)),
         response_model=TypeAnswer,
         temperature=0.0,
     )
@@ -121,13 +164,17 @@ def classify_type(db: Session, meter_type: MeterMarketType, modifications: list[
     return done
 
 
-def run(db: Session, *, mode: str = "new", limit_types: int | None = None) -> dict[str, int]:
+def run(
+    db: Session, *, mode: str = "new", limit_types: int | None = None, mit_numbers: list[str] | None = None
+) -> dict[str, int]:
     """Оценивает типы отчёта. `mode`: `new` — только те, которых ИИ ещё не смотрел; `unknown` —
-    ещё и те, где ИИ ответил «не определено» (после смены промпта); `all` — все, кроме ручных."""
+    ещё и те, где ИИ ответил «не определено» (после смены промпта); `all` — все, кроме ручных.
+    `mit_numbers` — только эти типы (перепроверка по замечанию, без прохода по всему отчёту)."""
 
-    types = db.scalars(
-        select(MeterMarketType).where(MeterMarketType.in_report.is_(True)).order_by(MeterMarketType.mit_number)
-    ).all()
+    query_types = select(MeterMarketType).where(MeterMarketType.in_report.is_(True))
+    if mit_numbers:
+        query_types = query_types.where(MeterMarketType.mit_number.in_(mit_numbers))
+    types = db.scalars(query_types.order_by(MeterMarketType.mit_number)).all()
     stats = {"types": 0, "modifications": 0, "failed": 0}
     for meter_type in types:
         if limit_types is not None and stats["types"] >= limit_types:
@@ -162,7 +209,15 @@ def run(db: Session, *, mode: str = "new", limit_types: int | None = None) -> di
 if __name__ == "__main__":
     from app.db.session import SessionLocal
 
+    usage = "python -m app.services.meter_market_smart run [--unknown | --all] [--types 79474-20,79481-20]"
     if len(sys.argv) < 2 or sys.argv[1] != "run":
-        raise SystemExit("python -m app.services.meter_market_smart run [--unknown | --all]")
+        raise SystemExit(usage)
+    selected = None
+    if "--types" in sys.argv:
+        position = sys.argv.index("--types")
+        if position + 1 >= len(sys.argv):
+            raise SystemExit(usage)
+        selected = [x.strip() for x in sys.argv[position + 1].split(",") if x.strip()]
     with SessionLocal() as session:
-        print(run(session, mode="all" if "--all" in sys.argv else "unknown" if "--unknown" in sys.argv else "new"))
+        mode = "all" if "--all" in sys.argv else "unknown" if "--unknown" in sys.argv else "new"
+        print(run(session, mode=mode, mit_numbers=selected))
