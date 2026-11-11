@@ -2343,7 +2343,7 @@ export interface MarketLocalization {
   rows: MarketLocalizationRow[];
   totals: Record<string, number>;
   total: number;
-  /** Поверки модификаций без даты внесения в РПП — посчитаны с начала периода. */
+  /** Поверки модификаций без даты внесения в РПП — не учтены (11.11.2026). */
   undated: number;
   requirement: number | null;
   requirement_years: number[];

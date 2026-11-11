@@ -530,7 +530,7 @@ class LocVerdict:
 
 
 REASON_IN_RPP = "в РПП на дату поверки"
-REASON_UNDATED = "в РПП, дата внесения неизвестна — учтено с начала периода"
+REASON_UNDATED = "в РПП, но дата внесения неизвестна — не учитывается (дата приходит из ГИСП или вносится в справочнике)"
 REASON_TYPE_INHERITED = (
     "исполнение в написании не указано полностью, но все исполнения типа в РПП с одинаковыми баллами"
 )
@@ -554,8 +554,12 @@ def rpp_verdict(records: list[RppRecord], day: date) -> LocVerdict:
     scored = [r for r in valid if r.score is not None]
     if scored:
         record = max(scored, key=lambda r: r.issued)
-        reason = REASON_UNDATED if record.issued == date.min else REASON_IN_RPP
-        return LocVerdict(True, float(record.score), reason, record)
+        if record.issued == date.min:
+            # Решение 11.11.2026 (замечание тестировщика по КПЗ, 1 кв. 2025): без даты внесения
+            # поверки не учитываются. Раньше считались с начала периода — и в I кв. 2025 попадали
+            # поверки КПЗ до 28.03.2025, когда исполнения на самом деле внесли в РПП.
+            return LocVerdict(False, None, REASON_UNDATED, record)
+        return LocVerdict(True, float(record.score), REASON_IN_RPP, record)
     if valid:
         return LocVerdict(False, None, "в действующей записи РПП нет баллов", max(valid, key=lambda r: r.issued))
     last = max(issued, key=lambda r: r.valid_to or date.max)
@@ -754,14 +758,14 @@ def localization(db: Session, edge: date, requirement: int | None = None) -> dic
     считаются. Если у исполнения есть история записей ГИСП (`meter_market_rpp_records`: 83 →
     95 → 113 баллов), поверка относится к записи, действовавшей на дату поверки, — и к её
     «требованиям года» (`rpp_verdict`). Без истории — баллы модификации с даты
-    `rpp_included_at`; если и даты нет (в файле аналитика её нет), поверки считаются с начала
-    периода, а их количество отдаётся отдельно (`undated`) — расхождение видно, а не спрятано.
+    `rpp_included_at`; если и даты нет (в файле аналитика её нет), поверки не учитываются
+    (решение 11.11.2026), а их количество отдаётся отдельно (`undated`) — пропуск виден, а не спрятан.
     Месяц, внутри которого меняется запись, делится точно — по сырым поверкам."""
 
     names = _manufacturer_names(db)
     limits = thresholds(db)
     quarters = localization_quarters(edge)
-    pieces, _, undated_mods = localization_ledger(db, edge)
+    pieces, _, _ = localization_ledger(db, edge)
     empty = {"quarters": quarters, "rows": [], "totals": {q: 0 for q in quarters}, "total": 0, "undated": 0,
              "requirement": requirement, "requirement_years": sorted({y for y, _ in limits})}
 
@@ -769,14 +773,12 @@ def localization(db: Session, edge: date, requirement: int | None = None) -> dic
     undated = 0
     for piece in pieces:
         verdict = piece.verdict
+        if verdict.reason == REASON_UNDATED:
+            undated += piece.count  # не учтены — число показывается над таблицей
         if not verdict.included or piece.count <= 0:
             continue
         if requirement is not None and requirement_reason(verdict.score, requirement, limits):
             continue
-        if piece.modification_id in undated_mods or (
-            piece.unmapped_type_id and verdict.record and verdict.record.issued == date.min
-        ):
-            undated += piece.count
         table[piece.manufacturer_id][verdict.score][piece.quarter] += piece.count
 
     rows = []

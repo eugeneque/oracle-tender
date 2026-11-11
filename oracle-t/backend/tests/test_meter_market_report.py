@@ -109,8 +109,8 @@ def test_localization_counts_from_rpp_inclusion_date_and_filters_by_requirement(
     rows = {r["name"]: r for r in data["rows"]}
     # Внесено 15.08.2026: июль (100) не в счёт, в августе — 30 поверок с 15-го, а не все 40.
     assert rows["Завод НАРТИС"]["quarters"]["2026-3"] == 30
-    # Дата внесения неизвестна — считается, но отдельно видно, сколько таких поверок.
-    assert rows["АтомЦифроСбыт"]["total"] == 50 and data["undated"] == 50
+    # Дата внесения неизвестна — не учитывается (решение 11.11.2026), но видно, сколько таких поверок.
+    assert "АтомЦифроСбыт" not in rows and data["undated"] == 50
     only_2025 = report.localization(db_session, date(2026, 10, 1), requirement=2025)
     assert [r["name"] for r in only_2025["rows"]] == ["Завод НАРТИС"]
 

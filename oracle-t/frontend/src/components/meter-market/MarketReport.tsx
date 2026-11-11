@@ -630,8 +630,8 @@ function LocalizationScreen({
             {data.undated > 0 && (
               <p className="mb-3 flex items-center gap-1.5 text-xs text-amber-400">
                 <AlertTriangle size={13} />
-                {fmt(data.undated)} поверок — у исполнений без даты внесения в РПП: посчитаны с начала периода. Дата
-                приходит из ГИСП или вносится в справочнике.
+                {fmt(data.undated)} поверок не учтено — у исполнений нет даты внесения в РПП. Дата приходит из ГИСП
+                или вносится в справочнике.
               </p>
             )}
             <MatrixTable
