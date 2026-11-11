@@ -24,7 +24,7 @@ from __future__ import annotations
 import io
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -531,6 +531,9 @@ class LocVerdict:
 
 REASON_IN_RPP = "в РПП на дату поверки"
 REASON_UNDATED = "в РПП, дата внесения неизвестна — учтено с начала периода"
+REASON_TYPE_INHERITED = (
+    "исполнение в написании не указано полностью, но все исполнения типа в РПП с одинаковыми баллами"
+)
 
 
 def rpp_verdict(records: list[RppRecord], day: date) -> LocVerdict:
@@ -563,11 +566,13 @@ def rpp_verdict(records: list[RppRecord], day: date) -> LocVerdict:
 class LocPiece:
     """Часть поверок исполнения за месяц с одним решением — строка «бухгалтерии» локализации."""
 
-    modification_id: int
+    modification_id: int | None
     manufacturer_id: int | None
     month: date
     count: int
     verdict: LocVerdict
+    # Неразмеченные написания типа, унаследовавшие общую запись РПП его исполнений.
+    unmapped_type_id: int | None = None
 
     @property
     def quarter(self) -> str:
@@ -627,41 +632,108 @@ def localization_ledger(
     by_id = {mod["id"]: dict(mod) for mod in mods}
     if not records:
         return [], by_id, undated_mods
+    inherited = _inherited_type_records(db, records, manufacturer_id)
 
-    monthly = db.execute(
-        text(
-            "SELECT v.modification_id, mv.month, sum(mv.count) FROM meter_verification_monthly mv "
-            "JOIN meter_market_variants v ON v.id = mv.variant_id "
-            "WHERE v.modification_id = ANY(:ids) AND mv.month >= :start AND mv.month < :end GROUP BY 1, 2"
-        ),
-        {"ids": list(records), "start": start, "end": edge},
-    ).all()
+    # Источники поверок: исполнение (ключ «m») или неразмеченные написания типа (ключ «u»).
+    monthly = [
+        (("m", mod_id), month, count)
+        for mod_id, month, count in db.execute(
+            text(
+                "SELECT v.modification_id, mv.month, sum(mv.count) FROM meter_verification_monthly mv "
+                "JOIN meter_market_variants v ON v.id = mv.variant_id "
+                "WHERE v.modification_id = ANY(:ids) AND mv.month >= :start AND mv.month < :end GROUP BY 1, 2"
+            ),
+            {"ids": list(records), "start": start, "end": edge},
+        )
+    ]
+    if inherited:
+        monthly += [
+            (("u", type_id), month, count)
+            for type_id, month, count in db.execute(
+                text(
+                    "SELECT v.type_id, mv.month, sum(mv.count) FROM meter_verification_monthly mv "
+                    "JOIN meter_market_variants v ON v.id = mv.variant_id WHERE v.modification_id IS NULL "
+                    "AND v.type_id = ANY(:ids) AND mv.month >= :start AND mv.month < :end GROUP BY 1, 2"
+                ),
+                {"ids": list(inherited), "start": start, "end": edge},
+            )
+        ]
+
+    def piece(source: tuple[str, int], month: date, count: int, verdict: LocVerdict) -> LocPiece:
+        kind, key = source
+        if kind == "m":
+            return LocPiece(key, by_id[key]["manufacturer_id"], month, count, verdict)
+        if verdict.included:
+            verdict = replace(verdict, reason=REASON_TYPE_INHERITED)
+        return LocPiece(None, inherited[key][0], month, count, verdict, unmapped_type_id=key)
 
     pieces: list[LocPiece] = []
-    for mod_id, month, count in monthly:
+    for source, month, count in monthly:
         month_end = _add_months(month, 1)
-        manufacturer = by_id[mod_id]["manufacturer_id"]
-        bounds = {r.issued for r in records[mod_id]} | {
-            r.valid_to + timedelta(days=1) for r in records[mod_id] if r.valid_to
+        source_records = records[source[1]] if source[0] == "m" else inherited[source[1]][1]
+        bounds = {r.issued for r in source_records} | {
+            r.valid_to + timedelta(days=1) for r in source_records if r.valid_to
         }
         if not any(month < b < month_end for b in bounds):
-            pieces.append(LocPiece(mod_id, manufacturer, month, int(count), rpp_verdict(records[mod_id], month)))
+            pieces.append(piece(source, month, int(count), rpp_verdict(source_records, month)))
             continue
         # Запись сменилась (или истекла) внутри месяца — делим поверки месяца по дням.
+        where = "v.modification_id = :m" if source[0] == "m" else "v.modification_id IS NULL AND v.type_id = :m"
         days = db.execute(
             text(
                 "SELECT mv.verification_date, count(*) FROM meter_verifications mv "
-                "JOIN meter_market_variants v ON v.id = mv.variant_id WHERE v.modification_id = :m "
+                f"JOIN meter_market_variants v ON v.id = mv.variant_id WHERE {where} "
                 "AND mv.applicable AND NOT mv.annulled AND mv.verification_date >= :s AND mv.verification_date < :e "
                 "GROUP BY 1"
             ),
-            {"m": mod_id, "s": month, "e": month_end},
+            {"m": source[1], "s": month, "e": month_end},
         ).all()
         merged: dict[LocVerdict, int] = defaultdict(int)
         for day, day_count in days:
-            merged[rpp_verdict(records[mod_id], day)] += int(day_count)
-        pieces.extend(LocPiece(mod_id, manufacturer, month, n, verdict) for verdict, n in merged.items())
+            merged[rpp_verdict(source_records, day)] += int(day_count)
+        pieces.extend(piece(source, month, n, verdict) for verdict, n in merged.items())
     return pieces, by_id, undated_mods
+
+
+def _inherited_type_records(
+    db: Session, records: dict[int, list[RppRecord]], manufacturer_id: int | None
+) -> dict[int, tuple[int | None, list[RppRecord]]]:
+    """Типы, чьи неразмеченные написания можно учесть в локализации: тип → (производитель, записи РПП).
+
+    Замечание тестировщика 11.11.2026: у 89846-23 (КПЗ, M2M-3T) во ФГИС написано просто
+    «…трансформаторного включения M2M-3Т» без интерфейса — 1037 поверок в I кв. и 96 во II кв.
+    2026 г. не попадали в локализацию, хотя оба исполнения типа (2G и 2G-RS) внесены в РПП со
+    115 баллами. Какое именно исполнение поверено, не важно, если ответ для локализации у всех
+    исполнений один: все исполнения типа в РПП, у одного производителя и с одинаковой историей
+    записей (даты, сроки, баллы). Если хоть одно исполнение не в РПП или баллы расходятся —
+    написание по-прежнему исключается с причиной «не размечено»: угадывать нельзя."""
+
+    mf_sql = " AND t.manufacturer_id = :mf" if manufacturer_id is not None else ""
+    rows = db.execute(
+        text(
+            "SELECT t.id, t.manufacturer_id, array_agg(m.id ORDER BY m.id) FROM meter_market_types t "
+            "JOIN meter_market_modifications m ON m.type_id = t.id "
+            f"WHERE t.in_report{mf_sql} AND EXISTS (SELECT 1 FROM meter_market_variants v "
+            "WHERE v.type_id = t.id AND v.modification_id IS NULL) GROUP BY 1, 2 "
+            "HAVING bool_and(m.in_rpp) AND bool_and(m.manufacturer_override_id IS NULL "
+            "OR m.manufacturer_override_id IS NOT DISTINCT FROM t.manufacturer_id)"
+        ),
+        {"mf": manufacturer_id},
+    ).all()
+    result: dict[int, tuple[int | None, list[RppRecord]]] = {}
+    for type_id, type_manufacturer, mod_ids in rows:
+        if not all(mid in records for mid in mod_ids):
+            continue
+        signatures = {tuple(sorted((r.issued, r.valid_to, r.score) for r in records[mid])) for mid in mod_ids}
+        if len(signatures) != 1:
+            continue
+        base = sorted(records[mod_ids[0]], key=lambda r: r.issued)
+        # Номера записей у исполнений свои — общий номер показываем, только если он один.
+        numbers = {r.number for mid in mod_ids for r in records[mid]}
+        if len(numbers) > 1:
+            base = [replace(r, number=None) for r in base]
+        result[type_id] = (type_manufacturer, base)
+    return result
 
 
 def requirement_reason(score: float, requirement: int, limits: list[tuple[int, float]]) -> str | None:
@@ -701,7 +773,9 @@ def localization(db: Session, edge: date, requirement: int | None = None) -> dic
             continue
         if requirement is not None and requirement_reason(verdict.score, requirement, limits):
             continue
-        if piece.modification_id in undated_mods:
+        if piece.modification_id in undated_mods or (
+            piece.unmapped_type_id and verdict.record and verdict.record.issued == date.min
+        ):
             undated += piece.count
         table[piece.manufacturer_id][verdict.score][piece.quarter] += piece.count
 

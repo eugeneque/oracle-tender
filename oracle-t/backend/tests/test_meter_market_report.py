@@ -312,6 +312,42 @@ def test_explain_localization_matches_cell_and_names_reasons(market, db_session)
     assert only_score["value"] == 30 and only_score["excluded"] == 0
 
 
+def test_localization_counts_unmapped_spelling_when_all_type_modifications_agree(market, db_session):
+    """Замечание 11.11.2026: «…трансформаторного включения M2M-3Т» без интерфейса (89846-23) не
+    попадало в локализацию, хотя оба исполнения типа в РПП со 115 баллами. Неразмеченное
+    написание учитывается по общей записи, если все исполнения типа в РПП с одинаковыми баллами."""
+
+    from app.services import meter_market_explain as explain
+
+    db = db_session
+    t = _id(db, "INSERT INTO meter_market_types (mit_number, manufacturer_id, in_report, review_status) "
+                "VALUES ('89846-23', :m, true, 'included')", m=market["atom"])
+    mods = [
+        _id(db, "INSERT INTO meter_market_modifications (type_id, name, design, interface, in_rpp, score, "
+                "rpp_included_at) VALUES (:t, :n, 'cabinet', :i, true, 115, '2025-03-28')", t=t, n=n, i=i)
+        for n, i in (("M2M-3T 2G", "GSM"), ("M2M-3T 2G-RS", "GSM и RS"))
+    ]
+    raw = _id(db, "INSERT INTO meter_market_variants (type_id, raw, norm_key) VALUES (:t, 'M2M-3Т', 'm2m3t')", t=t)
+    db.execute(text("INSERT INTO meter_verification_monthly (variant_id, month, count) VALUES (:v, '2026-04-01', 96)"),
+               {"v": raw})
+    edge = date(2026, 10, 1)
+
+    def cell() -> int:
+        row = next(r for r in report.localization(db, edge)["rows"] if r["name"] == "АтомЦифроСбыт")
+        return row["quarters"]["2026-2"]
+
+    assert cell() == 96
+    result = explain.explain_localization(db, edge, manufacturer_id=market["atom"], quarter="2026-2")
+    assert result["value"] == 96 and result["excluded"] == 0
+    assert result["positions"][0]["basis"] == report.REASON_TYPE_INHERITED
+
+    # Баллы исполнений расходятся — какое поверено, неизвестно: не угадываем, исключаем.
+    db.execute(text("UPDATE meter_market_modifications SET score = 95 WHERE id = :m"), {"m": mods[1]})
+    assert not any(r["name"] == "АтомЦифроСбыт" and r["quarters"]["2026-2"] for r in report.localization(db, edge)["rows"])
+    result = explain.explain_localization(db, edge, manufacturer_id=market["atom"], quarter="2026-2")
+    assert {r["reason"]: r["count"] for r in result["reasons"]}[explain.REASON_UNMAPPED_LOC] == 96
+
+
 def test_rpp_record_without_score_or_expired_does_not_hide_valid_one():
     """НАРТИС-И100-W113-2 в ГИСП: 83 балла с 2023 года и запись 22.09–07.10.2025 без баллов.
     Раньше всё после 22.09.2025 выпадало; теперь действует запись с баллами, пока не истекла."""

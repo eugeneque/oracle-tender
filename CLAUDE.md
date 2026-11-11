@@ -74,7 +74,8 @@ oracle-tender-main/            ← не git-репозиторий (git status/d
   из Excel), `meter_market_report`, `meter_market_dictionary`; фронт `components/meter-market/`;
   раздел 79 ARCHITECTURE.md. Детализация любого числа отчёта (учтено/исключено с причинами,
   Excel, сравнение, допуск 2 %) — `meter_market_explain` + `ExplainPanel.tsx`; статусы ПП 890 —
-  yes/no/nodata с причиной (`smart_verdict`); раздел 92.
+  yes/no/nodata с причиной (`smart_verdict`); раздел 92. Неразмеченные написания типа, у которого все исполнения в РПП с одинаковыми баллами,
+  идут в локализацию по общей записи (`_inherited_type_records`); раздел 97.
 - Обновление из интерфейса («Система → Обновление», только админ) — `system_update_service`
   (проверка через `update.sh --check` + git; установка — файл-запрос `.update-request` →
   юнит `oracle-t-update-web.path` → `update.sh --web` от root), фронт `pages/SystemUpdate.tsx`;

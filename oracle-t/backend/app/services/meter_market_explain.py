@@ -237,12 +237,16 @@ def explain_localization(
     positions: dict[str, dict[str, Any]] = {}
     reasons: dict[tuple[str, bool], int] = defaultdict(int)
 
-    def position(mod_id: int) -> dict[str, Any]:
-        key = f"m{mod_id}"
+    def position(piece: report.LocPiece) -> dict[str, Any]:
+        type_id = piece.unmapped_type_id
+        key = f"u{type_id}" if type_id else f"m{piece.modification_id}"
         if key not in positions:
-            positions[key] = {"key": key, "modification_id": mod_id, "counted": 0, "exclusions": defaultdict(int),
-                              "records": set(), "basis": ""}
+            positions[key] = {"key": key, "modification_id": piece.modification_id, "unmapped_type_id": type_id,
+                              "counted": 0, "exclusions": defaultdict(int), "records": set(), "basis": ""}
         return positions[key]
+
+    # Неразмеченные написания этих типов учтены бухгалтерией (общая запись РПП исполнений).
+    inherited_types = sorted({p.unmapped_type_id for p in pieces if p.unmapped_type_id})
 
     for piece in pieces:
         if quarter and piece.quarter != quarter:
@@ -252,7 +256,7 @@ def explain_localization(
             if score is not None and verdict.score != score:
                 continue  # другая строка таблицы, а не исключение
             mismatch = report.requirement_reason(verdict.score, requirement, limits) if requirement else None
-            item = position(piece.modification_id)
+            item = position(piece)
             if verdict.record:
                 item["records"].add(verdict.record.label() + (f", {verdict.score:g} баллов" if verdict.score is not None else ""))
             if mismatch:
@@ -263,7 +267,7 @@ def explain_localization(
                 item["basis"] = verdict.reason
                 reasons[(verdict.reason, True)] += piece.count
         elif score is None:
-            item = position(piece.modification_id)
+            item = position(piece)
             if verdict.record:
                 item["records"].add(verdict.record.label())
             item["exclusions"][verdict.reason] += piece.count
@@ -282,9 +286,10 @@ def explain_localization(
             text(
                 "SELECT v.modification_id, v.type_id, (v.modification_id IS NULL), sum(mv.count) "
                 f"{report._BASE_FROM} WHERE mv.month >= :s AND mv.month < :e "
-                f"AND (v.modification_id IS NULL OR NOT m.in_rpp){manufacturer_sql} GROUP BY 1, 2, 3"
+                f"AND ((v.modification_id IS NULL AND NOT v.type_id = ANY(:inherited)) OR NOT m.in_rpp)"
+                f"{manufacturer_sql} GROUP BY 1, 2, 3"
             ),
-            {"s": q_start, "e": q_end, "mf": manufacturer_id},
+            {"s": q_start, "e": q_end, "mf": manufacturer_id, "inherited": inherited_types},
         ):
             reason = REASON_UNMAPPED_LOC if unmapped else REASON_NOT_IN_RPP
             key = f"u{type_id}" if unmapped else f"m{mod_id}"
@@ -341,6 +346,9 @@ def explain_localization(
         item["variant_id"] = None
         if records:
             item["documents"] = item["documents"][:1] + [{"label": r} for r in records]
+        if item.get("unmapped_type_id") and item["counted"]:
+            item["rules"].append("Исполнение по написанию не определить, но все исполнения типа внесены в РПП "
+                                 "с одинаковыми баллами — поверки учтены по их общей записи")
         item["rules"].append("Точка отсчёта — дата внесения исполнения в РПП (правило 4 ТЗ); поверка "
                              "относится к записи РПП с баллами, действующей на её дату")
         if not item["basis"]:
