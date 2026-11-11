@@ -8,8 +8,8 @@
 Правила отправки:
 * события с несогласованным типом (`held`) не отправляются, пока тип не станет согласованным
   в `tender_monitor_service.EVENT_TYPES` (сейчас все наши коды есть в документации Bitrix24 1.7.0);
-* в `deal_fields` уходят только поля, которые меняет событие (даты, сумма с валютой) — ни
-  результат заявки, ни прочие поля сделки не трогаются;
+* в `deal_fields` уходят только поля, которые меняет событие (даты, сумма с валютой, результат
+  заявки при `RESULT_CHANGED`) — прочие поля сделки не трогаются;
 * технический сбой (нет ответа, 5xx) оставляет события в очереди — уйдут при следующем проходе;
   отказ портала по данным (4xx) переводит события в `error` и сам не повторяется — нужен
   разбор и ручная повторная отправка;
@@ -111,6 +111,8 @@ _EVENT_DEAL_FIELDS: dict[str, tuple[str, ...]] = {
     "REBID_DATE_CHANGED": ("rebid_date",),
     "RESULT_DATE_CHANGED": ("result_date",),
     "AMOUNT_CHANGED": ("amount", "currency"),
+    # Результат нашей заявки — только своим событием (пример `events_06` Bitrix24, раздел 96).
+    "RESULT_CHANGED": ("result_status",),
 }
 
 
@@ -139,6 +141,17 @@ def event_document_rows(db: Session, tender: Tender, events: list[TenderEvent]) 
     return [bitrix.document_row(tender, doc) for doc in docs]
 
 
+def event_sections(db: Session, tender: Tender, events: list[TenderEvent]) -> dict[str, Any]:
+    sections: dict[str, Any] = {}
+    if rows := event_document_rows(db, tender, events):
+        sections["documents"] = rows
+    if any(e.event_type in ("PROTOCOL_PUBLISHED", "RESULT_CHANGED") for e in events):
+        result: dict[str, list[dict[str, Any]]] = {"participants_prices": []}
+        if bitrix.protocol_rows(db, tender, result):
+            sections["participants_prices"] = result["participants_prices"]
+    return sections
+
+
 def build_events_payload(
     db: Session, tender: Tender, events: list[TenderEvent], *, request_id: str | None = None
 ) -> dict[str, Any]:
@@ -152,8 +165,9 @@ def build_events_payload(
         "full_snapshot": False,
         "lookup": bitrix.build_lookup(db, tender),
         "deal_fields": event_deal_fields(db, tender, events),
-        # Для журнала без изменений анализа — пустые разделы; документы — только по событиям о них.
-        "sections": ({"documents": rows} if (rows := event_document_rows(db, tender, events)) else {}),
+        # Для журнала без изменений анализа — пустые разделы; документы — только по событиям о
+        # них, участники и итог — по событиям о протоколе и результате.
+        "sections": event_sections(db, tender, events),
         "events": [event_out(event) for event in events],
     }
 

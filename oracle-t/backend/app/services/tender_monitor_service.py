@@ -106,6 +106,12 @@ def _same_price(left: str | None, right: str | None) -> bool:
         return left == right
 
 
+def _our_result(db: Session, tender: Tender) -> str | None:
+    from app.services.protocol_results_service import our_result
+
+    return our_result(db, tender)
+
+
 def build_snapshot(db: Session, tender: Tender) -> dict[str, Any]:
     """Слепок наблюдаемых показателей закупки в виде, пригодном для сравнения и для JSONB."""
 
@@ -121,6 +127,8 @@ def build_snapshot(db: Session, tender: Tender) -> dict[str, Any]:
         "price": str(tender.price) if tender.price is not None else None,
         "currency": tender.currency,
         "status": tender.status,
+        # Результат нашей заявки по протоколам (раздел 96): None — нас в протоколах нет.
+        "our_result": _our_result(db, tender),
     }
     security = {
         name: value.strip()[:500]
@@ -156,6 +164,12 @@ def _change(
 
 
 _NO_PREVIOUS = "Прежнего значения нет: показатель обнаружен впервые."
+_RESULT_TITLES = {
+    "WIN": "Опубликована наша победа",
+    "LOSS": "Опубликован итог: победил другой участник",
+    "NOT_ADMITTED": "Наша заявка не допущена",
+    "PENDING": "Рассмотрение нашей заявки продолжается",
+}
 
 
 def _security_kind(name: str) -> str | None:
@@ -267,6 +281,21 @@ def diff_snapshots(old: dict[str, Any], new: dict[str, Any]) -> list[dict[str, A
             )
         )
 
+    # Результат нашей заявки (RESULT_CHANGED, пример `events_06` Bitrix24). Пропавший результат —
+    # не событие (как и пропавшая дата): «нет нас в протоколах» не отменяет прежний итог.
+    if nf.get("our_result") and nf["our_result"] != of.get("our_result"):
+        changes.append(
+            _change(
+                "RESULT_CHANGED",
+                "our_result",
+                _RESULT_TITLES.get(nf["our_result"], "Изменился результат нашей заявки"),
+                of.get("our_result"),
+                nf["our_result"],
+                source_document="Протоколы закупки",
+                note="Определено разбором протоколов по ИНН наших компаний; итог проверяет тендерный отдел.",
+            )
+        )
+
     old_sec, new_sec = old.get("security") or {}, new.get("security") or {}
     for kind in ("APPLICATION", "CONTRACT", None):
         o = {k: v for k, v in old_sec.items() if _security_kind(k) == kind}
@@ -357,6 +386,12 @@ def _refresh_documents(db: Session, tender: Tender) -> None:
     db.commit()
 
 
+def _refresh_protocols(db: Session, tender: Tender) -> None:
+    from app.services.protocol_results_service import refresh_if_new
+
+    refresh_if_new(db, tender)
+
+
 def refresh_tender(db: Session, tender: Tender) -> list[str]:
     """Заново собирает данные закупки. Сбой одного источника не отменяет остальные —
     возвращает тексты ошибок."""
@@ -366,6 +401,9 @@ def refresh_tender(db: Session, tender: Tender) -> list[str]:
         ("страница площадки", lambda: _refresh_fields(db, tender)),
         ("карточка ЕИС", lambda: tender_card_service.sync_card(db, tender, force=True)),
         ("документы", lambda: _refresh_documents(db, tender)),
+        # Новый протокол — сразу разбор: иначе слепок не увидит смену нашего результата до
+        # следующего ручного анализа. Модель вызывается только при новом файле протокола.
+        ("протоколы", lambda: _refresh_protocols(db, tender)),
     ):
         try:
             step()

@@ -229,3 +229,93 @@ def list_positions(db: Session, tender: Tender) -> list[TenderPosition]:
             .order_by(TenderPosition.sort)
         )
     )
+
+
+# --- привязка требований к позициям (11.11.2026) ----------------------------------------------
+#
+# Замечание специалиста Bitrix24 (11.11.2026): во вкладке «ТЗ» не понять, к какой позиции
+# относится требование, — «поз. 1, и по ней весь анализ ТЗ, далее поз. 2». Подпись позиции у
+# требования (`Requirement.position`) модель пишет заново в каждом фрагменте документации, и
+# одна позиция выходит по-разному: «1. Высоковольтный прибор… 10 кВ», то же без номера, «…
+# электроэнергии…» вместо «… электрической энергии…», а то и название закупки. Здесь подпись
+# сводится к строке спецификации (`TenderPosition`): по номеру, иначе по наименованию. Не
+# угадываем: два одинаково похожих кандидата или расхождение в числах («6 кВ» и «10 кВ») —
+# позиция не определена, подпись остаётся как есть.
+
+_LEAD_NO_RE = re.compile(
+    r"^\s*(?:поз(?:иция|\.)?\s*)?№?\s*(\d+(?:\.\d+)*)(?:[.)]\s*|\s+(?=\D)|\s*$)", re.IGNORECASE
+)
+_WORD_RE = re.compile(r"\d+(?:[.,]\d+)?|[a-zа-я]+", re.IGNORECASE)
+# Слова, которые в подписях позиций ставятся или опускаются без смысла для различения.
+_STOP = {"и", "с", "в", "на", "для", "по", "из", "не", "или", "шт", "ед"}
+_STEM = 5
+# Доля общих основ слов, начиная с которой наименования считаются одной позицией: «прибор
+# учёта электрической энергии» и «прибор учёта электроэнергии» расходятся на одно-два слова.
+_NAME_THRESHOLD = 0.6
+ALL_POSITIONS = "Все позиции"
+
+
+def split_number(text: str) -> tuple[str | None, str]:
+    match = _LEAD_NO_RE.match(text)
+    if not match:
+        return None, text.strip()
+    return match.group(1), text[match.end():].strip()
+
+
+def _words(text: str) -> tuple[set[str], set[str]]:
+    """Основы слов и числа наименования: числа сравниваются отдельно и строго."""
+
+    stems: set[str] = set()
+    numbers: set[str] = set()
+    for word in _WORD_RE.findall(text.lower().replace("ё", "е")):
+        if word[0].isdigit():
+            numbers.add(word.replace(",", "."))
+        elif word not in _STOP and len(word) > 1:
+            stems.add(word[:_STEM])
+    return stems, numbers
+
+
+def _similarity(label: str, name: str) -> float:
+    a_stems, a_numbers = _words(label)
+    b_stems, b_numbers = _words(name)
+    if a_numbers != b_numbers or not a_stems or not b_stems:
+        return 0.0
+    return len(a_stems & b_stems) / len(a_stems | b_stems)
+
+
+def _numbers_conflict(label: str, name: str) -> bool:
+    a = _words(label)[1]
+    b = _words(name)[1]
+    return bool(a and b and a != b)
+
+
+def match_position(label: str | None, positions: list[TenderPosition]) -> TenderPosition | None:
+    """Строка спецификации, к которой относится подпись позиции у требования, или None.
+
+    Номер в начале подписи («1.», «Поз. 2») решает, если такой номер в спецификации есть
+    один и наименование ему не противоречит. Иначе — самое похожее наименование, если оно
+    похоже достаточно и однозначно."""
+
+    if not label or not label.strip() or not positions:
+        return None
+    number, name = split_number(label)
+    if number:
+        numbered = [item for item in positions if (item.position_no or "").strip().rstrip(".") == number]
+        if len(numbered) == 1:
+            # Номер без наименования или с наименованием той же позиции: «1. … 10 кВ» не
+            # отнесём к позиции 1, если в ней «6 кВ» — модель перепутала номер.
+            if not name or not _numbers_conflict(name, numbered[0].name):
+                return numbered[0]
+            return None
+    scored = sorted(
+        ((_similarity(name or label, item.name), index) for index, item in enumerate(positions)),
+        reverse=True,
+    )
+    best, index = scored[0]
+    if best < _NAME_THRESHOLD:
+        return None
+    if len(scored) > 1 and scored[1][0] == best:
+        # Две позиции с одинаковым наименованием (поз. 1 и 7 — оба «… 10 кВ»): без номера
+        # не различить.
+        return None
+    return positions[index]

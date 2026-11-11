@@ -98,7 +98,9 @@ from app.models.tender_bookmark import TenderBookmark
 from app.models.tender_tag import TenderTag, TenderTagLink
 from app.models.tender_card import TenderCard
 from app.models.tender_document import DocumentClass, TenderDocument
+from app.models.tender_contract_conditions import TenderContractConditions
 from app.models.tender_delivery import TenderDeliveryTerms
+from app.models.tender_protocol_results import TenderProtocolResults
 from app.models.tender_event import EventDelivery, TenderEvent, TenderMonitor
 from app.models.tender_history import HistoryKind, TenderHistoryEntry
 from app.models.tender_position import TenderPosition
@@ -154,8 +156,10 @@ __all__ = [
     "DocumentClass",
     "TenderHistoryEntry",
     "EventDelivery",
+    "TenderContractConditions",
     "TenderDeliveryTerms",
     "TenderEvent",
+    "TenderProtocolResults",
     "TenderMonitor",
     "HistoryKind",
     "Manufacturer",

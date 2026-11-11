@@ -33,7 +33,9 @@ from app.services import (
     tender_card_service,
     tender_insights,
     tender_positions,
+    contract_conditions_service,
     delivery_terms_service,
+    protocol_results_service,
     tender_twins,
 )
 from app.services.ai_profile_service import compute_profile_score
@@ -98,6 +100,27 @@ def _run_analysis(db: Session, tender: Tender, actor: User | None) -> str:
     except Exception as exc:  # noqa: BLE001 - условия поставки не обязательны для анализа
         db.rollback()
         parts.append(f"условия поставки не извлечены ({exc})")
+
+    # Условия договора и обеспечения (оплата, аванс, санкции, гарантия, обеспечение, срок
+    # подписания, комиссия) — ещё одним запросом (11.11.2026, раздел 95 ARCHITECTURE.md).
+    # Сбой не отменяет анализ: прежние условия остаются.
+    try:
+        report_progress("Условия договора: оплата, санкции, обеспечение…")
+        found = contract_conditions_service.extract(db, tender, actor=actor)
+        parts.append(f"условий договора: {found['conditions']}")
+    except Exception as exc:  # noqa: BLE001 - условия договора не обязательны для анализа
+        db.rollback()
+        parts.append(f"условия договора не извлечены ({exc})")
+
+    # Итоги из протоколов (участники, цены, допуск, победитель, наш результат) — только если
+    # протоколы уже есть (11.11.2026, раздел 96 ARCHITECTURE.md). Сбой не отменяет анализ.
+    try:
+        found = protocol_results_service.extract(db, tender, actor=actor)
+        if found["protocols"]:
+            parts.append(f"протоколов: {found['protocols']}, участников: {found['participants']}")
+    except Exception as exc:  # noqa: BLE001 - итоги не обязательны для анализа
+        db.rollback()
+        parts.append(f"протоколы не разобраны ({exc})")
 
     # Вектор и список похожих обновляются здесь же: требования только что извлечены, а
     # именно они делают «похожесть» осмысленной (без них похожими оказываются все закупки

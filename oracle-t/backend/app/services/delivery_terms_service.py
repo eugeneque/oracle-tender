@@ -184,13 +184,20 @@ def _ordered_documents(db: Session, tender: Tender) -> list[TenderDocument]:
 def delivery_text(db: Session, tender: Tender, limit: int) -> str:
     """Фрагменты документов вокруг слов о поставке: документ целиком в окно не помещается."""
 
+    return fragments_text(db, tender, limit, _DELIVERY_RE)
+
+
+def fragments_text(db: Session, tender: Tender, limit: int, pattern: re.Pattern[str]) -> str:
+    """Фрагменты документов (договор и ТЗ первыми) вокруг строк, подходящих под `pattern`.
+    Общая часть условий поставки и условий договора (`contract_conditions_service`)."""
+
     parts: list[str] = []
     length = 0
     for document in _ordered_documents(db, tender):
         lines = document.extracted_text.splitlines()
         keep: set[int] = set()
         for index, line in enumerate(lines):
-            if _DELIVERY_RE.search(line):
+            if pattern.search(line):
                 keep.update(range(max(0, index - _CONTEXT_BEFORE), min(len(lines), index + _CONTEXT_AFTER)))
         if not keep:
             continue

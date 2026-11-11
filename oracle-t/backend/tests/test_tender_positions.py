@@ -152,3 +152,82 @@ def test_position_rows_have_stable_keys(db_session, model):
     # В пакете позиции идут сразу за выжимкой.
     tz = bitrix_ai_service.build_sections(db_session, tender)["technical_specification"]
     assert [row["type"] for row in tz[:3]] == ["technical_summary", "procurement_position", "procurement_position"]
+
+
+# --- привязка требований к позициям (11.11.2026) ----------------------------------------------
+
+_HV = "Высоковольтный прибор учёта электрической энергии трёхфазный многофункциональный (Uном)"
+
+
+def _spec(db, tender, *rows: tuple[str, str]) -> list:
+    from app.models.tender_position import TenderPosition
+
+    items = [
+        TenderPosition(tender_id=tender.id, sort=index, position_no=no or None, lot_number="1", name=name)
+        for index, (no, name) in enumerate(rows)
+    ]
+    db.add_all(items)
+    db.flush()
+    return items
+
+
+def test_match_position_by_number_and_by_name(db_session):
+    """Подписи из замечания специалиста Bitrix24: одна позиция записана моделью по-разному."""
+
+    tender = _tender(db_session, None)
+    p1, p2, p7 = _spec(db_session, tender, ("1", f"{_HV} 10 кВ"), ("2", f"{_HV} 6 кВ"), ("7", f"{_HV} 10 кВ"))
+    match = tender_positions.match_position
+
+    assert match(f"1. {_HV} 10 кВ", [p1, p2, p7]) is p1
+    assert match("Поз. 2", [p1, p2, p7]) is p2
+    # Без номера, «электроэнергии» вместо «электрической энергии» — по наименованию.
+    assert match(
+        "Высоковольтный прибор учёта электроэнергии трёхфазный многофункциональный (Uном) 6 кВ", [p1, p2, p7]
+    ) is p2
+    # Без номера, а «… 10 кВ» — и поз. 1, и поз. 7: не угадываем.
+    assert match(f"{_HV} 10 кВ", [p1, p2, p7]) is None
+    # Номер не тот по напряжению — не берём.
+    assert match(f"2. {_HV} 10 кВ", [p1, p2, p7]) is None
+    # Название закупки вместо позиции.
+    assert match("Поставка высоковольтных приборов учёта электрической энергии", [p1, p2, p7]) is None
+    assert match("", [p1, p2, p7]) is None
+
+
+def test_requirement_rows_grouped_by_position(db_session):
+    from app.models.analysis import Requirement
+
+    tender = _tender(db_session, None)
+    _spec(db_session, tender, ("1", f"{_HV} 10 кВ"), ("2", f"{_HV} 6 кВ"))
+    for text, position, criticality in [
+        ("Номинальный ток 5 А", f"2. {_HV} 6 кВ", "critical"),
+        ("Номинальное напряжение 10 кВ", f"1. {_HV} 10 кВ", "important"),
+        ("Межповерочный интервал не менее 16 лет", None, "important"),
+        ("Номинальный ток 5 А", f"1. {_HV} 10 кВ", "critical"),
+        ("Тип прибора высоковольтный", "Поставка высоковольтных приборов учёта", "critical"),
+        ("Номинальное напряжение 6 кВ", "Высоковольтный прибор учёта электроэнергии трёхфазный (Uном) 6 кВ", "minor"),
+    ]:
+        db_session.add(
+            Requirement(tender_id=tender.id, text=text, position=position, criticality=criticality, kind="product")
+        )
+    db_session.flush()
+
+    rows = [
+        row["data"]
+        for row in bitrix_ai_service.build_sections(db_session, tender)["technical_specification"]
+        if row["type"] == "requirement"
+    ]
+    assert [(row.get("position_no"), row["requirement"].split()[:2]) for row in rows] == [
+        (None, ["Межповерочный", "интервал"]),
+        ("1", ["Номинальный", "ток"]),
+        ("1", ["Номинальное", "напряжение"]),
+        ("2", ["Номинальный", "ток"]),
+        ("2", ["Номинальное", "напряжение"]),
+        (None, ["Тип", "прибора"]),
+    ]
+    assert rows[0]["position"] == "Все позиции"
+    assert rows[1]["position"] == rows[2]["position"] == f"1. {_HV} 10 кВ"
+    assert rows[1]["position_key"] == "procurement-position-lot-1-row-1"
+    assert rows[4]["position"] == f"2. {_HV} 6 кВ"
+    # Не сведённая подпись — как есть, без ссылки на строку позиции.
+    assert rows[5]["position"] == "Поставка высоковольтных приборов учёта"
+    assert "position_key" not in rows[5]

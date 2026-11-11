@@ -61,6 +61,7 @@ from app.models.region import Region
 from app.models.tender import Tender, TenderStage, TenderStatus, TenderType
 from app.models.tender_card import TenderCard
 from app.models.tender_document import TenderDocument
+from app.models.tender_position import TenderPosition
 from app.models.user import User
 from app.services import tender_positions, tender_twins
 from app.services.audit import log_action
@@ -335,24 +336,17 @@ def _tender_types(tender: Tender) -> list[str]:
 
 
 def _result_status(db: Session, tender: Tender) -> str:
+    """Результат НАШЕЙ заявки. Bitrix24 1.7.0: «не присваивать LOSS при неучастии или
+    отсутствии записи о компании». Прежде здесь стоял LOSS при любом победителе не из МИРТЕК
+    (по названию производителя в `tender_outcomes`) — и при неучастии тоже; таблица логикой не
+    заполнялась, поэтому ошибка не проявлялась. Теперь — только по нашему ИНН в протоколах
+    (раздел 96 ARCHITECTURE.md); нас в протоколах нет — PENDING."""
+
     if tender.status == TenderStatus.CANCELLED.value:
         return "CANCELLED"
-    outcome = db.scalar(
-        select(TenderOutcome)
-        .where(TenderOutcome.tender_id == tender.id)
-        .order_by(TenderOutcome.created_at.desc())
-    )
-    if outcome is not None and outcome.winner_manufacturer_name:
-        mirtek = db.scalars(select(Manufacturer).where(Manufacturer.is_mirtek.is_(True))).all()
-        names = {
-            (name or "").lower()
-            for item in mirtek
-            for name in (item.brand_name, item.legal_name)
-            if name
-        }
-        winner = outcome.winner_manufacturer_name.lower()
-        return "WIN" if any(name in winner or winner in name for name in names) else "LOSS"
-    return "PENDING"
+    from app.services.protocol_results_service import our_result
+
+    return our_result(db, tender) or "PENDING"
 
 
 def build_lookup(db: Session, tender: Tender) -> dict[str, Any]:
@@ -405,6 +399,12 @@ def customer_region(db: Session, tender: Tender) -> str | None:
     return region.name if region else None
 
 
+def _platform_commission(db: Session, tender: Tender) -> float | int | None:
+    from app.services.contract_conditions_service import get_conditions, platform_commission
+
+    return platform_commission(get_conditions(db, tender)["conditions"])
+
+
 def build_deal_fields(db: Session, tender: Tender) -> dict[str, Any]:
     dates = card_dates(db, tender)
     subject = _clip(tender.title, 180) or "Закупка"
@@ -425,6 +425,9 @@ def build_deal_fields(db: Session, tender: Tender) -> dict[str, Any]:
             "result_date": _iso(dates.get("result_date")),
             "auction_date": _iso(dates.get("auction_date")),
             "rebid_date": _iso(dates.get("rebid_date")),
+            # Сумма комиссии — только прямо указанная в документах (раздел 95); тариф не
+            # пересчитывается, правило госплощадок по памяти не подставляется.
+            "platform_commission": _platform_commission(db, tender),
             # Закупка у нас — одна карточка на процедуру: лоты отдельно не ведутся.
             "lot_number": "1",
             "record_type": "SINGLE",
@@ -606,6 +609,168 @@ def _delivery_rows(db: Session, tender: Tender, sections: dict[str, list[dict[st
         )
 
 
+_DAY_TYPE_LABELS = {"CALENDAR": "календарные", "WORKING": "рабочие"}
+_OBLIGATION_LABELS = {
+    "GUARANTEED_VOLUME": "Обязательный объём",
+    "LIMIT_ONLY": "Лимит без гарантированной закупки",
+    "MINIMUM_PLUS_LIMIT": "Обязательный минимум плюс лимит",
+}
+
+
+def _contract_condition_rows(db: Session, tender: Tender, sections: dict[str, list[dict[str, Any]]]) -> int:
+    """Условия договора и обеспечения (раздел 95 ARCHITECTURE.md): строки `contract_condition`
+    раздела `contract`, обеспечение заявки — `checklist` раздела `preparation`. Возвращает
+    число строк: при нуле остаются прежние короткие «Условия договора»."""
+
+    from app.services.contract_conditions_service import KINDS, MULTI_KINDS, get_conditions
+
+    count = 0
+    numbers: dict[str, int] = {}
+    for item in get_conditions(db, tender)["conditions"]:
+        kind, lot = item["kind"], item.get("lot_number") or "1"
+        numbers[kind] = numbers.get(kind, 0) + 1
+        title = KINDS[kind] + (f" {numbers[kind]}" if kind in MULTI_KINDS and numbers[kind] > 1 else "")
+        if lot != "1":
+            title += f" (лот {lot})"
+        # Ключ одиночного вида — от вида и лота: повторный разбор обновляет ту же строку, даже
+        # если модель переформулировала условие. У повторяющихся — ещё и от текста.
+        key = (
+            _key(f"contract-condition-{kind.lower().replace('_', '-')}", lot, item.get("value") or item.get("term"))
+            if kind in MULTI_KINDS
+            else f"contract-condition-{kind.lower().replace('_', '-')}-lot-{lot}"
+        )
+        absent = item.get("presence") == "NOT_REQUIRED"
+        data = {
+            "condition_kind": kind,
+            "condition": "Не требуется (прямо указано в документации)" if absent else item.get("value"),
+            "amount": item.get("amount"),
+            "percent": item.get("percent"),
+            "calculation_base": item.get("base"),
+            "term": item.get("term"),
+            "day_type": _DAY_TYPE_LABELS.get(item.get("day_type") or ""),
+            "trigger_event": item.get("trigger_event"),
+            "payer": item.get("payer"),
+            "allowed_forms": item.get("allowed_forms"),
+            "obligation_model": _OBLIGATION_LABELS.get(item.get("obligation_model") or ""),
+            "lot_number": lot,
+        }
+        evidence = [
+            _compact({"document": item.get("document"), "page": item.get("page"), "quote": _clip(item.get("quote"), MAX_QUOTE)})
+        ]
+        # Санкции — всегда на проверку (п. 24 перечня); любое условие без цитаты — тоже.
+        review = kind == "PENALTY" or not item.get("quote")
+        section, type_ = ("preparation", "checklist") if kind == "APPLICATION_SECURITY" else ("contract", "contract_condition")
+        sections[section].append(
+            _row(
+                key,
+                type_,
+                title,
+                data,
+                evidence=[e for e in evidence if e],
+                status=STATUS_REVIEW if review else STATUS_EXTRACTED,
+            )
+        )
+        count += 1
+    return count
+
+
+_RESULT_LABELS = {
+    "WIN": "Победа",
+    "LOSS": "Проигрыш",
+    "NOT_ADMITTED": "Заявка не допущена",
+    "PENDING": "Рассмотрение продолжается",
+}
+_ADMISSION_LABELS = {"ADMITTED": "Допущена", "REJECTED": "Отклонена"}
+
+
+def protocol_rows(db: Session, tender: Tender, sections: dict[str, list[dict[str, Any]]]) -> int:
+    """Итог процедуры и участники из протоколов (раздел 96 ARCHITECTURE.md): строка
+    `procedure_result` на лот и `participant` на участника лота. Возвращает число строк."""
+
+    from app.services.protocol_results_service import get_results, labels
+
+    results = get_results(db, tender)
+    names = labels()
+    single_lot = len(results["lots"]) <= 1
+    count = 0
+    for lot in results["lots"]:
+        number = lot.get("lot_number") or "1"
+        deviation = None
+        if lot.get("winner_price") is not None and tender.price and single_lot:
+            deviation = round((float(lot["winner_price"]) / float(tender.price) - 1) * 100, 2)
+        conflicts = lot.get("conflicts") or []
+        our = lot.get("our_result")
+        # Не итоговый протокол, противоречия и наш недопуск — на проверку тендерному отделу
+        # (пп. 69, 79, 85 перечня).
+        review = not lot.get("final") or bool(conflicts) or our == "NOT_ADMITTED" or (bool(lot.get("winner")) and not lot.get("quote"))
+        sections["participants_prices"].append(
+            _row(
+                "procedure-result" if number == "1" else f"procedure-result-lot-{number}",
+                "procedure_result",
+                "Итог процедуры" + ("" if number == "1" else f" (лот {number})"),
+                {
+                    "lot_number": number,
+                    "protocol_kind": names["kinds"].get(lot.get("protocol_kind") or ""),
+                    "protocol_date": lot.get("protocol_date"),
+                    "protocol_number": lot.get("protocol_number"),
+                    "is_final": lot.get("final"),
+                    "procedure_outcome": names["outcomes"].get(lot.get("outcome") or ""),
+                    "failed_reason": lot.get("failed_reason"),
+                    "winner": lot.get("winner"),
+                    "winner_inn": lot.get("winner_inn"),
+                    "preliminary_winner": lot.get("preliminary_winner"),
+                    "initial_price": _number(tender.price) if single_lot else None,
+                    "final_price": lot.get("winner_price"),
+                    "deviation_percent": deviation,
+                    "participants_count": lot.get("participants_count"),
+                    "our_result": _RESULT_LABELS.get(our or ""),
+                    "our_rejection_reason": _clip(lot.get("our_rejection_reason")),
+                    "conflicts": "; ".join(conflicts) or None,
+                    "document": lot.get("protocol_document"),
+                },
+                evidence=_evidence(lot.get("protocol_document"), lot.get("quote")),
+                status=STATUS_REVIEW if review else STATUS_EXTRACTED,
+            )
+        )
+        count += 1
+    for item in results["participants"]:
+        number = item.get("lot_number") or "1"
+        label = item.get("name") or (f"Заявка №{item['application_number']}" if item.get("application_number") else "Участник")
+        identity = item.get("inn") or item.get("application_number") or item.get("name")
+        sources = item.get("sources") or []
+        sections["participants_prices"].append(
+            _row(
+                _key(f"participant-lot-{number}", identity),
+                "participant",
+                label,
+                {
+                    "participant": item.get("name"),
+                    "inn": item.get("inn"),
+                    "kpp": item.get("kpp"),
+                    "application_number": item.get("application_number"),
+                    "lot_number": number,
+                    "price": item.get("price"),
+                    "currency": item.get("currency"),
+                    "vat": item.get("vat"),
+                    "admission": _ADMISSION_LABELS.get(item.get("admission") or ""),
+                    "rejection_reason": _clip(item.get("rejection_reason")),
+                    "rejection_category": names["rejection"].get(item.get("rejection_category") or ""),
+                    "place": item.get("place"),
+                    "is_winner": True if item.get("is_winner") is True and item.get("in_final") else None,
+                    "is_ours": item.get("is_ours") or None,
+                    "delivery_term": item.get("delivery_term"),
+                },
+                evidence=[
+                    _compact({"document": src.get("document"), "quote": _clip(src.get("quote"), MAX_QUOTE)})
+                    for src in sources
+                ],
+                status=STATUS_REVIEW if item.get("conflict") or not sources else STATUS_EXTRACTED,
+            )
+        )
+        count += 1
+    return count
+
+
 def _document_rows(db: Session, tender: Tender, sections: dict[str, list[dict[str, Any]]]) -> None:
     for doc in db.scalars(
         select(TenderDocument).where(TenderDocument.tender_id == tender.id).order_by(TenderDocument.created_at)
@@ -625,6 +790,7 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
     )
     cells = _mirtek_cells(db, tender)
     lock = _brand_lock(db, tender, requirements)
+    positions = tender_positions.list_positions(db, tender)
 
     # Замечания тендерного отдела 23.10.2026: менеджер смотрит сначала ключевые сведения и
     # причины несоответствия, а не сотню требований подряд. Сведения — блоком «Краткая
@@ -636,7 +802,7 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
     # методика поверки, условия поставки, типовые требования к участнику по закону) не
     # передаются, если только прибор по ним не проходит. Требования к участнику — квалификация
     # в «Подготовке заявки».
-    requirement_rows: list[tuple[tuple[int, int, int], int, dict[str, Any]]] = []
+    requirement_rows: list[tuple[tuple[int, int, str], tuple[int, int, int], int, dict[str, Any]]] = []
     for index, requirement in enumerate(requirements):
         cell = cells.get(requirement.id)
         entry, model = cell if cell else (None, None)
@@ -667,12 +833,13 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
         # Портал 1.4.1 показывает параметр и требуемое значение раздельно (`required_value`);
         # формулировка ТЗ целиком — в цитате источника.
         subject, required = split_requirement(requirement)
+        group, position = requirement_position(requirement, positions)
         row = _row(
             key,
             "requirement",
             _requirement_title(requirement),
             {
-                "position": _clip(requirement.position, 200),
+                **position,
                 "requirement": _clip(subject),
                 "required_value": _clip(required),
                 "criticality": criticality,
@@ -687,8 +854,14 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
             updated_at=requirement.created_at,
             status=_ROW_STATUS.get(entry.status, STATUS_REVIEW) if entry else STATUS_REVIEW,
         )
-        requirement_rows.append((priority(requirement, entry.status if entry else None), index, row))
-    requirement_rows.sort(key=lambda item: item[:2])
+        requirement_rows.append((group, priority(requirement, entry.status if entry else None), index, row))
+    # Позиция за позицией (замечание специалиста Bitrix24, 11.11.2026): сначала общие для
+    # всех позиций требования, затем по порядку спецификации, внутри позиции — по приоритету
+    # (несоответствия, затем критичные). Причины несоответствия собраны и в выжимке выше.
+    first_seen: dict[tuple[int, int, str], int] = {}
+    for group, _, index, _ in requirement_rows:
+        first_seen.setdefault(group, index)
+    requirement_rows.sort(key=lambda item: (item[0][0], item[0][1], first_seen[item[0]], item[1], item[2]))
 
     score = db.scalar(
         select(AiProfileScore)
@@ -772,7 +945,7 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
     # Порядок вкладки: выжимка, позиции закупки, наши приборы, требования по приоритету,
     # конкуренты.
     sections["technical_specification"] = (
-        [summary_row] + position_rows(db, tender) + mirtek_rows + [row for *_, row in requirement_rows] + competitor_rows
+        [summary_row] + position_rows(db, tender, positions) + mirtek_rows + [row for *_, row in requirement_rows] + competitor_rows
     )
 
     # Подготовка заявки: вывод ИИ об участии и шаги стратегии — как пункты чек-листа.
@@ -820,11 +993,17 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
             extra_at = datetime.fromisoformat(extra["generated_at"])
         except ValueError:
             extra_at = None
+    # Структурные условия договора (раздел 95) заменяют короткие строки «Условия контракта»
+    # вкладки «Дополнительно»: это те же сроки, оплата, санкции и обеспечение, только без
+    # цитаты и полей — вместе они выглядели бы во вкладке «Договор» дублями.
+    structured = _contract_condition_rows(db, tender, sections)
     for source_key, section, type_, field, title in (
         ("contract_terms", "contract", "contract_condition", "requirement", "Условие договора"),
         ("special_conditions", "contract", "obligation", "requirement", "Обязательство"),
         ("application_requirements", "preparation", "checklist", "document", "Состав заявки"),
     ):
+        if source_key == "contract_terms" and structured:
+            continue
         for number, text in enumerate(extra_sections.get(source_key) or [], start=1):
             # Наименование — короткая подпись с номером, а не сам текст: иначе в таблице
             # портала «Наименование» и «Требование» показывают одно и то же (06.11.2026).
@@ -841,31 +1020,33 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
     _delivery_rows(db, tender, sections)
     _document_rows(db, tender, sections)
 
-    # Участники и цены: итог процедуры из протокола.
-    outcome = db.scalar(
-        select(TenderOutcome)
-        .where(TenderOutcome.tender_id == tender.id)
-        .order_by(TenderOutcome.created_at.desc())
-    )
-    if outcome is not None and (outcome.winner_manufacturer_name or outcome.winner_price is not None):
-        deviation = None
-        if outcome.winner_price is not None and tender.price:
-            deviation = round((float(outcome.winner_price) / float(tender.price) - 1) * 100, 2)
-        sections["participants_prices"].append(
-            _row(
-                "procedure-result",
-                "procedure_result",
-                "Итог процедуры",
-                {
-                    "winner": outcome.winner_manufacturer_name,
-                    "initial_price": _number(tender.price),
-                    "final_price": _number(outcome.winner_price),
-                    "deviation_percent": deviation,
-                    "date": _iso(outcome.published_at),
-                    "document": outcome.protocol_url,
-                },
-            )
+    # Участники и цены: разбор протоколов (раздел 96); без него — прежний итог из
+    # `tender_outcomes`, если его когда-нибудь заполнят вручную.
+    if not protocol_rows(db, tender, sections):
+        outcome = db.scalar(
+            select(TenderOutcome)
+            .where(TenderOutcome.tender_id == tender.id)
+            .order_by(TenderOutcome.created_at.desc())
         )
+        if outcome is not None and (outcome.winner_manufacturer_name or outcome.winner_price is not None):
+            deviation = None
+            if outcome.winner_price is not None and tender.price:
+                deviation = round((float(outcome.winner_price) / float(tender.price) - 1) * 100, 2)
+            sections["participants_prices"].append(
+                _row(
+                    "procedure-result",
+                    "procedure_result",
+                    "Итог процедуры",
+                    {
+                        "winner": outcome.winner_manufacturer_name,
+                        "initial_price": _number(tender.price),
+                        "final_price": _number(outcome.winner_price),
+                        "deviation_percent": deviation,
+                        "date": _iso(outcome.published_at),
+                        "document": outcome.protocol_url,
+                    },
+                )
+            )
 
     # ФАС: ТЗ под товарный знак конкурента без эквивалента — признак ограничения конкуренции.
     _brand_lock_signal(lock, sections)
@@ -903,24 +1084,36 @@ def _brand_lock(db: Session, tender: Tender, requirements: list[Requirement]) ->
     return detect_brand_lock(db, tender, product, list(db.scalars(select(Manufacturer))))
 
 
-def position_rows(db: Session, tender: Tender) -> list[dict[str, Any]]:
-    """Позиции закупки строками `procurement_position` (портал 1.4.1). Ключ постоянный —
-    по номеру лота и позиции, без номера — по наименованию: позиции пересоздаются при каждом
-    разборе, и ключ от id завёл бы на портале дубли."""
+def position_key(item: TenderPosition) -> str:
+    """Постоянный ключ строки `procurement_position` — по номеру лота и позиции, без номера —
+    по наименованию: позиции пересоздаются при каждом разборе, и ключ от id завёл бы на
+    портале дубли. На этот же ключ ссылаются строки требований (`position_key`)."""
+
+    number = (item.position_no or "").strip()
+    lot = re.sub(r"[^\w.-]+", "-", item.lot_number or "1").strip("-") or "1"
+    row_no = re.sub(r"[^\w.-]+", "-", number).strip("-")
+    if row_no:
+        return f"procurement-position-lot-{lot}-row-{row_no}"
+    return f"procurement-position-lot-{lot}-{_key('name', item.name)}"
+
+
+def position_label(item: TenderPosition) -> str:
+    number = (item.position_no or "").strip().rstrip(".")
+    return f"{number}. {item.name}" if number else item.name
+
+
+def position_rows(
+    db: Session, tender: Tender, positions: list[TenderPosition] | None = None
+) -> list[dict[str, Any]]:
+    """Позиции закупки строками `procurement_position` (портал 1.4.1)."""
 
     rows = []
-    for item in tender_positions.list_positions(db, tender):
+    for item in positions if positions is not None else tender_positions.list_positions(db, tender):
         number = (item.position_no or "").strip()
-        lot = re.sub(r"[^\w.-]+", "-", item.lot_number or "1").strip("-") or "1"
-        row_no = re.sub(r"[^\w.-]+", "-", number).strip("-")
-        if row_no:
-            key = f"procurement-position-lot-{lot}-row-{row_no}"
-        else:
-            key = f"procurement-position-lot-{lot}-{_key('name', item.name)}"
         quantity = _number(item.quantity) if item.quantity is not None else _clip(item.quantity_text, 100)
         rows.append(
             _row(
-                key,
+                position_key(item),
                 "procurement_position",
                 f"Позиция №{number}" if number else (_clip(item.name, 120) or "Позиция"),
                 {
@@ -934,6 +1127,45 @@ def position_rows(db: Session, tender: Tender) -> list[dict[str, Any]]:
             )
         )
     return rows
+
+
+def requirement_position(
+    requirement: Requirement, positions: list[TenderPosition]
+) -> tuple[tuple[int, int, str], dict[str, Any]]:
+    """Позиция спецификации для строки требования (замечание специалиста Bitrix24, 11.11.2026):
+    поля строки и ключ группы для сортировки «позиция за позицией».
+
+    Подпись модели сводится к строке спецификации (`tender_positions.match_position`), и у
+    всех требований одной позиции поле `position` пишется одинаково — как в спецификации.
+    Пустая подпись у требования к прибору — общее для всех позиций («Все позиции»; если
+    позиция одна — она сама). Подпись, которую не удалось свести, передаётся как есть и
+    группируется сама с собой после позиций спецификации."""
+
+    label = (requirement.position or "").strip()
+    item = tender_positions.match_position(label, positions)
+    if item is None and not label and requirement.kind == RequirementKind.PRODUCT.value and len(positions) == 1:
+        item = positions[0]
+    if item is not None:
+        number = (item.position_no or "").strip().rstrip(".") or None
+        group = (1, positions.index(item), "")
+        return group, {
+            "position": _clip(position_label(item), 200),
+            "position_no": number,
+            "position_key": position_key(item),
+        }
+    if not label:
+        general = requirement.kind == RequirementKind.PRODUCT.value and len(positions) > 1
+        return (0, 0, ""), {
+            "position": tender_positions.ALL_POSITIONS if general else None,
+            "position_no": None,
+            "position_key": None,
+        }
+    number, _ = tender_positions.split_number(label)
+    return (2, 0, re.sub(r"\s+", " ", label.lower())), {
+        "position": _clip(label, 200),
+        "position_no": number,
+        "position_key": None,
+    }
 
 
 def _summary_row(facts: list[KeyFact]) -> dict[str, Any]:
