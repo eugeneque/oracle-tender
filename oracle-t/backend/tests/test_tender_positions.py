@@ -224,6 +224,7 @@ def test_requirement_rows_grouped_by_position(db_session):
         ("2", ["Номинальное", "напряжение"]),
         (None, ["Тип", "прибора"]),
     ]
+    assert [row["position_scope"] for row in rows] == ["all", "position", "position", "position", "position", "unknown"]
     assert rows[0]["position"] == "Все позиции"
     assert rows[1]["position"] == rows[2]["position"] == f"1. {_HV} 10 кВ"
     assert rows[1]["position_key"] == "procurement-position-lot-1-row-1"

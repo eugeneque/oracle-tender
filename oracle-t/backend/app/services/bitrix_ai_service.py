@@ -1137,9 +1137,13 @@ def requirement_position(
 
     Подпись модели сводится к строке спецификации (`tender_positions.match_position`), и у
     всех требований одной позиции поле `position` пишется одинаково — как в спецификации.
-    Пустая подпись у требования к прибору — общее для всех позиций («Все позиции»; если
-    позиция одна — она сама). Подпись, которую не удалось свести, передаётся как есть и
-    группируется сама с собой после позиций спецификации."""
+    Пустая подпись — требование общее для всех позиций («Все позиции»; у требования к
+    прибору при одной позиции — она сама). Подпись, которую не удалось свести, передаётся как
+    есть и группируется сама с собой после позиций спецификации.
+
+    Группу на портале задаёт `position_scope` (согласовано со специалистом Bitrix24
+    11.11.2026): `position` — с `position_key` строки позиции, `all` — все позиции,
+    `unknown` — позиция не определена. Текст `position` портал для группы не использует."""
 
     label = (requirement.position or "").strip()
     item = tender_positions.match_position(label, positions)
@@ -1149,19 +1153,21 @@ def requirement_position(
         number = (item.position_no or "").strip().rstrip(".") or None
         group = (1, positions.index(item), "")
         return group, {
+            "position_scope": "position",
             "position": _clip(position_label(item), 200),
             "position_no": number,
             "position_key": position_key(item),
         }
     if not label:
-        general = requirement.kind == RequirementKind.PRODUCT.value and len(positions) > 1
         return (0, 0, ""), {
-            "position": tender_positions.ALL_POSITIONS if general else None,
+            "position_scope": "all",
+            "position": tender_positions.ALL_POSITIONS,
             "position_no": None,
             "position_key": None,
         }
     number, _ = tender_positions.split_number(label)
     return (2, 0, re.sub(r"\s+", " ", label.lower())), {
+        "position_scope": "unknown",
         "position": _clip(label, 200),
         "position_no": number,
         "position_key": None,
