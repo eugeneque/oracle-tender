@@ -31,7 +31,7 @@ def providers(client, db_session, monkeypatch):
 
 
 def test_forced_provider_beats_personal_choice_and_is_not_substituted(
-    db_session, admin_user, providers, monkeypatch
+    db_session, providers, admin_user, monkeypatch
 ):
     calls: list[str] = []
     monkeypatch.setattr(ai_client.routerai_client, "run_structured", lambda *a, **k: calls.append("routerai"))
