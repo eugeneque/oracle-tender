@@ -76,12 +76,11 @@ _JOB_LABELS = {
     "purge_logs": "Уборка журнала",
     "tender_gap_repair": "Достройка матриц соответствия",
     "catalog_lookup_queue": "Подбор задач очереди справочника",
-    "ai_auto_review": "Автоматический разбор закупок",
     "tender_monitoring": "Отслеживание изменений по закупкам",
 }
 # Ежеминутный пинг доступности в журнал о пропусках не пишется: следующий придёт через
 # минуту, а запись на каждый пропуск при подвисшем пуле засыпала бы журнал.
-_QUIET_JOBS = {"ping_sources", "ai_auto_review", "tender_monitoring"}
+_QUIET_JOBS = {"ping_sources", "tender_monitoring"}
 
 
 def _job_label(job_id: str) -> str:
@@ -473,23 +472,6 @@ def _run_gap_repair_job() -> None:
         db.close()
 
 
-def _run_auto_review_job() -> None:
-    """Авторазбор (разделы 81 и 104 ARCHITECTURE.md): следующая закупка встаёт на
-    полный разбор, когда предыдущая закончилась. Выключенный авторазбор — пустой проход."""
-
-    from app.services import auto_review_service
-
-    db = SessionLocal()
-    try:
-        job = auto_review_service.feed(db)
-        if job is not None:
-            logger.info(f"Авторазбор: на разбор поставлена закупка {job.tender_id}")
-    except Exception as exc:  # noqa: BLE001 - сбой постановки не должен ронять планировщик
-        logger.warning(f"Авторазбор не продвинулся: {exc}")
-    finally:
-        db.close()
-
-
 def _run_tender_monitoring_job() -> None:
     """Проверка закупок под наблюдением и отправка событий в Bitrix24 (раздел 84
     ARCHITECTURE.md). Без включённых закупок — пустой проход."""
@@ -659,15 +641,6 @@ def start_scheduler() -> BackgroundScheduler | None:
         _run_catalog_queue_job,
         IntervalTrigger(minutes=15),
         id="catalog_lookup_queue",
-        replace_existing=True,
-    )
-
-    # Авторазбор — раз в минуту: полный разбор идёт минуты, и минута простоя между
-    # закупками незаметна, а чаще проверять, закончилась ли предыдущая, незачем.
-    scheduler.add_job(
-        _run_auto_review_job,
-        IntervalTrigger(minutes=1),
-        id="ai_auto_review",
         replace_existing=True,
     )
 

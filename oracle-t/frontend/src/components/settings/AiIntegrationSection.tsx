@@ -6,7 +6,6 @@ import type { AiModelLimits, AiProviderKey, YandexAiStudioSettings } from "../..
 import { refreshAiProvider, useAiProvider } from "../../hooks/useAiProvider";
 import { formatDateTime } from "../../utils/format";
 import { AiModelList, AiProviderSwitcher, ProviderCard, RouterAiCard } from "./AiProviderControls";
-import { AutoReviewCard } from "./AutoReviewCard";
 import { MatrixModelCard } from "./MatrixModelCard";
 
 /**
@@ -30,8 +29,6 @@ export function AiIntegrationSection() {
       </div>
 
       <MatrixModelCard />
-
-      <AutoReviewCard />
 
       <div className="grid items-start gap-6 lg:grid-cols-[300px_minmax(0,1fr)]">
         <AiModelList selected={selected} onSelect={setPicked} />

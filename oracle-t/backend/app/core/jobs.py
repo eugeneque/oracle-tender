@@ -301,7 +301,7 @@ def enqueue(
     возвращается уже идущая задача, и карточка следит за ней.
 
     `payload` — входные данные задачи; `{"provider": "yandex"}` закрепляет за ней модель
-    (авторазбор, см. `forcing_provider`)."""
+    (`forcing_provider`; ставил авторазбор, удалённый 12.11.2026, раздел 105)."""
 
     kinds = [*_TENDER_AI_KINDS] if kind.value in _TENDER_AI_KINDS else [kind.value]
     existing = db.execute(

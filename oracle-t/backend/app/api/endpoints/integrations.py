@@ -15,8 +15,6 @@ from app.schemas.integration_setting import (
     AiProviderKey,
     AiProviderStatus,
     AiProviderSwitch,
-    AutoReviewStatus,
-    AutoReviewUpdate,
     BitrixAiPreview,
     BitrixAiRequestOut,
     BitrixAiSendRequest,
@@ -39,7 +37,6 @@ from app.schemas.integration_setting import (
 from app.services import (
     ai_provider_service,
     api_client_service,
-    auto_review_service,
     bitrix_ai_service,
     bitrix_deal_service,
     rusprofile_service,
@@ -115,34 +112,6 @@ def set_ai_provider_enabled(
     ни одного запроса, а начатые через неё задачи останавливаются."""
 
     return ai_provider_service.set_provider_enabled(db, provider, payload.enabled, actor=admin)
-
-
-@router.get("/auto-review", response_model=AutoReviewStatus)
-def get_auto_review(
-    db: Session = Depends(get_db), _admin: User = Depends(require_admin)
-) -> AutoReviewStatus:
-    """Состояние автоматического разбора закупок (разделы 81 и 104 ARCHITECTURE.md)."""
-
-    return AutoReviewStatus.model_validate(auto_review_service.status(db))
-
-
-@router.put("/auto-review", response_model=AutoReviewStatus)
-def set_auto_review(
-    payload: AutoReviewUpdate,
-    db: Session = Depends(get_db),
-    admin: User = Depends(require_admin),
-) -> AutoReviewStatus:
-    """Включает или выключает авторазбор, задаёт модель и дневной лимит. Включить можно и без
-    настроенной модели — тогда `blocker` скажет, что заполнить."""
-
-    try:
-        state = auto_review_service.set_enabled(
-            db, payload.enabled, actor=admin,
-            provider_key=payload.provider, limit=payload.daily_limit,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return AutoReviewStatus.model_validate(state)
 
 
 @router.get("/matrix-model")

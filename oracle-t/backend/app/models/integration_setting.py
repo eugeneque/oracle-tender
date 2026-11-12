@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, false as sa_false, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -72,19 +72,8 @@ class AiProviderSettings(Base):
     model_limits: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default="{}"
     )
-    # Автоматический разбор (30.10.2026, раздел 81 ARCHITECTURE.md): открытые релевантные
-    # закупки сами встают на полный разбор по одной, строго через YandexGPT.
-    auto_review_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default=sa_false()
-    )
-    # С 12.11.2026 (раздел 104): Яндекс больше не бесплатен — модель авторазбора выбирает
-    # администратор, а число закупок в сутки ограничено (один разбор ~1,3 млн токенов).
-    auto_review_provider: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="qwen", server_default="qwen"
-    )
-    auto_review_daily_limit: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=10, server_default="10"
-    )
+    # «Автоматический разбор» (разделы 81, 104) удалён 12.11.2026 (раздел 105): закупки
+    # разбираются только по кнопке.
     # Модель матрицы соответствия (12.11.2026, раздел 104): `None` — как у всего разбора.
     matrix_provider: Mapped[str | None] = mapped_column(String(20), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
