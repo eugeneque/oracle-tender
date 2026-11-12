@@ -411,8 +411,8 @@ def test_yandex_cost_is_counted_by_tariff_after_free_period(db_session):
     from datetime import date
     from decimal import Decimal
 
-    assert ai_usage_service.yandex_cost(10_000, date(2026, 10, 29)) == Decimal("0")
-    assert ai_usage_service.yandex_cost(10_000, date(2026, 10, 30)) == Decimal("4.000000")
+    assert ai_usage_service.yandex_cost(10_000, date(2026, 10, 30)) == Decimal("0")
+    assert ai_usage_service.yandex_cost(10_000, date(2026, 10, 31)) == Decimal("12.000000")
 
     marker = f"YandexCost{uuid.uuid4().hex[:6]}"
     ai_usage_service.record_call(
@@ -429,5 +429,5 @@ def test_yandex_cost_is_counted_by_tariff_after_free_period(db_session):
         select(AiUsageRecord).where(AiUsageRecord.operation == marker).order_by(AiUsageRecord.status.desc())
     ).all()
     assert [r.status for r in records] == ["success", "error"]
-    assert records[0].cost == Decimal("0.400000")  # 1000 токенов × 0,40 ₽ / 1000
+    assert records[0].cost == Decimal("1.200000")  # 1000 токенов × 1,20 ₽ / 1000
     assert records[1].cost is None  # до модели не дошло — Яндекс не тарифицирует
