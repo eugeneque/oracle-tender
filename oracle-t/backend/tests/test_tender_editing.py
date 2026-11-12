@@ -352,3 +352,27 @@ def test_relevance_mark_records_author_and_feeds_shared_lists(db_session, admin_
 
     set_relevance(db_session, rejected, RelevanceStatus.NEW.value, actor=admin_user)
     assert rejected.relevance_marked_by_id is None
+
+
+def test_decision_is_shared_with_twin_records(db_session, admin_user):
+    """Решение по закупке переносится на её записи из других каналов (12.11.2026): иначе ту же
+    закупку отклоняют дважды. Записи без номера ЕИС и с другим номером не затрагиваются."""
+
+    source = _source(db_session)
+    number = "32616540076"
+    first = _tender(db_session, source, registry_number=number)
+    twin = _tender(db_session, source, registry_number=number)
+    other = _tender(db_session, source, registry_number="32616540077")
+    no_number = _tender(db_session, source)
+
+    set_relevance(db_session, first, RelevanceStatus.REJECTED.value, actor=admin_user)
+
+    assert twin.relevance_status == RelevanceStatus.REJECTED.value
+    assert twin.relevance_marked_by_id == admin_user.id
+    assert other.relevance_status == RelevanceStatus.NEW.value
+    assert no_number.relevance_status == RelevanceStatus.NEW.value
+
+    set_relevance(db_session, first, RelevanceStatus.NEW.value, actor=admin_user)
+    assert twin.relevance_status == RelevanceStatus.NEW.value
+    assert twin.relevance_marked_by_id is None
+

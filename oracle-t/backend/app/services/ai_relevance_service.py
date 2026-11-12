@@ -151,6 +151,11 @@ _OTHER_RESOURCE_RE = re.compile(
 # Длинные названия — почти всегда сводные строительные объекты, по ним решает модель.
 _RULE_MAX_TITLE = 250
 RULE_CONFIDENCE = 95
+# Код ОКПД2 счётчиков электроэнергии (26.51.63.130 и глубже). Замер 12.11.2026 (раздел 105
+# ARCHITECTURE.md): «Поставка оборудования» с этим кодом специалист отметил «Релевантна», а
+# модель ответила «недостаточно информации» — код она видит, но по безликому названию ему не
+# верит. Соседние 26.51.63.110/.120 — газ и жидкость, поэтому не вся группа 26.51.63.
+METER_OKPD2_PREFIX = "26.51.63.13"
 
 
 def normalize_title(title: str | None) -> str:
@@ -179,6 +184,19 @@ def rule_answer(tender: Tender) -> RelevanceAnswer | None:
             is_relevant=True,
             confidence=RULE_CONFIDENCE,
             reason="Определено без модели: предмет — поставка, замена или поверка приборов учёта электроэнергии.",
+        )
+    if (
+        (tender.okpd2_code or "").startswith(METER_OKPD2_PREFIX)
+        and len(title) <= _RULE_MAX_TITLE
+        and not _OTHER_RESOURCE_RE.search(title)
+        and not _NOT_SURE_RE.search(title)
+    ):
+        return RelevanceAnswer(
+            is_relevant=True,
+            confidence=RULE_CONFIDENCE,
+            reason=(
+                f"Определено без модели: код ОКПД2 {tender.okpd2_code} — счётчики электроэнергии."
+            ),
         )
     return None
 

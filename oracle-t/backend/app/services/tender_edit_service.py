@@ -170,6 +170,8 @@ def update_tender(
             )
 
     _record_relevance_mark(tender, relevance_before, actor)
+    if any(entry.field_name in ("stage", "relevance_status") for entry in entries):
+        _share_stage_with_twins(db, tender, actor)
 
     if entries:
         details = "; ".join(
@@ -207,6 +209,36 @@ def _record_relevance_mark(tender: Tender, before: str, actor: User) -> None:
         return
     tender.relevance_marked_by_id = actor.id
     tender.relevance_marked_at = datetime.now(timezone.utc)
+
+
+def _share_stage_with_twins(db: Session, tender: Tender, actor: User) -> None:
+    """Решение по закупке — одно на все её записи (12.11.2026, раздел 105 ARCHITECTURE.md).
+
+    Одна закупка лежит строкой ЕИС, площадки, Госплана и Тендерплана. В канале «Все» они
+    схлопнуты, но в своих каналах запись-двойник оставалась «новой»: замер по решениям
+    специалистов показал закупки, отклонённые дважды — на ЭТП ГПБ и в Тендерплане. Этап и
+    автор отметки переносятся на записи с тем же номером ЕИС; без номера ЕИС совпадение
+    названий ненадёжно (тот же заказчик повторяет закупку), такие записи не трогаем.
+    """
+
+    from app.services.tender_service import _REGISTRY_NUMBER_RE
+
+    number = tender.registry_number or ""
+    if not _REGISTRY_NUMBER_RE.match(number):
+        return
+    twins = db.scalars(
+        select(Tender).where(Tender.registry_number == number, Tender.id != tender.id)
+    )
+    for twin in twins:
+        if twin.stage == tender.stage:
+            continue
+        old_stage = twin.stage
+        twin.stage = tender.stage
+        twin.relevance_marked_by_id = tender.relevance_marked_by_id
+        twin.relevance_marked_at = tender.relevance_marked_at
+        record_change(
+            db, twin, field_name="stage", old_value=old_stage, new_value=tender.stage, actor=actor
+        )
 
 
 def add_comment(db: Session, tender: Tender, text: str, *, actor: User) -> TenderHistoryEntry:

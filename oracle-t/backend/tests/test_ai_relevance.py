@@ -183,6 +183,25 @@ def test_rule_answer(db_session, title, expected):
     assert (None if answer is None else answer.is_relevant) is expected
 
 
+@pytest.mark.parametrize(
+    ("title", "okpd2", "expected"),
+    [
+        # Безликое название, но код счётчиков электроэнергии — наше (замер 12.11.2026).
+        ("Поставка оборудования", "26.51.63.130", True),
+        # Соседние коды той же группы — газ и жидкость: решает модель.
+        ("Поставка оборудования", "26.51.63.110", None),
+        # Стройка с тем же кодом — по-прежнему решает модель.
+        ("Строительство КРУН 10 кВ", "26.51.63.130", None),
+        ("Поставка оборудования", None, None),
+    ],
+)
+def test_rule_answer_by_meter_okpd2(db_session, title, okpd2, expected):
+    tender = _tender(db_session, title)
+    tender.okpd2_code = okpd2
+    answer = ai_relevance_service.rule_answer(tender)
+    assert (None if answer is None else answer.is_relevant) is expected
+
+
 def test_batch_uses_rules_and_same_title_without_model(db_session, monkeypatch):
     """Однозначное название решает правило, повтор названия — прошлый ответ модели."""
 
