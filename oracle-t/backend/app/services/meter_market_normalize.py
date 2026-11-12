@@ -143,8 +143,43 @@ def manufacturer_key(raw: str | None) -> str:
 #   «CE207 R7.749.2.OAG.QUVLF GS04», «307-...-PZZ-3-» — «307-…-PZZ-3-»;
 # - пустая модификация («(без модификации)») — все поверки типа, если не подошло ничего точнее;
 # - косая с пробелом — «или»: «МИР С-05 G2Z1B e / G5Z1B» (вторая альтернатива заменяет похожее
-#   слово первой — G2Z1B, а не «e»); без пробела — часть кода («G3/R4»), кроме «G/R».
+#   слово первой — G2Z1B, а не «e»); без пробела — часть кода («G3/R4», «R2/R4»), но варианты
+#   модема с одной начальной буквой — «или» («G4/G3», «G3E/G4E» у НЕВА СТ221, «G4/G7»);
+# - «G/R» у НЕВА СП311 — «G…/R…» подряд («BCS-G3/R4»), а не «G или R»: иначе «C/R» и «R/R»
+#   находили «C» в «BCS» и «R» в «2AR», шаблоны равнялись и написание не размечалось;
+# - одиночная буква ищется подстрокой (у «Меркурий 234 r» это R в «DPBR»), но при равенстве
+#   шаблонов побеждает тот, чья буква — отдельное слово написания («L1» у «НЕВА СТ221 l»
+#   против «B» внутри «BCS» у «НЕВА СТ221 B»). Замечание 12.11.2026.
 _WILDCARD_RE = re.compile(r"\.{3,}|…|\*|%|\s+")
+
+
+class _Letter(str):
+    """Одиночная буква шаблона: ищется подстрокой ключа; `word_hit` — она же отдельным словом
+    написания или буквой с цифрами («l1») — для разбора равных шаблонов."""
+
+    def found(self, key: str, words: list[str] | None) -> bool:
+        return self in key
+
+    def word_hit(self, words: list[str]) -> bool:
+        return any(word == self or (word[:1] == self and word[1:].isdigit()) for word in words)
+
+
+class _Pair(str):
+    """«G/R»: буква «g», цифры (или ничего), буква «r» — «BCS-G3/R4» → ключ «…bcsg3r4»."""
+
+    def found(self, key: str, words: list[str] | None) -> bool:
+        return re.search(rf"{re.escape(self[0])}[\do]*{re.escape(self[1])}", key) is not None
+
+
+def _option(key: str) -> str:
+    return _Letter(key) if len(key) == 1 else key
+
+
+def raw_words(raw: str | None) -> list[str]:
+    """Слова написания после той же нормализации, что у ключа (`modification_key`)."""
+
+    text = (raw or "").casefold().translate(_HOMOGLYPHS).replace("0", "o")
+    return [word for word in _NON_ALNUM_RE.split(text) if word]
 
 
 def _similar(a: str, b: str) -> int:
@@ -166,12 +201,22 @@ def pattern_parts(name: str | None) -> list[set[str]]:
     slots: list[set[str]] = []
     for token in _WILDCARD_RE.split(alternatives[0]):
         pieces = [modification_key(t) for t in token.split("/")]
-        # «G3/R4» — буквальная часть кода (так и пишут поверители: «…BCS G3/R4»), «G/R» —
-        # «G или R»: косая без пробелов означает «или» только между одиночными знаками.
-        if len(pieces) > 1 and all(len(p) <= 1 for p in pieces):
-            keys = {p for p in pieces if p}
+        pieces_set = [p for p in pieces if p]
+        if len(pieces) > 1 and len(pieces_set) == 2 and all(len(p) == 1 for p in pieces_set):
+            keys = {_Pair("".join(pieces_set))}
+        elif (
+            len(pieces) == len(pieces_set) > 1
+            and len({p[0] for p in pieces_set}) == 1
+            and pieces_set[0][0].isalpha()
+            and pieces_set[0][0] != "r"  # «R2/R4», «G3/R4» у НЕВА — код с реле R4, а не «или»
+            and len({len(p) for p in pieces_set}) == 1
+            and len(pieces_set[0]) <= 4
+        ):
+            keys = {_option(p) for p in pieces_set}
+        elif len(pieces) > 1 and all(len(p) <= 1 for p in pieces):
+            keys = {_option(p) for p in pieces_set}
         else:
-            keys = {modification_key(token)} - {""}
+            keys = {_option(modification_key(token))} - {""}
         if keys:
             slots.append(keys)
     for extra in alternatives[1:]:
@@ -180,14 +225,17 @@ def pattern_parts(name: str | None) -> list[set[str]]:
             if not key or not slots:
                 continue
             target = max(range(len(slots)), key=lambda i: max(_similar(key, k) for k in slots[i]))
-            slots[target].add(key)
+            slots[target].add(_option(key))
     return slots
 
 
 def contains_all(key: str, slots: list[set[str]]) -> bool:
     """Каждый слот шаблона есть в ключе написания (в любом месте и порядке)."""
 
-    return all(any(option in key for option in options) for options in slots)
+    return all(
+        any(option.found(key, None) if hasattr(option, "found") else option in key for option in options)
+        for options in slots
+    )
 
 
 EMPTY_MODIFICATION = "(без модификации)"
@@ -223,19 +271,35 @@ class ModificationMatcher:
         slots = pattern_parts(name)
         for options in slots:
             for stem in self._stems.get(type_id, ()):
-                options |= {option[len(stem):] for option in list(options) if option.startswith(stem) and len(option) > len(stem)}
+                options |= {_option(option[len(stem):]) for option in list(options) if option.startswith(stem) and len(option) > len(stem)}
         if slots:
             weight = sum(min(len(k) for k in options) for options in slots)
             self._by_type.setdefault(type_id, []).append((mod_id, slots, weight))
 
-    def match(self, type_id: int, key: str) -> int | None:
+    def match(self, type_id: int, key: str, raw: str | None = None) -> int | None:
         best: list[tuple[int, int]] = []
+        slots_of: dict[int, list[set[str]]] = {}
         for mod_id, slots, weight in self._by_type.get(type_id, ()):
             if contains_all(key, slots):
                 best.append((weight, mod_id))
+                slots_of[mod_id] = slots
         if not best:
             return None
         best.sort(reverse=True)
         top_weight = best[0][0]
-        top = {mod_id for weight, mod_id in best if weight == top_weight}
-        return best[0][1] if len(top) == 1 else None
+        top = sorted({mod_id for weight, mod_id in best if weight == top_weight})
+        if len(top) == 1:
+            return top[0]
+        if raw is None:
+            return None
+        # Равные шаблоны: выигрывает тот, у кого больше одиночных букв стоят отдельным словом.
+        words = raw_words(raw)
+        hits = {
+            mod_id: sum(
+                any(isinstance(o, _Letter) and o.word_hit(words) for o in options) for options in slots_of[mod_id]
+            )
+            for mod_id in top
+        }
+        most = max(hits.values())
+        winners = [mod_id for mod_id, hit in hits.items() if hit == most]
+        return winners[0] if most > 0 and len(winners) == 1 else None

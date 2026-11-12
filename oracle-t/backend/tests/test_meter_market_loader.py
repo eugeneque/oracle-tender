@@ -283,6 +283,15 @@ def test_analyst_names_are_search_patterns_not_raw_spellings():
         (8, 50, "МИР С-05 G2Z1B e / G5Z1B"),
         (9, 60, "NP73 rs"),
         (10, 60, "NP73 rs g"),
+        (11, 70, "НЕВА СП311 G/R"),
+        (12, 70, "НЕВА СП311 C/R"),
+        (13, 70, "НЕВА СП311 R/R"),
+        (14, 80, "НЕВА СТ221 B"),
+        (15, 80, "НЕВА СТ221 l"),
+        (16, 80, "НЕВА СТ221 G3E/G4E"),
+        (17, 80, "НЕВА СТ221 G4/G3"),
+        (18, 20, "НЕBA СП111 R2/R4"),
+        (19, 20, "НЕBA СП111"),
     ]
     matcher = ModificationMatcher(mods, {30: "i-prom.3", 20: "НЕВА СП111"})
     key = modification_key
@@ -301,3 +310,15 @@ def test_analyst_names_are_search_patterns_not_raw_spellings():
     # Самый специфичный шаблон побеждает, равные — неоднозначность.
     assert matcher.match(60, key("NP73 rs g")) == 10
     assert matcher.match(60, key("NP73 ZZ")) is None
+    # «G/R» у НЕВА СП311 — «G…/R…» подряд, а не «G или R»: «C» в «BCS» и «R» в «2AR» не в счёт.
+    raw = "НЕВА СП311 2AR 29 BCS-G3/R4"
+    assert matcher.match(70, key(raw), raw) == 11
+    raw = "НЕВА СП311 2AR 19 BCS-C2/R4"
+    assert matcher.match(70, key(raw), raw) == 12
+    # «G3E/G4E», «G4/G3» — «или»; «B» внутри «BCS» не перебивает; при равенстве с «B» — буква-слово «L1».
+    for raw, expected in (("НЕВА СТ221 2AR2S 29 BCS-G3E", 16), ("НЕВА СТ221 2AR2S 29 BCS-G3", 17),
+                          ("НЕВА СТ221 2AR2S 29 BCS-L1", 15)):
+        assert matcher.match(80, key(raw), raw) == expected
+    # «R2/R4» у СП111 — буквальный код с реле, а не «R2 или R4».
+    raw = "НЕВА СП111 2AR2S 29 BCS L3/R4"
+    assert matcher.match(20, key(raw), raw) == 19

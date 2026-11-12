@@ -376,31 +376,45 @@ def save_thresholds(db: Session, values: list[dict[str, Any]]) -> None:
     db.flush()
 
 
-def remap_auto(db: Session, type_id: int | None = None) -> int:
+def remap_auto(db: Session, type_id: int | None = None, *, recheck: bool = False) -> int:
     """Пересвести неразмеченные написания: по ключам уже размеченных и по шаблонам названий
-    модификаций (`ModificationMatcher`) — после импорта или новой модификации в справочнике."""
+    модификаций (`ModificationMatcher`) — после импорта или новой модификации в справочнике.
+
+    `recheck` — заодно перепроверить автоматические привязки (после правки правил шаблонов,
+    12.11.2026: «НЕВА СТ221 … BCS-G3E» было у «B» из-за буквы в «BCS»). Меняется привязка, только
+    если шаблон дал другое исполнение; ключ, который человек разметил вручную, не трогается."""
 
     rows = db.execute(
         text(
-            "SELECT DISTINCT ON (type_id, norm_key) type_id, norm_key, modification_id FROM meter_market_variants "
+            "SELECT DISTINCT ON (type_id, norm_key) type_id, norm_key, modification_id, mapped_by FROM meter_market_variants "
             "WHERE modification_id IS NOT NULL ORDER BY type_id, norm_key, mapped_by = 'manual' DESC"
         )
     ).all()
-    known = {(t, k): m for t, k, m in rows}
+    known = {(t, k): m for t, k, m, _ in rows}
+    manual_keys = {(t, k) for t, k, _, by in rows if by == "manual"}
     modifications = [tuple(r) for r in db.execute(text("SELECT id, type_id, name FROM meter_market_modifications"))]
+    by_name: dict[tuple[int, str], int] = {}
     for mod_id, mod_type, name in modifications:
+        by_name.setdefault((mod_type, modification_key(name)), mod_id)
         known.setdefault((mod_type, modification_key(name)), mod_id)
     matcher = ModificationMatcher(modifications, dict(db.execute(text("SELECT id, notation FROM meter_market_types")).all()))
     params: dict[str, Any] = {}
-    where = "modification_id IS NULL"
+    where = "(modification_id IS NULL OR mapped_by = 'auto')" if recheck else "modification_id IS NULL"
     if type_id is not None:
         where += " AND type_id = :t"
         params["t"] = type_id
     updates = []
-    for variant_id, variant_type, key in db.execute(
-        text(f"SELECT id, type_id, norm_key FROM meter_market_variants WHERE {where}"), params
+    for variant_id, variant_type, key, raw, current in db.execute(
+        text(f"SELECT id, type_id, norm_key, raw, modification_id FROM meter_market_variants WHERE {where}"), params
     ).all():
-        mod_id = known.get((variant_type, key)) or matcher.match(variant_type, key)
+        if current is None:
+            mod_id = known.get((variant_type, key)) or matcher.match(variant_type, key, raw)
+        elif (variant_type, key) in manual_keys:
+            continue
+        else:
+            mod_id = by_name.get((variant_type, key)) or matcher.match(variant_type, key, raw)
+            if mod_id == current:
+                continue
         if mod_id is not None:
             updates.append({"m": mod_id, "v": variant_id})
     if updates:

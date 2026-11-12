@@ -49,7 +49,7 @@ oracle-tender-main/            ← не git-репозиторий (git status/d
   реестр — `adapters/registry.py`.
 - `core/scheduler.py` (APScheduler: опрос площадок, сроки, уборка), `core/jobs.py` (фоновые задачи).
 - `models/` — одна сущность на файл; `alembic/versions/NNNN_name.py` — миграции с нумерацией
-  (последняя на 11.11.2026 — `0098_tender_protocol_results`), докстринг миграции объясняет «зачем».
+  (последняя на 12.11.2026 — `0099_meter_market_remap_letters`), докстринг миграции объясняет «зачем».
 - Учёт токенов ИИ — `ai_usage_service` (пишут клиенты моделей), окно контекста моделей —
   `ai_provider_service.get_model_limits`/`input_budget_chars`; см. раздел 52 ARCHITECTURE.md.
 - Центр уведомлений в шапке — `GET /activity` (`activity_service`, задания планировщика —

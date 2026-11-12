@@ -395,7 +395,7 @@ def _variant_id(conn: Connection, caches: _Caches, type_id: int, raw: str) -> in
     if variant_id is not None:
         return variant_id
     key = modification_key(raw)
-    mod_id = caches.auto_map.get((type_id, key)) or caches.matcher.match(type_id, key)
+    mod_id = caches.auto_map.get((type_id, key)) or caches.matcher.match(type_id, key, raw)
     variant_id = conn.execute(
         text(
             "INSERT INTO meter_market_variants (type_id, raw, norm_key, modification_id, mapped_by) "
