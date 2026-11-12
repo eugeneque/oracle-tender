@@ -48,6 +48,7 @@ from app.services.meter_market_normalize import EMPTY_MODIFICATION
 
 _HOMOGLYPHS = str.maketrans("авекмнорстхуё", "abekmhopctxye")
 _SPLIT = re.compile(r"[\W_]+")
+_ALNUM = re.compile(r"[^\W_]")
 # Префикс короче этого (букв и цифр) не сопоставляется: «307» нашлось бы в половине реестра.
 MIN_PREFIX = 4
 
@@ -85,6 +86,41 @@ def match_rows(name: str, prepared: list[tuple[RegistryRow, str]]) -> tuple[str,
     return "", []
 
 
+def match_rows_ranked(
+    name: str, prepared: list[tuple[RegistryRow, str]], *, families: set[str] = frozenset()
+) -> tuple[str, list[tuple[RegistryRow, int]]]:
+    """Как `match_rows`, плюс записи на **более общее** исполнение — с длиной совпадения.
+
+    «МИРТЕК-32-РУ D37-2 5-100»: самый длинный префикс находит «…-D37-2 (5-100)» (114 б., с
+    19.05.2025), но раньше неё есть запись на весь «МИРТЕК-32-РУ-D37-2» (113 б., с 12.03.2025) —
+    она тоже про это исполнение (замечание 12.11.2026). Общая запись берётся по более короткому
+    префиксу, только если наименование в реестре на нём и **заканчивается** (дальше ни букв,
+    ни цифр): «…-D37-2» — да, «"МИРТЕК-32-РУ". Корпус D37» — нет. Префикс, равный обозначению
+    типа (`families`), не берётся — это запись семейства, у неё своя обработка."""
+
+    head, found = match_rows(name, prepared)
+    if not found:
+        return "", []
+    ranked = {id(row): (row, len(_family_key(head))) for row in found}
+    parts = [p for p in _SPLIT.split(_fold(name)) if p]
+    size = len([p for p in _SPLIT.split(_fold(head)) if p])
+    for shorter in range(size - 1, 0, -1):
+        prefix = parts[:shorter]
+        key = "".join(prefix)
+        if len(key) < MIN_PREFIX:
+            break
+        if key in families:
+            continue
+        pattern = _pattern(prefix)
+        for row, folded in prepared:
+            if id(row) in ranked:
+                continue
+            match = pattern.search(folded)
+            if match and not _ALNUM.search(folded, match.end()):
+                ranked[id(row)] = (row, len(key))
+    return head, list(ranked.values())
+
+
 def _family_key(value: str) -> str:
     return "".join(p for p in _SPLIT.split(_fold(value)) if p)
 
@@ -116,7 +152,7 @@ def apply_gisp_rows(db: Session, rows: list[RegistryRow], *, today: date | None 
         return stats
 
     # Проход 1: самый длинный найденный префикс каждого исполнения.
-    matches: dict[int, tuple[str, list[RegistryRow], list[str]]] = {}
+    matches: dict[int, tuple[str, list[tuple[RegistryRow, int]], list[str]]] = {}
     for mod in mods:
         if mod["localization_source"] == "manual":
             continue
@@ -125,11 +161,13 @@ def apply_gisp_rows(db: Session, rows: list[RegistryRow], *, today: date | None 
             # Своего кода нет — ищем по обозначению типа (первое из перечисленных, что нашлось).
             head, found = "", []
             for notation in notations:
-                head, found = match_rows(notation, prepared)
-                if found:
+                head, rows_ = match_rows(notation, prepared)
+                if rows_:
+                    found = [(row, len(_family_key(head))) for row in rows_]
                     break
         else:
-            head, found = match_rows(mod["name"], prepared)
+            families = {_family_key(part) for part in notations}
+            head, found = match_rows_ranked(mod["name"], prepared, families=families)
         matches[mod["id"]] = (head, found, notations)
 
     # Проход 2: строка реестра — только исполнению типа с самым длинным совпадением. «МИРТЕК-12-РУ
@@ -137,18 +175,17 @@ def apply_gisp_rows(db: Session, rows: list[RegistryRow], *, today: date | None 
     # (замечание 12.11.2026), хотя у сестёр-исполнений свои строки справочника.
     best: dict[tuple[int, int], int] = {}
     for mod in mods:
-        head, found, _ = matches.get(mod["id"], ("", [], []))
-        for row in found:
+        _, found, _ = matches.get(mod["id"], ("", [], []))
+        for row, size in found:
             key = (mod["type_id"], id(row))
-            best[key] = max(best.get(key, 0), len(_family_key(head)))
+            best[key] = max(best.get(key, 0), size)
 
     for mod in mods:
         if mod["id"] not in matches:
             continue
         source = mod["localization_source"]
-        head, found, notations = matches[mod["id"]]
-        size = len(_family_key(head))
-        found = [row for row in found if best[(mod["type_id"], id(row))] == size]
+        head, ranked, notations = matches[mod["id"]]
+        found = [row for row, size in ranked if best[(mod["type_id"], id(row))] == size]
         no_code = mod["name"] == EMPTY_MODIFICATION
         if not found:
             # Совпадения больше нет — прежняя история ГИСП устарела (её баллы могли быть баллами

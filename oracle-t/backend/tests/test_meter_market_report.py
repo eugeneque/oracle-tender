@@ -297,6 +297,37 @@ def test_gisp_row_goes_to_longest_sibling_only(market, db_session):
     assert not verdict.included
 
 
+def test_gisp_broader_record_applies_to_executions(market, db_session):
+    """«МИРТЕК-32-РУ-D37-2» (113 б., 12.03.2025) — запись на весь D37-2, «…D37-2 (5-100)» (114 б.,
+    19.05.2025) — только на 5-100. Исполнение 5-100 получает обе, 5-10 — только общую (12.11.2026)."""
+
+    from app.adapters.admission_registries import RegistryRow
+    from app.services.meter_market_gisp import apply_gisp_rows
+
+    t = _id(db_session, "INSERT INTO meter_market_types (mit_number, manufacturer_id, in_report, review_status, "
+                        "notation) VALUES ('65634-16', :m, true, 'included', 'МИРТЕК-32-РУ')", m=market["nartis"])
+    ids = {}
+    for name, score in (("МИРТЕК-32-РУ D37-2 5-100", 114), ("МИРТЕК-32-РУ D37-2 5-10", 113)):
+        ids[name] = _id(db_session, "INSERT INTO meter_market_modifications (type_id, name, in_rpp, score, "
+                                    "localization_source) VALUES (:t, :n, true, :s, 'import')", t=t, n=name, s=score)
+    prefix = "Счетчики электрической энергии трехфазные многофункциональные "
+    rows = [
+        RegistryRow("10616809", prefix + "МИРТЕК-32-РУ-D37-2", score=113, issued_at=date(2025, 3, 12)),
+        RegistryRow("10634655", prefix + "МИРТЕК-32-РУ-D37-2 (5-100)", score=114, issued_at=date(2025, 5, 19)),
+        RegistryRow("10510879", prefix + '"МИРТЕК-32-РУ". Корпус D37', score=76, issued_at=date(2023, 12, 13)),
+    ]
+    apply_gisp_rows(db_session, rows, today=date(2026, 11, 12))
+    got = {}
+    for mod_id, number in db_session.execute(text(
+        "SELECT modification_id, record_number FROM meter_market_rpp_records ORDER BY issued_at"
+    )):
+        got.setdefault(mod_id, []).append(number)
+    assert got == {ids["МИРТЕК-32-РУ D37-2 5-100"]: ["10616809", "10634655"],
+                   ids["МИРТЕК-32-РУ D37-2 5-10"]: ["10616809"]}
+    dates = dict(db_session.execute(text("SELECT name, rpp_included_at FROM meter_market_modifications WHERE type_id = :t"), {"t": t}).all())
+    assert set(dates.values()) == {date(2025, 3, 12)}
+
+
 def test_localization_follows_rpp_record_history(market, db_session):
     """НАРТИС-И100-W112-2 в ГИСП: 95 баллов с 12.11.2024, 113 — с 14.05.2026. Поверки до мая
     2026 года — требования 2024-го, после — 2025-го; месяц смены делится по дням."""
