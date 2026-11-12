@@ -156,6 +156,10 @@ RULE_CONFIDENCE = 95
 # модель ответила «недостаточно информации» — код она видит, но по безликому названию ему не
 # верит. Соседние 26.51.63.110/.120 — газ и жидкость, поэтому не вся группа 26.51.63.
 METER_OKPD2_PREFIX = "26.51.63.13"
+# С кодом счётчиков приходят и стройки, где счётчик — строка сметы: «строительно-монтажные и
+# пусконаладочные работы», «МТР для технического перевооружения ПС». `_NOT_SURE_RE` ловит
+# «строительство», но не эти формы (перепроверка на сервере 12.11.2026) — по ним решает модель.
+_OKPD2_NOT_SURE_RE = re.compile(r"(строительн|монтаж|пусконалад|перевооруж|\bмтр\b|\bпнр\b)")
 
 
 def normalize_title(title: str | None) -> str:
@@ -190,6 +194,7 @@ def rule_answer(tender: Tender) -> RelevanceAnswer | None:
         and len(title) <= _RULE_MAX_TITLE
         and not _OTHER_RESOURCE_RE.search(title)
         and not _NOT_SURE_RE.search(title)
+        and not _OKPD2_NOT_SURE_RE.search(title)
     ):
         return RelevanceAnswer(
             is_relevant=True,

@@ -30,7 +30,25 @@ def main() -> None:
                 service._store(tender, answer)
                 fixed += 1
                 print(f"+ {' '.join((tender.title or '').split())[:100]}")
+        # Возвращённые первой версией правила стройки (12.11.2026): правило их больше не
+        # решает — отметка снимается, и закупку заново проверит модель.
+        undone = 0
+        by_code = db.scalars(
+            select(Tender).where(
+                Tender.ai_relevant.is_(True),
+                Tender.ai_relevance_reason.like("Определено без модели: код ОКПД2%"),
+            )
+        ).all()
+        for tender in by_code:
+            if service.rule_answer(tender) is None:
+                tender.ai_relevant = None
+                tender.ai_relevance_reason = None
+                tender.ai_relevance_confidence = None
+                tender.ai_relevance_checked_at = None
+                undone += 1
+                print(f"- {' '.join((tender.title or '').split())[:100]}")
         db.commit()
+        print(f"Отправлено модели на повторную проверку: {undone}")
     print(f"Отклонённых моделью с кодом счётчиков: {len(tenders)}, возвращено: {fixed}")
 
 
