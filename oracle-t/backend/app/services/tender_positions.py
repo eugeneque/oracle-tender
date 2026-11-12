@@ -177,6 +177,12 @@ def extract_positions(db: Session, tender: Tender, *, actor: User | None = None)
         response_model=PositionsAnswer,
         temperature=0.0,
     )
+    return save_positions(db, tender, answer, actor=actor)
+
+
+def save_positions(db: Session, tender: Tender, answer: PositionsAnswer, *, actor: User | None = None) -> int:
+    """Заменяет позиции закупки ответом модели — общий для отдельного запроса и общего
+    запроса «позиции + условия поставки + условия договора» (`document_facts_service`)."""
 
     rows: list[TenderPosition] = []
     seen: set[tuple[str, str, str]] = set()

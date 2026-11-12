@@ -35,6 +35,7 @@ from app.services import (
     tender_positions,
     contract_conditions_service,
     delivery_terms_service,
+    document_facts_service,
     protocol_results_service,
     tender_twins,
 )
@@ -80,6 +81,51 @@ def _run_analysis(db: Session, tender: Tender, actor: User | None) -> str:
         parts.append(f"ОКПД2: {outcome.okpd2_code}")
     parts.extend(outcome.messages)
 
+    # Позиции, условия поставки и условия договора — одним запросом (12.11.2026, раздел 104
+    # ARCHITECTURE.md, `document_facts_service`). Не подошёл (фрагменты не помещаются целиком,
+    # ответ сорвался) — три отдельных запроса ниже, как раньше.
+    combined = None
+    try:
+        report_progress("Позиции и условия поставки и договора…")
+        combined = document_facts_service.extract_all(db, tender, actor=actor)
+    except Exception as exc:  # noqa: BLE001 - не обязательны для анализа
+        db.rollback()
+        parts.append(f"позиции и условия не извлечены ({exc})")
+        combined = {}
+    if combined:
+        parts.append(
+            f"позиций закупки: {combined['positions']}; мест поставки: {combined['points']}, "
+            f"этапов графика: {combined['stages']}; условий договора: {combined['conditions']}"
+        )
+    elif combined is None:
+        _extract_separately(db, tender, actor, parts)
+
+    # Итоги из протоколов (участники, цены, допуск, победитель, наш результат) — только если
+    # протоколы уже есть (11.11.2026, раздел 96 ARCHITECTURE.md). Сбой не отменяет анализ.
+    try:
+        found = protocol_results_service.extract(db, tender, actor=actor)
+        if found["protocols"]:
+            parts.append(f"протоколов: {found['protocols']}, участников: {found['participants']}")
+    except Exception as exc:  # noqa: BLE001 - итоги не обязательны для анализа
+        db.rollback()
+        parts.append(f"протоколы не разобраны ({exc})")
+
+    # Вектор и список похожих обновляются здесь же: требования только что извлечены, а
+    # именно они делают «похожесть» осмысленной (без них похожими оказываются все закупки
+    # с похожими названиями). Сбой не отменяет анализ — вкладка «Похожие» просто останется
+    # с прежним содержимым.
+    similarity = refresh_similar(db, tender)
+    if similarity.pairs_saved:
+        parts.append(f"похожих тендеров: {similarity.pairs_saved}")
+    parts.extend(similarity.messages)
+
+    notification_service.notify_new_relevant_tender(db, tender)
+    return "; ".join(parts)
+
+
+def _extract_separately(db, tender, actor, parts: list[str]) -> None:
+    """Прежние три запроса — когда общий не подошёл."""
+
     # Позиции закупки — отдельным запросом к модели по тем же документам (23.10.2026, раздел
     # 74 ARCHITECTURE.md). Сбой не отменяет анализ: требования уже сохранены, позиции
     # остаются прежними.
@@ -112,27 +158,6 @@ def _run_analysis(db: Session, tender: Tender, actor: User | None) -> str:
         db.rollback()
         parts.append(f"условия договора не извлечены ({exc})")
 
-    # Итоги из протоколов (участники, цены, допуск, победитель, наш результат) — только если
-    # протоколы уже есть (11.11.2026, раздел 96 ARCHITECTURE.md). Сбой не отменяет анализ.
-    try:
-        found = protocol_results_service.extract(db, tender, actor=actor)
-        if found["protocols"]:
-            parts.append(f"протоколов: {found['protocols']}, участников: {found['participants']}")
-    except Exception as exc:  # noqa: BLE001 - итоги не обязательны для анализа
-        db.rollback()
-        parts.append(f"протоколы не разобраны ({exc})")
-
-    # Вектор и список похожих обновляются здесь же: требования только что извлечены, а
-    # именно они делают «похожесть» осмысленной (без них похожими оказываются все закупки
-    # с похожими названиями). Сбой не отменяет анализ — вкладка «Похожие» просто останется
-    # с прежним содержимым.
-    similarity = refresh_similar(db, tender)
-    if similarity.pairs_saved:
-        parts.append(f"похожих тендеров: {similarity.pairs_saved}")
-    parts.extend(similarity.messages)
-
-    notification_service.notify_new_relevant_tender(db, tender)
-    return "; ".join(parts)
 
 
 # «Достроить, а не пересчитать»: пропускаются производители, чей итог новее требований.

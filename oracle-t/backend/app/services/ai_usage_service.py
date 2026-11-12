@@ -48,6 +48,7 @@ OPERATION_LABELS: dict[str, str] = {
     "RequirementsResult": "Извлечение требований",
     "ConsolidationResult": "Сведение требований",
     "ComplianceResult": "Матрица соответствия",
+    "BitrixFactsAnswer": "Позиции и условия (один запрос)",
     "ExtractionResult": "Характеристики продукции",
     "SectionsBatchOne": "Разделы «Дополнительно»",
     "SectionsBatchTwo": "Разделы «Дополнительно»",

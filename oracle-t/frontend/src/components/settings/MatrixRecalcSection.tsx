@@ -122,6 +122,14 @@ export function MatrixRecalcSection() {
       {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
       {notice && <SettingsNotice tone="success">{notice}</SettingsNotice>}
 
+      <SettingsNotice tone="error">
+        <span className="font-semibold">Самая дорогая операция в системе — запускайте только в крайнем случае.</span>{" "}
+        Матрица — около 90% всех расходов на ИИ: каждая закупка заново сверяется с каталогом всех
+        производителей, это сотни обращений к модели. Пересчёт десятков закупок стоит как неделя
+        обычной работы. Если нужно обновить одну-две закупки — пересчитайте их из карточки. Модель
+        матрицы выбирается на странице «Модели ИИ».
+      </SettingsNotice>
+
       <SettingsGroup id="matrix-recalc-why" label="Зачем и когда">
         <SettingsNotice tone="info">
           <ul className="list-disc space-y-1.5 pl-4">
@@ -221,7 +229,7 @@ export function MatrixRecalcSection() {
             <button
               onClick={() => setIsConfirming(true)}
               disabled={isLoading || count === 0}
-              className={primaryButtonClass}
+              className={secondaryButtonClass}
             >
               <RefreshCw size={14} />
               {count === 0 ? "Пересчитывать нечего" : `Пересчитать ${numberFormat.format(count)}`}
@@ -233,7 +241,7 @@ export function MatrixRecalcSection() {
                 {estimate?.total.cost !== null && estimate?.total.cost !== undefined
                   ? ` — около ${formatCost(estimate.total.cost)}`
                   : ""}
-                ?
+                ? Это платно и надолго займёт очередь разборов.
               </span>
               <button onClick={() => void start()} disabled={isStarting} className={primaryButtonClass}>
                 {isStarting ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}

@@ -145,6 +145,29 @@ def set_auto_review(
     return AutoReviewStatus.model_validate(state)
 
 
+@router.get("/matrix-model")
+def get_matrix_model(db: Session = Depends(get_db), _admin: User = Depends(require_admin)) -> dict:
+    """Модель матрицы соответствия и средний расход матрицы на закупку по моделям (раздел 104)."""
+
+    from app.services import matrix_model_service
+
+    return matrix_model_service.status(db)
+
+
+@router.put("/matrix-model")
+def set_matrix_model(
+    payload: dict, db: Session = Depends(get_db), admin: User = Depends(require_admin)
+) -> dict:
+    """`{"provider": "qwen"}` — матрица этой моделью; `{"provider": null}` — моделью разбора."""
+
+    from app.services import matrix_model_service
+
+    try:
+        return matrix_model_service.set_provider(db, payload.get("provider"), actor=admin)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
 @router.get("/ai-limits", response_model=list[AiModelLimitsOut])
 def get_ai_model_limits(
     db: Session = Depends(get_db),

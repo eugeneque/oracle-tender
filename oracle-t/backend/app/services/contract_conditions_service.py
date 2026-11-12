@@ -289,6 +289,13 @@ def extract(db: Session, tender: Tender, *, actor: User | None = None) -> dict[s
         response_model=ConditionsAnswer,
         temperature=0.0,
     )
+    return save_answer(db, tender, answer, actor=actor)
+
+
+def save_answer(db: Session, tender: Tender, answer: ConditionsAnswer, *, actor: User | None = None) -> dict[str, int]:
+    """Сохраняет условия договора из ответа модели — общий для отдельного запроса и общего
+    запроса Bitrix (`document_facts_service`)."""
+
     payload = normalize(answer)
     record = db.get(TenderContractConditions, tender.id) or TenderContractConditions(tender_id=tender.id)
     record.payload = payload

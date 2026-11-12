@@ -40,6 +40,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import math
 import re
 import uuid
@@ -2343,13 +2345,20 @@ def _ask_model(
     if precedents:
         user_text += f"\n\n{precedents}"
         outcome.precedents_used += used
+    from app.services import matrix_model_service
+    from app.services.ai_context import forcing_provider
+
+    # Модель матрицы, выбранная администратором (12.11.2026, раздел 104), — поверх модели
+    # разбора; не выбрана — как раньше, без закрепления.
+    chosen = matrix_model_service.get(db)
     try:
-        result = run_structured(
-            db,
-            system_prompt=_SYSTEM_PROMPT,
-            user_text=user_text,
-            response_model=ComplianceResult,
-        )
+        with forcing_provider(chosen) if chosen else contextlib.nullcontext():
+            result = run_structured(
+                db,
+                system_prompt=_SYSTEM_PROMPT,
+                user_text=user_text,
+                response_model=ComplianceResult,
+            )
     except (AiQuotaExceededError, AiNotConfiguredError):
         # Деньги кончились или модель выключена — остальные запросы упрутся в то же самое.
         # Расчёт останавливается с ошибкой: посчитанные производители уже сохранены, а

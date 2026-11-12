@@ -85,6 +85,8 @@ class AiProviderSettings(Base):
     auto_review_daily_limit: Mapped[int] = mapped_column(
         Integer, nullable=False, default=10, server_default="10"
     )
+    # Модель матрицы соответствия (12.11.2026, раздел 104): `None` — как у всего разбора.
+    matrix_provider: Mapped[str | None] = mapped_column(String(20), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

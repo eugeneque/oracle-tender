@@ -812,3 +812,30 @@ def test_manual_goes_into_the_same_request_without_second_pass(db_session, monke
         db_session, tender, manufacturer, [requirement], ComplianceOutcome(), use_manual_fallback=False
     )
     assert len(texts) == 1 and "[manual]" not in texts[0]
+
+
+def test_matrix_model_chosen_by_admin_is_forced_for_matrix_only(db_session, admin_user: User, monkeypatch):
+    """Раздел 104: администратор выбирает модель матрицы отдельно от разбора — обращения
+    матрицы идут ей; без выбора — как раньше, без закрепления."""
+
+    from app.services import ai_context, matrix_model_service
+
+    tender = _make_tender(db_session)
+    requirement = _add_requirement(db_session, tender, text="Интерфейс RS-485")
+    manufacturer = _make_manufacturer(db_session, with_catalog=True)
+    seen: list[str | None] = []
+
+    def _fake(db, **kwargs):
+        seen.append(ai_context.forced_provider())
+        return ComplianceResult(verdicts=[])
+
+    monkeypatch.setattr(compliance_module, "run_structured", _fake)
+    matrix_model_service.set_provider(db_session, "qwen", actor=admin_user)
+    compliance_module._evaluate_group(
+        db_session, tender, manufacturer, [requirement], ComplianceOutcome(), use_manual_fallback=False
+    )
+    matrix_model_service.set_provider(db_session, None, actor=admin_user)
+    compliance_module._evaluate_group(
+        db_session, tender, manufacturer, [requirement], ComplianceOutcome(), use_manual_fallback=False
+    )
+    assert seen == ["qwen", None]
