@@ -413,6 +413,21 @@ def _run_meter_market_job() -> None:
             logger.info(f"Поверки ФГИС: применены пакеты {', '.join(applied)}")
     except Exception as exc:  # noqa: BLE001 - сбой загрузки не должен ронять планировщик
         _journal("meter_market_load", "error", f"Загрузка поверок ФГИС «Аршин»: {exc}", level=LogLevel.ERROR)
+        return
+    # Новые написания, которые не подошли под шаблоны справочника, — ИИ по структуре условного
+    # обозначения (раздел 103 ARCHITECTURE.md): иначе они висят «не размечено» до ручной разметки.
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        from app.db.session import SessionLocal
+        from app.services import meter_market_markup
+
+        with SessionLocal() as session:
+            stats = meter_market_markup.run(session, since=datetime.now(timezone.utc) - timedelta(days=3))
+        if stats.get("mapped") or stats.get("created"):
+            logger.info(f"Рынок ПУ, разметка ИИ: {stats}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Рынок ПУ, разметка ИИ не выполнена: {exc}")
 
 
 def _run_catalog_queue_job() -> None:

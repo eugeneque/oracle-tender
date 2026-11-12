@@ -82,6 +82,8 @@ class MappedBy(str, enum.Enum):
     IMPORT = "import"
     AUTO = "auto"
     MANUAL = "manual"
+    # ИИ по структуре условного обозначения из «Описания типа» (`meter_market_markup`, 12.11.2026).
+    AI = "ai"
 
 
 class LocalizationSource(str, enum.Enum):

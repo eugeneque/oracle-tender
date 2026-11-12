@@ -25,6 +25,7 @@ const MAPPED_BY: Record<string, string> = {
   import: "по шаблону справочника аналитика",
   auto: "автоматически по ключу написания",
   manual: "вручную аналитиком",
+  ai: "ИИ по структуре обозначения из описания типа",
 };
 
 function query(params: Record<string, string | number | null | undefined>): string {
