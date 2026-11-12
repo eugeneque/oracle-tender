@@ -873,6 +873,23 @@ export interface TenderSourceRef {
   name: string;
 }
 
+/** Цена с НДС и без НДС по документации закупки (`price_vat_service`). Суммы — строками. */
+export interface PriceVat {
+  mode: "included" | "excluded" | "not_applicable";
+  price_with_vat?: string;
+  price_without_vat?: string;
+  vat_rate?: string;
+  vat_amount?: string;
+  /** Какая из цен досчитана, а не указана в документе. */
+  computed?: "with_vat" | "without_vat";
+  /** Ставка в документе не названа — досчитано по 22 %. */
+  rate_assumed?: boolean;
+  doc_price?: string;
+  matches_platform_price?: boolean;
+  document?: string;
+  quote?: string;
+}
+
 export interface Tender {
   id: string;
   external_id: string;
@@ -896,6 +913,9 @@ export interface Tender {
   tender_type: TenderTypeCode | null;
   /** Типы закупаемых приборов учёта (коды `METER_KINDS`); null — не определено. */
   meter_kinds: string[] | null;
+  /** НМЦК с НДС и без НДС из документации (12.11.2026, раздел 106): разбор кодом, без ИИ.
+   * null — в документах не нашлось. */
+  price_vat?: PriceVat | null;
   region_organizer_code: string | null;
   region_delivery_code: string | null;
   federal_district_code: number | null;

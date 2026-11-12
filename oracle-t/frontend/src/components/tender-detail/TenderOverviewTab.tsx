@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Check, ExternalLink, Loader2, Pencil, X } from "lucide-react";
 
 import { api } from "../../api/client";
-import type { FederalDistrict, Region, Tender, TenderUpdate } from "../../api/types";
+import type { FederalDistrict, PriceVat, Region, Tender, TenderUpdate } from "../../api/types";
 import { meterKindsSummary } from "../../utils/meterKinds";
 import {
   formatDate,
@@ -26,6 +26,64 @@ function MetaItem({ label, value }: { label: string; value: string | null | unde
     <div>
       <div className="text-xs text-zinc-500">{label}</div>
       <div className="mt-0.5 text-sm text-zinc-200">{value}</div>
+    </div>
+  );
+}
+
+/**
+ * Цена с НДС и без НДС по документации (12.11.2026). Досчитанная цена подписана «расчётно»:
+ * её в документе нет, и выдавать её за цену заказчика нельзя. Под строкой — цитата, откуда
+ * взято, чтобы сверить по документу.
+ */
+function PriceVatBlock({ vat, currency }: { vat: PriceVat; currency: string }) {
+  const rate = vat.vat_rate ? `НДС ${vat.vat_rate}%${vat.rate_assumed ? " (ставка не указана)" : ""}` : null;
+  const row = (label: string, value: string | undefined, computed: boolean) =>
+    value ? (
+      <div>
+        <div className="text-xs text-zinc-500">{label}</div>
+        <div className="mt-0.5 text-sm text-zinc-200">
+          {formatPrice(value, currency)}
+          {computed && <span className="ml-1.5 text-xs text-zinc-500">расчётно</span>}
+        </div>
+      </div>
+    ) : null;
+  return (
+    <div className="mb-5 rounded-lg border border-white/10 p-3">
+      <div className="mb-2 flex flex-wrap items-baseline gap-x-2 text-xs text-zinc-400">
+        <span className="font-medium text-zinc-300">НМЦК по документации</span>
+        <span>{
+          vat.mode === "not_applicable"
+            ? "НДС не облагается"
+            : vat.mode === "included"
+              ? "в документе указана с НДС"
+              : "в документе указана без НДС"
+        }</span>
+        {vat.matches_platform_price === false && (
+          <span className="text-amber-400">не совпадает с суммой площадки — сверьте</span>
+        )}
+      </div>
+      {vat.mode === "not_applicable" ? (
+        row("Цена", vat.price_with_vat, false)
+      ) : (
+        <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
+          {row("С НДС", vat.price_with_vat, vat.computed === "with_vat")}
+          {row("Без НДС", vat.price_without_vat, vat.computed === "without_vat")}
+          {rate && (
+            <div>
+              <div className="text-xs text-zinc-500">Ставка и сумма НДС</div>
+              <div className="mt-0.5 text-sm text-zinc-200">
+                {rate}
+                {vat.vat_amount ? ` · ${formatPrice(vat.vat_amount, currency)}` : ""}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      {vat.quote && (
+        <div className="mt-2 text-xs text-zinc-500" title={vat.document ?? undefined}>
+          «{vat.quote}»{vat.document ? ` — ${vat.document}` : ""}
+        </div>
+      )}
     </div>
   );
 }
@@ -212,6 +270,8 @@ export function TenderOverviewTab({
         <MetaItem label="Регион поставки" value={regionName(tender.region_delivery_code)} />
         <MetaItem label="Федеральный округ" value={districtName} />
       </div>
+
+      {tender.price_vat && <PriceVatBlock vat={tender.price_vat} currency={tender.currency} />}
 
       {isEditing ? (
         <ClassificationForm

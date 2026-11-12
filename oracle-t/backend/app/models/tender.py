@@ -16,7 +16,7 @@ from sqlalchemy import (
     case,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -156,6 +156,12 @@ class Tender(Base):
     # наименованию и требованиям к товару; NULL — тип не определён (фильтр такую закупку
     # не покажет, как и прочие незаполненные поля).
     meter_kinds: Mapped[list[str] | None] = mapped_column(ARRAY(String(30)), nullable=True)
+    # НМЦК с НДС и без НДС из документации (12.11.2026, раздел 106 ARCHITECTURE.md):
+    # `{"mode": "included"|"excluded"|"not_applicable", "price_with_vat", "price_without_vat",
+    # "vat_rate", "vat_amount", "computed", "rate_assumed", "document", "quote", …}` — суммы
+    # строками, как Decimal в API. Заполняет `price_vat_service` кодом; NULL — в документах
+    # не нашлось.
+    price_vat: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_comment: Mapped[str | None] = mapped_column(Text, nullable=True)

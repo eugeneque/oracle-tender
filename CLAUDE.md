@@ -77,6 +77,9 @@ oracle-tender-main/            ← не git-репозиторий (git status/d
   yes/no/nodata с причиной (`smart_verdict`); раздел 92. Неразмеченные написания типа, у которого все исполнения в РПП с одинаковыми баллами,
   идут в локализацию по общей записи (`_inherited_type_records`); раздел 97. Написания, не подошедшие под шаблоны, размечает ИИ по структуре условного обозначения
   из описания типа (`meter_market_markup`, `mapped_by = 'ai'`, после ночной загрузки); раздел 103.
+- НМЦК с НДС и без НДС из документации — `price_vat_service` (кодом, без ИИ; `tenders.price_vat`,
+  блок в «Обзоре», колонки Excel; заполнение старых — `python -m app.services.price_vat_service`);
+  раздел 106 ARCHITECTURE.md.
 - Обновление из интерфейса («Система → Обновление», только админ) — `system_update_service`
   (проверка через `update.sh --check` + git; установка — файл-запрос `.update-request` →
   юнит `oracle-t-update-web.path` → `update.sh --web` от root), фронт `pages/SystemUpdate.tsx`;

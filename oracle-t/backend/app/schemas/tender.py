@@ -48,6 +48,8 @@ class TenderOut(BaseModel):
     # Типы приборов учёта из одиннадцати (файл «Параметры для ПУ»); коды —
     # `app.services.meter_kind.METER_KINDS`, `null` — не определено.
     meter_kinds: list[str] | None = None
+    # НМЦК с НДС / без НДС из документации (`price_vat_service`, раздел 106); null — не найдено.
+    price_vat: dict | None = None
     region_organizer_code: str | None = None
     region_delivery_code: str | None = None
     federal_district_code: int | None = None

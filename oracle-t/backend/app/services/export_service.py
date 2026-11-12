@@ -74,11 +74,18 @@ EXTRA_COLUMNS: list[tuple[str, int]] = [
     # Процент соответствия характеристик (раздел 5.5.2) — не главная метрика с 03.09.2026,
     # но из выгрузки не убирается: по нему в отделе сравнивают приборы.
     ("% соответствия МИРТЕК", 18),
+    # НМЦК с НДС и без НДС из документации (12.11.2026, раздел 106 ARCHITECTURE.md): «Сумма»
+    # площадки не говорит, с НДС она или без. Досчитанная цена — та же колонка, пометка «расчётно»
+    # есть только в карточке.
+    ("НМЦК с НДС", 18),
+    ("НМЦК без НДС", 18),
 ]
 
 # Номер колонки итоговой AI-оценки — по ней идёт условное форматирование (раздел 5.7 ТЗ).
 AI_SCORE_COLUMN = len(COLUMNS) + 1
-WIN_PERCENTAGE_COLUMN = len(COLUMNS) + len(EXTRA_COLUMNS)
+_EXTRA_TITLES = [title for title, _ in EXTRA_COLUMNS]
+WIN_PERCENTAGE_COLUMN = len(COLUMNS) + _EXTRA_TITLES.index("% соответствия МИРТЕК") + 1
+PRICE_VAT_COLUMNS = tuple(len(COLUMNS) + _EXTRA_TITLES.index(t) + 1 for t in ("НМЦК с НДС", "НМЦК без НДС"))
 
 # Строка, с которой начинаются данные: 1-3 — шапка файла (название, дата, период),
 # 4 — пустая, 5 — заголовки таблицы, 6 — первая запись.
@@ -344,6 +351,9 @@ def build_tenders_workbook(
         values.append(assignees.get(tender.assignee_id) if tender.assignee_id else None)
         percentage = percentages.get(tender.id)
         values.append(float(percentage) if percentage is not None else None)
+        vat = tender.price_vat or {}
+        for key in ("price_with_vat", "price_without_vat"):
+            values.append(float(vat[key]) if vat.get(key) else None)
 
         for index, value in enumerate(values, start=1):
             cell = sheet.cell(row=row_number, column=index, value=value)
@@ -357,6 +367,8 @@ def build_tenders_workbook(
         sheet.cell(row=row_number, column=6).number_format = "# ##0.00"
         sheet.cell(row=row_number, column=AI_SCORE_COLUMN).number_format = "0.0"
         sheet.cell(row=row_number, column=WIN_PERCENTAGE_COLUMN).number_format = "0.0"
+        for column in PRICE_VAT_COLUMNS:
+            sheet.cell(row=row_number, column=column).number_format = "# ##0.00"
 
         # Гиперссылка на закупку (REQ-5.7-08) — на самой ячейке со ссылкой.
         if tender.source_url:

@@ -32,6 +32,7 @@ SHARED_FIELDS = (
     "federal_district_code",
     "region_delivery_code",
     "meter_kinds",
+    "price_vat",
 )
 
 

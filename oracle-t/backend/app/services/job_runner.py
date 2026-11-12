@@ -36,6 +36,7 @@ from app.services import (
     contract_conditions_service,
     delivery_terms_service,
     document_facts_service,
+    price_vat_service,
     protocol_results_service,
     tender_twins,
 )
@@ -80,6 +81,16 @@ def _run_analysis(db: Session, tender: Tender, actor: User | None) -> str:
     if outcome.okpd2_code:
         parts.append(f"ОКПД2: {outcome.okpd2_code}")
     parts.extend(outcome.messages)
+
+    # НМЦК с НДС и без НДС — кодом по тексту документов, без модели (12.11.2026, раздел 106
+    # ARCHITECTURE.md). Сбой не отменяет анализ: прежнее значение остаётся.
+    try:
+        vat = price_vat_service.refresh(db, tender)
+        if vat:
+            parts.append(price_vat_service.summary(vat))
+    except Exception as exc:  # noqa: BLE001 - НДС не обязателен для анализа
+        db.rollback()
+        parts.append(f"НДС в цене не определён ({exc})")
 
     # Позиции, условия поставки и условия договора — одним запросом (12.11.2026, раздел 104
     # ARCHITECTURE.md, `document_facts_service`). Не подошёл (фрагменты не помещаются целиком,
