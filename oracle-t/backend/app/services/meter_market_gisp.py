@@ -26,6 +26,12 @@
 «в РПП — да»: совпадение по префиксу семейства («МИР С-05») не повод объявить локализованным
 исполнение, которое человек проверил и не нашёл; такие случаи считаются и уходят в итог опроса.
 Модификацию без локализации ГИСП заполняет целиком (`gisp`).
+
+Исполнение «(без модификации)» (поверители не пишут кода — весь тип одной строкой) ищется по
+обозначению типа (`notation`), а не по своему названию: строки «(без модификации)» в реестре
+нет, и дата внесения оставалась пустой — с 11.11.2026 такие поверки не учитываются вовсе
+(замечание по КПЗ M2M-1C, 12.11.2026). Совпадение по обозначению — то же слабое совпадение
+семейства: берётся только дата первого внесения, баллы остаются из справочника.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.adapters.admission_registries import RegistryRow
+from app.services.meter_market_normalize import EMPTY_MODIFICATION
 
 _HOMOGLYPHS = str.maketrans("авекмнорстхуё", "abekmhopctxye")
 _SPLIT = re.compile(r"[\W_]+")
@@ -109,7 +116,17 @@ def apply_gisp_rows(db: Session, rows: list[RegistryRow], *, today: date | None 
         source = mod["localization_source"]
         if source == "manual":
             continue
-        head, found = match_rows(mod["name"], prepared)
+        notations = [part.strip() for part in re.split(r"[,;]", mod["notation"] or "") if part.strip()]
+        no_code = mod["name"] == EMPTY_MODIFICATION
+        if no_code:
+            # Своего кода нет — ищем по обозначению типа (первое из перечисленных, что нашлось).
+            head, found = "", []
+            for notation in notations:
+                head, found = match_rows(notation, prepared)
+                if found:
+                    break
+        else:
+            head, found = match_rows(mod["name"], prepared)
         if not found:
             continue
         stats.matched += 1
@@ -117,8 +134,8 @@ def apply_gisp_rows(db: Session, rows: list[RegistryRow], *, today: date | None 
             stats.not_marked += 1
             continue
         found.sort(key=lambda r: r.issued_at)
-        families = {_family_key(part) for part in re.split(r"[,;]", mod["notation"] or "") if part.strip()}
-        if _family_key(head) in families:
+        families = {_family_key(part) for part in notations}
+        if no_code or _family_key(head) in families:
             stats.family_only += 1
             db.execute(
                 text("DELETE FROM meter_market_rpp_records WHERE modification_id = :m AND source = 'gisp'"),

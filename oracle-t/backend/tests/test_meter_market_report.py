@@ -242,6 +242,32 @@ def test_gisp_rows_build_record_history_without_overriding_analyst_scores(market
     assert db_session.execute(text("SELECT count(*) FROM meter_market_rpp_records")).scalar() == 2
 
 
+def test_gisp_dates_no_modification_by_type_notation(market, db_session):
+    """КПЗ, 95882-25 «M2M-1С 4g» (С — кириллица): весь тип одной строкой «(без модификации)».
+    Дата внесения ищется по обозначению типа, баллы остаются из справочника (12.11.2026)."""
+
+    from app.adapters.admission_registries import RegistryRow
+    from app.services.meter_market_gisp import apply_gisp_rows
+
+    t_kpz = _id(db_session, "INSERT INTO meter_market_types (mit_number, manufacturer_id, in_report, review_status, "
+                            "notation) VALUES ('95882-25', :m, true, 'included', 'M2M-1С 4g')", m=market["nartis"])
+    db_session.execute(text(
+        "INSERT INTO meter_market_modifications (type_id, name, in_rpp, score, localization_source) "
+        "VALUES (:t, '(без модификации)', true, 115, 'import')"
+    ), {"t": t_kpz})
+    rows = [
+        RegistryRow("20001", "Счетчик электрической энергии однофазный компактный M2M-1C-1/2-100D-4GB",
+                    score=115, issued_at=date(2025, 3, 28)),
+        RegistryRow("20002", "Счетчик M2M-1C-1/2-100D-4G-SB", score=115, issued_at=date(2025, 6, 1)),
+    ]
+    stats = apply_gisp_rows(db_session, rows, today=date(2026, 11, 12))
+    assert stats.family_only == 1
+    got = db_session.execute(text(
+        "SELECT (score, rpp_included_at)::text FROM meter_market_modifications WHERE type_id = :t"
+    ), {"t": t_kpz}).scalar()
+    assert got == "(115,2025-03-28)"
+
+
 def test_localization_follows_rpp_record_history(market, db_session):
     """НАРТИС-И100-W112-2 в ГИСП: 95 баллов с 12.11.2024, 113 — с 14.05.2026. Поверки до мая
     2026 года — требования 2024-го, после — 2025-го; месяц смены делится по дням."""
