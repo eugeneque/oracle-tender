@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, false as sa_false, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, false as sa_false, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -76,6 +76,14 @@ class AiProviderSettings(Base):
     # закупки сами встают на полный разбор по одной, строго через YandexGPT.
     auto_review_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=sa_false()
+    )
+    # С 12.11.2026 (раздел 104): Яндекс больше не бесплатен — модель авторазбора выбирает
+    # администратор, а число закупок в сутки ограничено (один разбор ~1,3 млн токенов).
+    auto_review_provider: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="qwen", server_default="qwen"
+    )
+    auto_review_daily_limit: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=10, server_default="10"
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False

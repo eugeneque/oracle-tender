@@ -1,6 +1,12 @@
-"""Автоматический разбор закупок через YandexGPT (30.10.2026, раздел 81 ARCHITECTURE.md).
+"""Автоматический разбор закупок (30.10.2026, раздел 81 ARCHITECTURE.md; модель и лимит — раздел 104).
 
-Яндекс временно отдаёт свои модели бесплатно. Пока так, ждать, что человек откроет карточку и
+Задумывался под бесплатный Яндекс. С 30.10.2026 YandexGPT платная, и в первый же день
+авторазбор потратил 74 млн токенов, а в детализации этого не было видно (SDK Yandex цену не
+возвращает). Поэтому с 12.11.2026 модель авторазбора выбирает администратор (по умолчанию
+Qwen через RouterAI — в разы дешевле), а число закупок за московские сутки ограничено
+`auto_review_daily_limit`.
+
+Ждать, что человек откроет карточку и
 нажмёт «Разбор ИИ», незачем: открытые релевантные закупки без заключения сами встают на
 полный разбор (анализ документов → матрица → AI-оценка) — по одной, ближайший срок подачи
 первым.
@@ -11,13 +17,13 @@
 минуту ставит следующую закупку, только когда предыдущая закончилась.
 
 Модель закреплена за задачей (`payload["provider"]`, см. `ai_context.forcing_provider`):
-ни личный выбор, ни системная DeepSeek, ни подмена выключенной модели авторазбор не
-касаются. Выключили Yandex — очередь стоит, платные токены не тратятся.
+ни личный выбор, ни системная модель, ни подмена выключенной модели авторазбор не касаются.
+Выключили выбранную модель — очередь стоит, другая модель вместо неё не тратится.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -30,10 +36,12 @@ from app.models.log import LogLevel
 from app.models.tender import Tender, TenderStage
 from app.models.user import User
 from app.services import ai_provider_service
-from app.services.ai_provider_service import PROVIDER_YANDEX
+from app.core.timezones import MOSCOW_TZ
+from app.services.ai_provider_service import PROVIDER_LABELS, PROVIDER_QWEN
 from app.services.audit import log_action
 
-AUTO_PROVIDER = PROVIDER_YANDEX
+DEFAULT_PROVIDER = PROVIDER_QWEN
+MAX_DAILY_LIMIT = 200
 _ACTIVE = [JobStatus.QUEUED.value, JobStatus.RUNNING.value]
 # Этапы, на которых закупку ещё есть смысл разбирать: отклонённые, проигранные и выигранные
 # заключение ИИ уже не изменит.
@@ -54,17 +62,48 @@ def is_enabled(db: Session) -> bool:
     )
 
 
+def provider(db: Session) -> str:
+    """Модель авторазбора из настроек; неизвестное значение — Qwen, а не молча Yandex."""
+
+    value = db.execute(select(AiProviderSettings.auto_review_provider)).scalar_one_or_none()
+    return value if value in PROVIDER_LABELS else DEFAULT_PROVIDER
+
+
+def daily_limit(db: Session) -> int:
+    value = db.execute(select(AiProviderSettings.auto_review_daily_limit)).scalar_one_or_none()
+    return int(value) if value is not None else 10
+
+
 def _is_auto_job():
     return BackgroundJob.payload.op("->>")("auto") == "true"
+
+
+def taken_today(db: Session) -> int:
+    """Сколько закупок авторазбор поставил с начала московских суток."""
+
+    start = datetime.combine(datetime.now(MOSCOW_TZ).date(), time.min, tzinfo=MOSCOW_TZ)
+    return int(
+        db.scalar(
+            select(func.count()).select_from(BackgroundJob).where(
+                _is_auto_job(), BackgroundJob.created_at >= start
+            )
+        )
+        or 0
+    )
 
 
 def blocker(db: Session) -> str | None:
     """Почему очередь сейчас стоит — тем текстом, что увидит администратор; `None` — идёт."""
 
-    if not ai_provider_service.is_provider_configured(db, AUTO_PROVIDER):
-        return "YandexGPT не настроена: заполните Folder ID и API-ключ"
-    if not ai_provider_service.is_provider_enabled(db, AUTO_PROVIDER):
-        return "YandexGPT отключена администратором"
+    chosen = provider(db)
+    label = PROVIDER_LABELS[chosen]
+    if not ai_provider_service.is_provider_configured(db, chosen):
+        return f"{label} не настроена: заполните подключение на «Модели ИИ»"
+    if not ai_provider_service.is_provider_enabled(db, chosen):
+        return f"{label} отключена администратором"
+    limit = daily_limit(db)
+    if taken_today(db) >= limit:
+        return f"Дневной лимит исчерпан: {limit} закупок за сутки, продолжение — завтра"
     return None
 
 
@@ -113,8 +152,8 @@ def _current(db: Session) -> BackgroundJob | None:
 
 
 def feed(db: Session) -> BackgroundJob | None:
-    """Ставит следующую закупку на разбор, если авторазбор включён, Yandex доступна и
-    предыдущая задача авторазбора закончилась. Возвращает поставленную задачу."""
+    """Ставит следующую закупку на разбор, если авторазбор включён, выбранная модель доступна,
+    дневной лимит не исчерпан и предыдущая задача авторазбора закончилась."""
 
     if not is_enabled(db) or blocker(db) is not None or _current(db) is not None:
         return None
@@ -129,7 +168,7 @@ def feed(db: Session) -> BackgroundJob | None:
         kind=JobKind.TENDER_FULL_REVIEW,
         tender=tender,
         actor=None,
-        payload={"auto": True, "provider": AUTO_PROVIDER},
+        payload={"auto": True, "provider": provider(db)},
     )
 
 
@@ -146,7 +185,9 @@ def status(db: Session) -> dict:
     current_tender = db.get(Tender, current.tender_id) if current and current.tender_id else None
     return {
         "enabled": is_enabled(db),
-        "provider": AUTO_PROVIDER,
+        "provider": provider(db),
+        "daily_limit": daily_limit(db),
+        "taken_today": taken_today(db),
         "blocker": blocker(db),
         "pending": pending,
         "done": counts.get(JobStatus.SUCCESS.value, 0),
@@ -166,12 +207,28 @@ def status(db: Session) -> dict:
     }
 
 
-def set_enabled(db: Session, enabled: bool, *, actor: User) -> dict:
-    """Включает или выключает авторазбор. Уже идущая задача при выключении доделывается —
-    это одна закупка, а оборванный на середине разбор оставил бы матрицу с дырой."""
+def set_enabled(
+    db: Session,
+    enabled: bool,
+    *,
+    actor: User,
+    provider_key: str | None = None,
+    limit: int | None = None,
+) -> dict:
+    """Включает или выключает авторазбор, меняет модель и дневной лимит. Уже идущая задача
+    при выключении доделывается — это одна закупка, а оборванный на середине разбор оставил
+    бы матрицу с дырой."""
 
     settings = _settings(db)
     settings.auto_review_enabled = enabled
+    if provider_key is not None:
+        if provider_key not in PROVIDER_LABELS:
+            raise ValueError(f"Неизвестная модель авторазбора: {provider_key}")
+        settings.auto_review_provider = provider_key
+    if limit is not None:
+        if not 1 <= limit <= MAX_DAILY_LIMIT:
+            raise ValueError(f"Дневной лимит авторазбора — от 1 до {MAX_DAILY_LIMIT} закупок")
+        settings.auto_review_daily_limit = limit
     settings.updated_by_id = actor.id
     log_action(
         db,
@@ -180,7 +237,8 @@ def set_enabled(db: Session, enabled: bool, *, actor: User) -> dict:
         result="success",
         level=LogLevel.INFO,
         details=(
-            "Автоматический разбор через YandexGPT включён"
+            f"Автоматический разбор включён: {PROVIDER_LABELS[settings.auto_review_provider]}, "
+            f"не больше {settings.auto_review_daily_limit} закупок в сутки"
             if enabled
             else "Автоматический разбор выключен"
         ),

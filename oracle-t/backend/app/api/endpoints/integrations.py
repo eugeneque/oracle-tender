@@ -16,6 +16,7 @@ from app.schemas.integration_setting import (
     AiProviderStatus,
     AiProviderSwitch,
     AutoReviewStatus,
+    AutoReviewUpdate,
     BitrixAiPreview,
     BitrixAiRequestOut,
     BitrixAiSendRequest,
@@ -120,23 +121,28 @@ def set_ai_provider_enabled(
 def get_auto_review(
     db: Session = Depends(get_db), _admin: User = Depends(require_admin)
 ) -> AutoReviewStatus:
-    """Состояние автоматического разбора закупок через YandexGPT (раздел 81 ARCHITECTURE.md)."""
+    """Состояние автоматического разбора закупок (разделы 81 и 104 ARCHITECTURE.md)."""
 
     return AutoReviewStatus.model_validate(auto_review_service.status(db))
 
 
 @router.put("/auto-review", response_model=AutoReviewStatus)
 def set_auto_review(
-    payload: AiProviderEnabledUpdate,
+    payload: AutoReviewUpdate,
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
 ) -> AutoReviewStatus:
-    """Включает или выключает авторазбор. Включить можно и без настроенного Yandex — тогда
-    `blocker` скажет, что заполнить; очередь пойдёт, как только ключ появится."""
+    """Включает или выключает авторазбор, задаёт модель и дневной лимит. Включить можно и без
+    настроенной модели — тогда `blocker` скажет, что заполнить."""
 
-    return AutoReviewStatus.model_validate(
-        auto_review_service.set_enabled(db, payload.enabled, actor=admin)
-    )
+    try:
+        state = auto_review_service.set_enabled(
+            db, payload.enabled, actor=admin,
+            provider_key=payload.provider, limit=payload.daily_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return AutoReviewStatus.model_validate(state)
 
 
 @router.get("/ai-limits", response_model=list[AiModelLimitsOut])

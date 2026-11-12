@@ -680,6 +680,9 @@ export type AiProviderKey = "yandex" | "deepseek" | "qwen";
 export interface AutoReviewStatus {
   enabled: boolean;
   provider: AiProviderKey;
+  /** Сколько закупок авторазбор берёт за московские сутки и сколько уже взял сегодня. */
+  daily_limit: number;
+  taken_today: number;
   /** Почему очередь стоит при включённом флаге; `null` — идёт. */
   blocker: string | null;
   pending: number;

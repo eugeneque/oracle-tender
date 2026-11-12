@@ -402,3 +402,32 @@ def test_usage_xlsx_has_sheet_per_section_with_speed_and_cache(db_session, clien
     assert response.headers["content-type"].startswith("application/vnd.openxmlformats")
     assert "sova_ai_usage_" in response.headers["content-disposition"]
     assert client.get("/ai-usage/export.xlsx").status_code == 401
+
+
+def test_yandex_cost_is_counted_by_tariff_after_free_period(db_session):
+    """Раздел 104: SDK Yandex цену не возвращает — стоимость считается по тарифу из
+    настроек, до 30.10.2026 (бесплатный период) — ноль, у оценённых токенов — пусто."""
+
+    from datetime import date
+    from decimal import Decimal
+
+    assert ai_usage_service.yandex_cost(10_000, date(2026, 10, 29)) == Decimal("0")
+    assert ai_usage_service.yandex_cost(10_000, date(2026, 10, 30)) == Decimal("4.000000")
+
+    marker = f"YandexCost{uuid.uuid4().hex[:6]}"
+    ai_usage_service.record_call(
+        db_session, provider="yandex", model="yandexgpt", operation=marker,
+        prompt_chars=100, completion_chars=10,
+        usage=ai_usage_service.CallUsage(prompt_tokens=900, completion_tokens=100),
+        duration_s=1.0, status="success",
+    )
+    ai_usage_service.record_call(
+        db_session, provider="yandex", model="yandexgpt", operation=marker,
+        prompt_chars=100, completion_chars=0, usage=None, duration_s=0.1, status="error",
+    )
+    records = db_session.scalars(
+        select(AiUsageRecord).where(AiUsageRecord.operation == marker).order_by(AiUsageRecord.status.desc())
+    ).all()
+    assert [r.status for r in records] == ["success", "error"]
+    assert records[0].cost == Decimal("0.400000")  # 1000 токенов × 0,40 ₽ / 1000
+    assert records[1].cost is None  # до модели не дошло — Яндекс не тарифицирует

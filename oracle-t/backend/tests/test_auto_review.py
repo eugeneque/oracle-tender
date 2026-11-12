@@ -104,13 +104,13 @@ def test_twin_records_give_one_candidate_of_the_primary(db_session, providers):
     assert twin.id not in ids
 
 
-def test_feed_queues_one_tender_at_a_time_with_yandex(db_session, admin_user, providers, submitted):
+def test_feed_queues_one_tender_at_a_time_with_chosen_model(db_session, admin_user, providers, submitted):
     first = _tender(db_session, hours=0.5)
     second = _tender(db_session, hours=0.6)
 
     assert auto_review_service.feed(db_session) is None  # выключен — ничего не ставится
 
-    state = auto_review_service.set_enabled(db_session, True, actor=admin_user)
+    state = auto_review_service.set_enabled(db_session, True, actor=admin_user, provider_key="yandex")
     assert state["enabled"] is True
     job = db_session.scalar(
         select(BackgroundJob).where(BackgroundJob.tender_id == first.id)
@@ -134,6 +134,7 @@ def test_feed_queues_one_tender_at_a_time_with_yandex(db_session, admin_user, pr
 def test_feed_stops_when_yandex_is_disabled(db_session, admin_user, providers, submitted):
     _tender(db_session)
     providers.auto_review_enabled = True
+    providers.auto_review_provider = "yandex"
     ai_provider_service.set_provider_enabled(db_session, "yandex", False, actor=admin_user)
 
     assert auto_review_service.feed(db_session) is None
@@ -166,5 +167,34 @@ def test_endpoints_are_admin_only(client, admin_token):
     headers = {"Authorization": f"Bearer {admin_token}"}
     response = client.get("/integrations/auto-review", headers=headers)
     assert response.status_code == 200, response.text
-    assert response.json()["provider"] == "yandex"
+    assert response.json()["provider"] in {"qwen", "deepseek", "yandex"}
     assert client.get("/integrations/auto-review").status_code == 401
+
+    bad = client.put(
+        "/integrations/auto-review", headers=headers, json={"enabled": False, "daily_limit": 0}
+    )
+    assert bad.status_code == 400
+    assert "Дневной лимит" in bad.json()["detail"]
+
+
+def test_default_model_is_qwen_and_daily_limit_stops_the_queue(
+    db_session, admin_user, providers, submitted
+):
+    """Раздел 104: Яндекс с 30.10.2026 платный — по умолчанию авторазбор идёт Qwen, и за
+    сутки берёт не больше `auto_review_daily_limit` закупок."""
+
+    first = _tender(db_session, hours=0.5)
+    second = _tender(db_session, hours=0.6)
+    providers.auto_review_provider = "qwen"
+    state = auto_review_service.set_enabled(db_session, True, actor=admin_user, limit=1)
+    assert state["provider"] == "qwen"
+    job = db_session.scalar(select(BackgroundJob).where(BackgroundJob.tender_id == first.id))
+    assert job.payload == {"auto": True, "provider": "qwen"}
+
+    job.status = JobStatus.SUCCESS.value
+    db_session.commit()
+    assert auto_review_service.feed(db_session) is None
+    status = auto_review_service.status(db_session)
+    assert status["taken_today"] == 1
+    assert "Дневной лимит" in status["blocker"]
+    assert second.id in _candidate_ids(db_session)

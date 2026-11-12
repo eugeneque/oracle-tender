@@ -161,6 +161,15 @@ class Settings(BaseSettings):
     update_root_dir: str = ""
     update_branch: str = "main"
 
+    # --- Стоимость YandexGPT (12.11.2026, раздел 104 ARCHITECTURE.md) ---
+    # SDK Yandex AI Studio, в отличие от шлюза RouterAI, цену в ответе не возвращает, и в
+    # «Детализации ИИ» колонка «Стоимость» у Yandex была пустой — а это 87% всех токенов.
+    # До 30.10.2026 Яндекс отдавал модели бесплатно, с этого дня — по тарифу. Цена — рубли за
+    # 1000 токенов (запрос + ответ, синхронный режим); сверить со счётом Yandex Cloud и задать
+    # в .env (YANDEX_PRICE_RUB_PER_1K), если тариф другой.
+    yandex_price_rub_per_1k: float = 0.40
+    yandex_paid_since: str = "2026-10-30"
+
 
     @property
     def database_url(self) -> str:

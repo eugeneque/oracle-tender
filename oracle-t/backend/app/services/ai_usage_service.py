@@ -30,6 +30,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import Date, case, cast, func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.timezones import MOSCOW_TZ
 from app.models.ai_usage import AiUsageRecord
 from app.models.job import BackgroundJob
@@ -139,6 +140,23 @@ def usage_from_yandex(result: Any) -> CallUsage:
     )
 
 
+def yandex_cost(tokens: int, day: date) -> Decimal | None:
+    """Стоимость обращения к YandexGPT по тарифу из настроек (12.11.2026, раздел 104).
+
+    SDK Yandex цену не возвращает, поэтому без этого расчёта «Стоимость» в детализации
+    видела только RouterAI — 13% токенов, — и рост расхода после конца бесплатного периода
+    Яндекса (30.10.2026) в отчёте не отражался. Считаются только обращения со счётчиком
+    провайдера (`tokens_estimated = false`): запрос, отклонённый до модели, Яндекс не
+    тарифицирует. До `yandex_paid_since` — ноль, а не пусто: модель была бесплатной."""
+
+    settings = get_settings()
+    if day < date.fromisoformat(settings.yandex_paid_since):
+        return Decimal("0")
+    return (Decimal(tokens) * Decimal(str(settings.yandex_price_rub_per_1k)) / 1000).quantize(
+        Decimal("0.000001")
+    )
+
+
 def _int_or_none(value: Any) -> int | None:
     try:
         return int(value) if value is not None else None
@@ -197,6 +215,9 @@ def record_call(
         if usage.completion_tokens is not None
         else round(completion_chars / CHARS_PER_TOKEN)
     )
+    cost = usage.cost
+    if cost is None and provider == "yandex" and not estimated:
+        cost = yandex_cost(prompt_tokens + completion_tokens, datetime.now(MOSCOW_TZ).date())
     try:
         with Session(bind=db.get_bind(), join_transaction_mode="create_savepoint") as session:
             job_id = current_job_id()
@@ -219,7 +240,7 @@ def record_call(
                     duration_ms=int(duration_s * 1000),
                     status=status,
                     error=error[:MAX_ERROR_CHARS] if error else None,
-                    cost=usage.cost,
+                    cost=cost,
                 )
             )
             session.commit()
@@ -685,7 +706,7 @@ _NOTES = [
     ("Ср. время ответа", "по успешным обращениям: сбой возвращается мгновенно и исказил бы среднее"),
     ("Скорость вывода", "исходящие токены ÷ время успешных ответов; время включает чтение запроса"),
     ("Сбоев", "ошибки сети, лимиты, ответы не по схеме — они тоже расходуют токены"),
-    ("Стоимость", "только если её вернул провайдер (шлюз RouterAI), иначе пусто"),
+    ("Стоимость", "RouterAI — цена из ответа шлюза; YandexGPT — по тарифу из настроек (до 30.10.2026 бесплатно)"),
 ]
 
 

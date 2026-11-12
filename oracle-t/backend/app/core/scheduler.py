@@ -474,7 +474,7 @@ def _run_gap_repair_job() -> None:
 
 
 def _run_auto_review_job() -> None:
-    """Авторазбор через YandexGPT (раздел 81 ARCHITECTURE.md): следующая закупка встаёт на
+    """Авторазбор (разделы 81 и 104 ARCHITECTURE.md): следующая закупка встаёт на
     полный разбор, когда предыдущая закончилась. Выключенный авторазбор — пустой проход."""
 
     from app.services import auto_review_service

@@ -65,6 +65,14 @@ class AiProviderEnabledUpdate(BaseModel):
     enabled: bool
 
 
+class AutoReviewUpdate(BaseModel):
+    """Переключатель авторазбора; модель и дневной лимит — по желанию (12.11.2026, раздел 104)."""
+
+    enabled: bool
+    provider: AiProviderKey | None = None
+    daily_limit: int | None = None
+
+
 class AutoReviewCurrent(BaseModel):
     job_id: uuid.UUID
     status: str
@@ -75,12 +83,14 @@ class AutoReviewCurrent(BaseModel):
 
 
 class AutoReviewStatus(BaseModel):
-    """Автоматический разбор через YandexGPT (30.10.2026, раздел 81 ARCHITECTURE.md).
-    `blocker` — почему очередь стоит при включённом флаге (Yandex не настроена или
-    выключена); `pending` — сколько закупок ждут разбора, `current` — какая разбирается."""
+    """Автоматический разбор (30.10.2026, раздел 81; модель и лимит — раздел 104 ARCHITECTURE.md).
+    `blocker` — почему очередь стоит при включённом флаге (модель не настроена или
+    выключена, исчерпан дневной лимит); `pending` — сколько закупок ждут разбора, `current` — какая разбирается."""
 
     enabled: bool
     provider: AiProviderKey
+    daily_limit: int
+    taken_today: int
     blocker: str | None = None
     pending: int
     done: int
