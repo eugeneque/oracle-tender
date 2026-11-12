@@ -108,17 +108,20 @@ def apply_gisp_rows(db: Session, rows: list[RegistryRow], *, today: date | None 
     prepared = [(row, _fold(row.product_name or row.raw)) for row in rows if (row.product_name or row.raw) and row.issued_at]
     mods = db.execute(
         text(
-            "SELECT m.id, m.name, m.in_rpp, m.score, m.localization_source, t.notation "
+            "SELECT m.id, m.type_id, m.name, m.in_rpp, m.score, m.localization_source, t.notation "
             "FROM meter_market_modifications m JOIN meter_market_types t ON t.id = m.type_id AND t.in_report"
         )
     ).mappings().all()
+    if not prepared:
+        return stats
+
+    # Проход 1: самый длинный найденный префикс каждого исполнения.
+    matches: dict[int, tuple[str, list[RegistryRow], list[str]]] = {}
     for mod in mods:
-        source = mod["localization_source"]
-        if source == "manual":
+        if mod["localization_source"] == "manual":
             continue
         notations = [part.strip() for part in re.split(r"[,;]", mod["notation"] or "") if part.strip()]
-        no_code = mod["name"] == EMPTY_MODIFICATION
-        if no_code:
+        if mod["name"] == EMPTY_MODIFICATION:
             # Своего кода нет — ищем по обозначению типа (первое из перечисленных, что нашлось).
             head, found = "", []
             for notation in notations:
@@ -127,7 +130,33 @@ def apply_gisp_rows(db: Session, rows: list[RegistryRow], *, today: date | None 
                     break
         else:
             head, found = match_rows(mod["name"], prepared)
+        matches[mod["id"]] = (head, found, notations)
+
+    # Проход 2: строка реестра — только исполнению типа с самым длинным совпадением. «МИРТЕК-12-РУ
+    # D17» иначе забирал записи «…-D17-1» (105 б.) и «…-D17-2» (114 б.) и считался локализованным
+    # (замечание 12.11.2026), хотя у сестёр-исполнений свои строки справочника.
+    best: dict[tuple[int, int], int] = {}
+    for mod in mods:
+        head, found, _ = matches.get(mod["id"], ("", [], []))
+        for row in found:
+            key = (mod["type_id"], id(row))
+            best[key] = max(best.get(key, 0), len(_family_key(head)))
+
+    for mod in mods:
+        if mod["id"] not in matches:
+            continue
+        source = mod["localization_source"]
+        head, found, notations = matches[mod["id"]]
+        size = len(_family_key(head))
+        found = [row for row in found if best[(mod["type_id"], id(row))] == size]
+        no_code = mod["name"] == EMPTY_MODIFICATION
         if not found:
+            # Совпадения больше нет — прежняя история ГИСП устарела (её баллы могли быть баллами
+            # исполнения-сестры). Дата и баллы самой строки справочника остаются как есть.
+            db.execute(
+                text("DELETE FROM meter_market_rpp_records WHERE modification_id = :m AND source = 'gisp'"),
+                {"m": mod["id"]},
+            )
             continue
         stats.matched += 1
         if source == "import" and not mod["in_rpp"]:

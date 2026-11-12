@@ -268,6 +268,35 @@ def test_gisp_dates_no_modification_by_type_notation(market, db_session):
     assert got == "(115,2025-03-28)"
 
 
+def test_gisp_row_goes_to_longest_sibling_only(market, db_session):
+    """«МИРТЕК-12-РУ D17» и «…D17-2» — разные строки справочника. Запись ГИСП «…-D17-2» — только
+    исполнению D17-2; у D17 своей записи нет, баллов нет — поверки не учитываются (12.11.2026)."""
+
+    from app.adapters.admission_registries import RegistryRow
+    from app.services.meter_market_gisp import apply_gisp_rows
+
+    t = _id(db_session, "INSERT INTO meter_market_types (mit_number, manufacturer_id, in_report, review_status) "
+                        "VALUES ('61891-15', :m, true, 'included')", m=market["nartis"])
+    ids = {}
+    for name, score in (("МИРТЕК-12-РУ D17", None), ("МИРТЕК-12-РУ D17-2", 114)):
+        ids[name] = _id(db_session, "INSERT INTO meter_market_modifications (type_id, name, in_rpp, score, "
+                                    "localization_source) VALUES (:t, :n, true, :s, 'import')", t=t, n=name, s=score)
+    db_session.execute(text(
+        "INSERT INTO meter_market_rpp_records (modification_id, issued_at, score, source) VALUES (:m, '2025-04-09', 114, 'gisp')"
+    ), {"m": ids["МИРТЕК-12-РУ D17"]})  # след прежнего сопоставления — должен уйти
+    rows = [
+        RegistryRow("10622198", "Счетчики электрической энергии однофазные многофункциональные МИРТЕК-12-РУ-D17-2",
+                    score=114, issued_at=date(2025, 4, 9)),
+    ]
+    apply_gisp_rows(db_session, rows, today=date(2026, 11, 12))
+    history = dict(db_session.execute(text(
+        "SELECT modification_id, count(*) FROM meter_market_rpp_records GROUP BY 1"
+    )).all())
+    assert history == {ids["МИРТЕК-12-РУ D17-2"]: 1}
+    verdict = report.rpp_verdict([report.RppRecord(date.min, None, None, None)], date(2025, 5, 1))
+    assert not verdict.included
+
+
 def test_localization_follows_rpp_record_history(market, db_session):
     """НАРТИС-И100-W112-2 в ГИСП: 95 баллов с 12.11.2024, 113 — с 14.05.2026. Поверки до мая
     2026 года — требования 2024-го, после — 2025-го; месяц смены делится по дням."""
