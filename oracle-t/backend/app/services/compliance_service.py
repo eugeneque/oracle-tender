@@ -159,7 +159,9 @@ _SYSTEM_PROMPT = """Ты сопоставляешь требования зак�
 карточке помечены источником:
 - [si_type] — официальное «Описание типа» из Госреестра средств измерений;
 - [catalog] — характеристики модели из каталога продукции;
-- [manual] — руководство по эксплуатации с сайта производителя;
+- [manual] — руководство по эксплуатации с сайта производителя (запасной источник: \
+опирайся на него, только если в [si_type] и [catalog] ответа нет; при противоречии \
+важнее описание типа и каталог);
 - [software] — официальный список поддерживаемого оборудования на сайте разработчика ПО \
 верхнего уровня (АСКУЭ/ИСУ: «Пирамида», «Энфорс», «Энергосфера», «яЭнергетик», \
 «АльфаЦЕНТР», «Некта», «ЛЭРС УЧЁТ») либо, с пометкой «ДАННЫЕ СПЕЦИАЛИСТА МИРТЕК», \
@@ -299,6 +301,8 @@ class ComplianceOutcome:
     manual_fallback_used: int = 0
     # Требования, решённые кодом без модели (`prejudge_numeric`).
     prejudged: int = 0
+    # Ячейки, о которых модель не спрашивалась: итог ставит правило кода (`decided_by_rules`).
+    decided_by_rules: int = 0
     needs_review: int = 0
     # Ячейки, по которым модель не вернула вердикт (сбой, отказ фильтра, запасная модель
     # недоступна), и у скольких производителей они есть. Разбор при этом «успешен», а процент
@@ -745,6 +749,27 @@ def focus_context(context: str, requirements: list[Requirement], limit: int) -> 
     return "\n".join(lines)
 
 
+# Сколько места в одном запросе отдаётся выдержкам из руководства поверх карточки каталога
+# (12.11.2026, раздел 104): ~2,5 тыс. токенов вместо отдельного второго прохода, который
+# заново отправлял карточку целиком (~24 тыс. символов) ради 5% ответов.
+MANUAL_EXTRA_CHARS = 8_000
+
+
+def with_manual_extras(card: str, full_context: str, requirements: list[Requirement], extra: int) -> str:
+    """Карточка без руководства — ровно как раньше, плюс строки `[manual]`, нужные этим
+    требованиям, не длиннее `extra`.
+
+    Руководство не смешивается с каталогом в общем отборе: замер на прошлых вердиктах
+    (`compliance_prefilter single-pass`) показал, что в общем отборе оно в 11% ячеек
+    вытесняло строку каталога, по которой модель уже ответила. Здесь карточка каталога не
+    меняется ни на символ, а руководство только дописывается в отдельный запас места."""
+
+    manual = "\n".join(line for line in full_context.split("\n") if line.startswith("[manual]"))
+    if not manual or extra <= 0:
+        return card
+    return f"{card}\n{focus_context(manual, requirements, extra)}"
+
+
 def _focus_limit(db: Session, requirements: list[Requirement]) -> int:
     """Предел карточки на пачку: `FOCUS_TARGET_CHARS` или меньше, если окно модели (за
     вычетом промпта, требований и потолка ответа) не вмещает и этого."""
@@ -784,7 +809,7 @@ def astra_facts(manufacturer: Manufacturer) -> list[str]:
 
 
 
-def _requirements_block(requirements: list[Requirement]) -> str:
+def _requirements_block(requirements: list[Requirement], labels: list[str] | None = None) -> str:
     lines = []
     for index, requirement in enumerate(requirements, start=1):
         text = requirement.normalized_text or requirement.text
@@ -793,7 +818,8 @@ def _requirements_block(requirements: list[Requirement]) -> str:
             # (22.10.2026: «не менее 100А» пропало, и D17 с 80 А «соответствовал»).
             text = f"{text} (в ТЗ: {requirement.text[:300]})"
         hint = parameter_hint(_parameter_of(requirement))
-        lines.append(f"{index}. {text}" + (f" {hint}" if hint else ""))
+        prefix = f"(позиция «{labels[index - 1][:80]}») " if labels else ""
+        lines.append(f"{index}. {prefix}{text}" + (f" {hint}" if hint else ""))
     return "\n".join(lines)
 
 
@@ -1019,6 +1045,7 @@ def _evaluate_in_parallel(
             manufacturer = by_id[futures[future]]
             outcome.manual_fallback_used += local_outcome.manual_fallback_used
             outcome.prejudged += local_outcome.prejudged
+            outcome.decided_by_rules += local_outcome.decided_by_rules
             outcome.precedents_used += local_outcome.precedents_used
             outcome.messages.extend(local_outcome.messages)
             finish(manufacturer, verdicts)
@@ -1126,15 +1153,20 @@ def _evaluate_manufacturer(
         )
     else:
         verdicts = {}
+        prepared = []
         for label, indices in groups:
             subset = [requirements[index - 1] for index in indices]
-            local = _evaluate_group(
+            plan = _prepare_group(
                 db, tender, manufacturer, subset, outcome,
                 use_manual_fallback=use_manual_fallback, named_text=named_text, reference=reference,
                 # Общим требованиям — карточка по всей закупке: в ней модели всех позиций.
                 context_requirements=subset if label else requirements,
                 position=label,
             )
+            prepared.append((indices, plan))
+        _ask_plans(db, manufacturer, [plan for _, plan in prepared], outcome, tender_id=tender.id)
+        for indices, plan in prepared:
+            local = _finish_plan(plan)
             for local_index, verdict in local.items():
                 verdict.number = indices[local_index - 1]
                 verdicts[indices[local_index - 1]] = verdict
@@ -1175,15 +1207,53 @@ def _evaluate_group(
     """Вердикты по группе требований (вся закупка или одна позиция) — номера с единицы
     внутри группы.
 
-    Сначала — два первых источника (описание типа и каталог). Если после этого часть
-    требований осталась без данных, а у производителя есть материалы из руководства, делается
-    второй проход **только по этим требованиям** — именно так третий шаг описан в разделе
-    5.5 ТЗ (fallback, а не обязательный источник).
+    Источники — описание типа и каталог; руководство — третий шаг (раздел 5.5 ТЗ). До
+    12.11.2026 он был вторым проходом по требованиям, оставшимся без данных, — и заново
+    отправлял карточку целиком ради ~5% ответов (раздел 104 ARCHITECTURE.md). Теперь строки
+    `[manual]`, нужные пачке, идут в тот же запрос в отдельном запасе места
+    (`with_manual_extras`), карточка каталога при этом не меняется: по замеру на прошлых
+    вердиктах это −30% обращений матрицы, ни одна строка каталога не теряется, нужная строка
+    руководства попадает в запрос не реже, чем во втором проходе.
 
     `context_requirements` — по каким требованиям собирать карточку (по умолчанию — по
     самой группе); `position` — подпись позиции: карточка из моделей её типа, числовая
     сверка — по её типу, а модели позиция названа в запросе."""
 
+    plan = _prepare_group(
+        db, tender, manufacturer, requirements, outcome,
+        use_manual_fallback=use_manual_fallback, named_text=named_text, reference=reference,
+        context_requirements=context_requirements, position=position,
+    )
+    _ask_plans(db, manufacturer, [plan], outcome, tender_id=tender.id)
+    return _finish_plan(plan)
+
+
+@dataclass
+class _GroupPlan:
+    """Группа требований (вся закупка или позиция), подготовленная к запросу: что уже решил
+    код, о чём спросить модель и с какой карточкой."""
+
+    requirements: list[Requirement]
+    verdicts: dict[int, RequirementVerdict]
+    asked: list[int]
+    context: str = ""
+    manual_context: str = ""
+    position: str | None = None
+
+
+def _prepare_group(
+    db: Session,
+    tender: Tender,
+    manufacturer: Manufacturer,
+    requirements: list[Requirement],
+    outcome: ComplianceOutcome,
+    *,
+    use_manual_fallback: bool,
+    named_text: str = "",
+    reference: TzReference | None = None,
+    context_requirements: list[Requirement] | None = None,
+    position: str | None = None,
+) -> _GroupPlan:
     context_requirements = context_requirements if context_requirements is not None else requirements
     only_wanted_kinds = position is not None
 
@@ -1203,10 +1273,14 @@ def _evaluate_group(
     context = context_for(False)
     if not context.strip():
         # Данных о производителе нет вовсе — честный no_data без обращения к модели.
-        return {
-            index: _no_data_verdict(index, "В каталоге нет данных по этому производителю")
-            for index in range(1, len(requirements) + 1)
-        }
+        return _GroupPlan(
+            requirements=requirements,
+            verdicts={
+                index: _no_data_verdict(index, "В каталоге нет данных по этому производителю")
+                for index in range(1, len(requirements) + 1)
+            },
+            asked=[],
+        )
 
     # Однозначные числовые требования решает код — модели уходят только остальные
     # (14.10.2026, раздел 59 ARCHITECTURE.md, `app/services/compliance_numeric.py`).
@@ -1216,46 +1290,116 @@ def _evaluate_group(
         groups=_position_groups(requirements) if position is not None else None,
     )
     outcome.prejudged += len(verdicts)
+    all_manufacturers = list(db.scalars(select(Manufacturer)))
+    for index, requirement in enumerate(requirements, start=1):
+        if index not in verdicts and decided_by_rules(requirement, manufacturer, reference, all_manufacturers):
+            verdicts[index] = _no_data_verdict(index, DECIDED_BY_RULE, 0.0)
+            outcome.decided_by_rules += 1
     asked = [index for index in range(1, len(requirements) + 1) if index not in verdicts]
-    if asked:
-        answered = _ask_in_batches(
-            db, manufacturer, [requirements[index - 1] for index in asked], context, outcome,
-            position=position, tender_id=tender.id,
-        )
-        for number, index in enumerate(asked, start=1):
-            if number in answered:
-                answered[number].number = index
-                verdicts[index] = answered[number]
+    manual_context = context_for(True) if use_manual_fallback and asked else ""
+    if manual_context == context:
+        manual_context = ""
+    return _GroupPlan(
+        requirements=requirements,
+        verdicts=verdicts,
+        asked=asked,
+        context=context,
+        manual_context=manual_context,
+        position=position,
+    )
 
-    unresolved = [
-        index
-        for index in range(1, len(requirements) + 1)
-        if verdicts.get(index, _no_data_verdict(index)).status == ComplianceStatus.NO_DATA.value
-    ]
-    if use_manual_fallback and unresolved:
-        manual_context = context_for(True)
-        if manual_context.strip() and manual_context != context:
-            subset = [requirements[index - 1] for index in unresolved]
-            fallback = _ask_in_batches(
-                db, manufacturer, subset, manual_context, outcome, position=position,
-                tender_id=tender.id,
-            )
-            for number, index in enumerate(unresolved, start=1):
-                verdict = fallback.get(number)
-                if verdict is None or verdict.status == ComplianceStatus.NO_DATA.value:
-                    continue
-                verdict.number = index
-                # Даже если модель не отметила источник, вердикт получен на проходе с
-                # руководством — фиксируем это, чтобы в карточке было видно происхождение.
-                verdict.source = verdict.source or "manual"
-                verdicts[index] = verdict
+
+def _ask_plans(
+    db: Session,
+    manufacturer: Manufacturer,
+    plans: list[_GroupPlan],
+    outcome: ComplianceOutcome,
+    *,
+    tender_id: uuid.UUID | None,
+) -> None:
+    """Спрашивает модель по подготовленным группам. Позиции, у которых карточка вышла
+    одинаковой (те же модели того же типа — у производителя их часто меньше шести), идут
+    общими пачками, а не каждая своим запросом с той же карточкой (12.11.2026, раздел 104):
+    факты у модели те же, позиция подписана у каждого требования. Группа без пары — как
+    раньше, с позицией в шапке запроса."""
+
+    buckets: dict[tuple[str, str], list[_GroupPlan]] = {}
+    for plan in plans:
+        if plan.asked:
+            buckets.setdefault((plan.context, plan.manual_context), []).append(plan)
+    for (context, manual_context), group in buckets.items():
+        items = [(plan, index) for plan in group for index in plan.asked]
+        labels = None
+        position = group[0].position
+        if len(group) > 1:
+            labels = [plan.position or "общие требования" for plan, _ in items]
+            position = None
+        answered = _ask_in_batches(
+            db, manufacturer, [plan.requirements[index - 1] for plan, index in items], context, outcome,
+            position=position, tender_id=tender_id, manual_context=manual_context, labels=labels,
+        )
+        for number, (plan, index) in enumerate(items, start=1):
+            verdict = answered.get(number)
+            if verdict is None:
+                continue
+            verdict.number = index
+            plan.verdicts[index] = verdict
+            if verdict.source == "manual":
                 outcome.manual_fallback_used += 1
 
-    for index in range(1, len(requirements) + 1):
-        verdicts.setdefault(
-            index, _no_data_verdict(index, MODEL_NO_VERDICT, 0.0)
+
+def _finish_plan(plan: _GroupPlan) -> dict[int, RequirementVerdict]:
+    for index in range(1, len(plan.requirements) + 1):
+        plan.verdicts.setdefault(index, _no_data_verdict(index, MODEL_NO_VERDICT, 0.0))
+    return plan.verdicts
+
+
+# Пояснение ячейки, о которой модель не спрашивалась: итог по ней ставит правило кода
+# (`decided_by_rules`), что бы модель ни ответила. Не `MODEL_NO_VERDICT` — это не сбой, и
+# достройка брешей не должна спрашивать о ней снова.
+DECIDED_BY_RULE = "Решает правило кода, модель не спрашивалась"
+
+
+def decided_by_rules(
+    requirement: Requirement,
+    manufacturer: Manufacturer,
+    reference: TzReference | None,
+    manufacturers: list[Manufacturer],
+) -> bool:
+    """Требование, итог по которому для этого производителя ставит правило кода
+    безусловно, — поверх любого ответа модели (12.11.2026, раздел 104 ARCHITECTURE.md).
+    Спрашивать модель о нём — платить за ответ, который выбросят.
+
+    Повторяет условия правил дословно:
+    * «Модель прибора: X» с известным владельцем — `apply_reference_rules` перезаписывает
+      вердикт во всех ветках (эталон, эквивалент, запрет эквивалента);
+    * фирменное ПО/сервис другого производителя — «не соответствует» там же;
+    * трёхпозиционное реле у производителя не из тройки — «не соответствует»
+      (`apply_expert_rules`);
+    * Astra Linux, когда ПО производителя нет в каталоге «Ready for Astra»
+      (`_apply_astra_rule`).
+    Где итог зависит от ответа модели (владелец модели неизвестен, своё фирменное ПО,
+    производитель из тройки, ПО найдено в каталоге Astra), модель спрашивается как раньше."""
+
+    if is_model_requirement(requirement) or names_reference_model(requirement, reference):
+        owner = match_manufacturer(requirement.vendor, manufacturers) or (
+            reference.manufacturer if reference is not None else None
         )
-    return verdicts
+        return owner is not None
+    if is_vendor_exclusive(requirement):
+        owner = match_manufacturer(requirement.vendor, manufacturers)
+        return owner is not None and owner.id != manufacturer.id
+    item = PARAMETERS_BY_NO.get(_parameter_of(requirement) or 0)
+    if item is None or not _wording_matches(item, requirement):
+        return False
+    if item.rule == RULE_ONLY_MANUFACTURERS:
+        return not _brand_matches(manufacturer, THREE_POSITION_RELAY_BRANDS)
+    if item.rule == RULE_ASTRA:
+        from app.adapters.astra_compatible import load_catalog
+
+        catalog = load_catalog()
+        return catalog is not None and not catalog.find(manufacturer.brand_name or manufacturer.legal_name)
+    return False
 
 
 def _requirement_text(requirement: Requirement) -> str:
@@ -2123,6 +2267,8 @@ def _ask_in_batches(
     *,
     position: str | None = None,
     tender_id: uuid.UUID | None = None,
+    manual_context: str = "",
+    labels: list[str] | None = None,
 ) -> dict[int, RequirementVerdict]:
     """Спрашивает модель пачками по `REQUIREMENTS_PER_REQUEST` и склеивает вердикты,
     пересчитывая локальные номера пачки в сквозные.
@@ -2134,10 +2280,22 @@ def _ask_in_batches(
     verdicts: dict[int, RequirementVerdict] = {}
     for offset in range(0, len(requirements), REQUIREMENTS_PER_REQUEST):
         batch = requirements[offset : offset + REQUIREMENTS_PER_REQUEST]
+        batch_labels = labels[offset : offset + REQUIREMENTS_PER_REQUEST] if labels else None
         # Каждой пачке — своя выборка из карточки (14.10.2026, `focus_context`).
-        batch_context = focus_context(context, batch, _focus_limit(db, batch))
+        limit = _focus_limit(db, batch)
+        batch_context = focus_context(context, batch, limit)
+        if manual_context:
+            # Запас под руководство — в пределах окна модели (`_focus_limit` уже вычел промпт,
+            # требования и потолок ответа).
+            room = (
+                input_budget_chars(db) - len(_SYSTEM_PROMPT)
+                - len(_requirements_block(batch, batch_labels)) - 200
+            )
+            extra = min(MANUAL_EXTRA_CHARS, room - len(batch_context))
+            batch_context = with_manual_extras(batch_context, manual_context, batch, extra)
         batch_verdicts = _ask_model(
-            db, manufacturer, batch, batch_context, outcome, position=position, tender_id=tender_id
+            db, manufacturer, batch, batch_context, outcome, position=position, tender_id=tender_id,
+            labels=batch_labels,
         )
         for local_number, verdict in batch_verdicts.items():
             global_number = offset + local_number
@@ -2155,6 +2313,7 @@ def _ask_model(
     *,
     position: str | None = None,
     tender_id: uuid.UUID | None = None,
+    labels: list[str] | None = None,
 ) -> dict[int, RequirementVerdict]:
     from app.services import compliance_review_service
 
@@ -2167,9 +2326,14 @@ def _ask_model(
         + (
             f"ПОЗИЦИЯ СПЕЦИФИКАЦИИ: {position} — все требования ниже относятся к этому изделию.\n"
             if position
-            else ""
+            else (
+                "ПОЗИЦИИ СПЕЦИФИКАЦИИ: у каждого требования в скобках указана его позиция — "
+                "требование относится к изделию этой позиции.\n"
+                if labels
+                else ""
+            )
         )
-        + f"ТРЕБОВАНИЯ ЗАКУПКИ:\n{_requirements_block(requirements)}"
+        + f"ТРЕБОВАНИЯ ЗАКУПКИ:\n{_requirements_block(requirements, labels)}"
     )
     # Прецеденты — после требований: начало запроса (системный промпт, карточка) остаётся
     # общим и берётся из кэша провайдера.
@@ -2552,6 +2716,7 @@ def _log(
         f"{outcome.entries_saved}; требований: {outcome.requirements_total}; "
         f"через руководство: {outcome.manual_fallback_used}; "
         f"решено кодом без модели: {outcome.prejudged}; "
+        f"не спрашивалось (решает правило): {outcome.decided_by_rules}; "
         f"требуют проверки человеком: {outcome.needs_review}; "
         f"исправлено специалистами: {outcome.human_overrides}; "
         f"прецедентов в запросах: {outcome.precedents_used}"

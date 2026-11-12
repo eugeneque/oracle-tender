@@ -294,3 +294,30 @@ def test_position_card_holds_only_models_of_its_kind(db_session, admin_user: Use
     assert three_phase_cards, "трёхфазная позиция не ушла модели отдельным запросом"
     for card in three_phase_cards:
         assert "ТФ-3" in card and "ОФ-1" not in card
+
+
+def test_positions_with_the_same_card_go_in_one_request(db_session, admin_user: User, monkeypatch):
+    """Раздел 104 (12.11.2026): две однофазные позиции у производителя с одной однофазной
+    моделью дают одинаковую карточку — одна пачка вместо двух запросов с той же карточкой,
+    позиция подписана у каждого требования. Трёхфазная позиция — своя карточка, свой запрос."""
+
+    second = "3. Счётчик однофазный с реле"
+    tender = _make_tender(db_session)
+    _add_requirement(db_session, tender, "Тип прибора: однофазный прямого включения", position=ONE_PHASE)
+    _add_requirement(db_session, tender, "Тип прибора: однофазный, встроенное реле", position=second)
+    _add_requirement(db_session, tender, "Тип прибора: трёхфазный полукосвенного включения", position=THREE_PHASE)
+    only_single = _make_manufacturer(db_session, "Одна", [("ОФ-1", SINGLE)])
+
+    texts: list[str] = []
+
+    def spy(db, *, user_text, **kwargs):
+        if only_single.brand_name in user_text:
+            texts.append(user_text)
+        return _naive_model(db, user_text=user_text, **kwargs)
+
+    monkeypatch.setattr(compliance_module, "run_structured", spy)
+    evaluate_tender(db_session, tender, actor=admin_user, use_manual_fallback=False)
+
+    merged = [text for text in texts if "ПОЗИЦИИ СПЕЦИФИКАЦИИ" in text]
+    assert len(merged) == 1
+    assert f"(позиция «{ONE_PHASE}»)" in merged[0] and f"(позиция «{second}»)" in merged[0]

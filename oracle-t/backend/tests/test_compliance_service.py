@@ -765,3 +765,50 @@ def test_prejudged_requirements_are_not_sent_to_model(db_session, admin_user: Us
     assert coded.status == ComplianceStatus.MEETS.value
     assert coded.source == ComplianceSource.PRODUCT_CATALOG.value
     assert "35 лет" in coded.explanation and "сверено кодом" in coded.explanation
+
+
+def test_manual_goes_into_the_same_request_without_second_pass(db_session, monkeypatch):
+    """Раздел 104 (12.11.2026): руководство — не второй проход по оставшимся без данных
+    требованиям, а строки `[manual]` в запасе того же запроса. Карточка каталога при этом
+    та же, что без руководства; одна пачка — одно обращение к модели."""
+
+    tender = _make_tender(db_session)
+    requirement = _add_requirement(db_session, tender, text="Интерфейс RS-485")
+    manufacturer = _make_manufacturer(db_session, with_catalog=True)
+    product = db_session.query(Product).filter(Product.manufacturer_id == manufacturer.id).one()
+    db_session.add(
+        ProductCharacteristic(
+            product_id=product.id,
+            group_name="Интерфейсы и связь",
+            field_name="Тип интерфейса",
+            value="RS-485",
+            source="user_manual",
+        )
+    )
+    db_session.commit()
+    plain, _ = build_manufacturer_context(db_session, manufacturer, include_manual=False)
+    texts: list[str] = []
+
+    def _fake(db, *, system_prompt, user_text, response_model, **kwargs):
+        texts.append(user_text)
+        return ComplianceResult(
+            verdicts=[_verdict(1, ComplianceStatus.MEETS.value, source="manual", explanation="RS-485")]
+        )
+
+    monkeypatch.setattr(compliance_module, "run_structured", _fake)
+    outcome = ComplianceOutcome()
+    verdicts = compliance_module._evaluate_group(
+        db_session, tender, manufacturer, [requirement], outcome, use_manual_fallback=True
+    )
+
+    assert len(texts) == 1
+    assert plain.strip() in texts[0]
+    assert "[manual]" in texts[0] and "RS-485" in texts[0]
+    assert verdicts[1].status == ComplianceStatus.MEETS.value
+    assert outcome.manual_fallback_used == 1
+
+    texts.clear()
+    compliance_module._evaluate_group(
+        db_session, tender, manufacturer, [requirement], ComplianceOutcome(), use_manual_fallback=False
+    )
+    assert len(texts) == 1 and "[manual]" not in texts[0]
