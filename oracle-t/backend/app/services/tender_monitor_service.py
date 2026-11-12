@@ -11,6 +11,11 @@ Bitrix24 принимает изменения по тендерам в «Жур
 Первая проверка событий не создаёт: она снимает исходный слепок (в документе Bitrix24 —
 «при первичной загрузке изменение не выдумывать»).
 
+С 12.11.2026 (раздел 100) под наблюдение сама встаёт каждая закупка, выгруженная в Bitrix24:
+выгрузка была единственным рукопожатием, и журнал событий на портале не пополнялся. Найденные
+изменения ещё и уходят письмом, а важные для оценки помечают разбор ИИ неактуальным
+(`analysis_outdated_events`) — сам разбор заново не запускается.
+
 Чего здесь нет сознательно — см. «Ограничения» в разделе 84: лоты не различаются (всё на
 уровне процедуры), документ, заменённый по тому же адресу, не замечается (содержимое не
 сверяется), статус «приостановлена» площадки отдельно не отдают.
@@ -20,12 +25,12 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -34,7 +39,8 @@ from app.models.log import LogLevel
 from app.models.tender import Tender
 from app.models.tender_card import TenderCard
 from app.models.tender_document import DocumentClass, TenderDocument
-from app.models.tender_event import EventDelivery, TenderEvent, TenderMonitor
+from app.models.bitrix_deal import BitrixDealLink
+from app.models.tender_event import EventDelivery, TenderEvent, TenderEventView, TenderMonitor
 from app.models.user import User
 from app.services import document_service, eis_card_dates, tender_card_service
 from app.services.audit import log_action
@@ -72,6 +78,30 @@ _STATUS_LABELS = {
     "completed": "завершена",
     "cancelled": "отменена",
 }
+
+# Изменения, после которых разбор ИИ может оказаться неверным (раздел 100): требования, цена,
+# обеспечение, проект договора, разъяснения — то, из чего складываются матрица соответствия
+# и оценка. Сроки, даты аукциона, статус и протоколы на оценку соответствия не влияют: о них
+# сообщает журнал событий, а разбор остаётся актуальным.
+ANALYSIS_AFFECTING_EVENTS = frozenset(
+    {
+        "AMOUNT_CHANGED",
+        "SECURITY_CHANGED",
+        "DOCUMENT_ADDED",
+        "DOCUMENT_REPLACED",
+        "TECHNICAL_REQUIREMENT_CHANGED",
+        "CONTRACT_CHANGED",
+        "CLARIFICATION_PUBLISHED",
+    }
+)
+
+# Автоматическое наблюдение снимается, когда закупка отменена или срок подачи прошёл так давно,
+# что ждать протоколов уже нечего: каждая проверка — заходы на площадку и в ЕИС.
+AUTO_MONITOR_DAYS_AFTER_DEADLINE = 60
+
+# Сколько дней событие считается «новым» для зелёной точки, если журнал так и не открыли:
+# иначе у давно забытых закупок точка горела бы вечно.
+UNSEEN_EVENTS_DAYS = 30
 
 # Пауза между закупками при плановой проверке: каждая — несколько обращений к площадке и ЕИС.
 DELAY_BETWEEN_TENDERS_SECONDS = 2.0
@@ -320,7 +350,10 @@ def diff_snapshots(old: dict[str, Any], new: dict[str, Any]) -> list[dict[str, A
         )
 
     old_docs, new_docs = old.get("documents") or {}, new.get("documents") or {}
-    for url, doc in new_docs.items():
+    # Исходный слепок выгруженной в Bitrix24 закупки снимается из базы (12.11.2026); если её
+    # документы ещё не скачивались (`documents_pending`), первая загрузка — не изменение, иначе
+    # проверка выдала бы «Добавлен документ» на каждый файл.
+    for url, doc in (() if old.get("documents_pending") else new_docs.items()):
         if url not in old_docs:
             changes.append(_document_event(url, doc, old_docs))
     # `DOCUMENT_REMOVED` намеренно не формируем: Bitrix24 просит передавать его только при
@@ -430,6 +463,8 @@ def enable(db: Session, tender: Tender, *, actor: User | None) -> TenderMonitor:
         monitor = TenderMonitor(tender_id=tender.id, started_by_id=actor.id if actor else None)
         db.add(monitor)
     monitor.enabled = True
+    # Включил человек — и снимать будет человек, а не правило «закупка завершена».
+    monitor.auto = False
     db.commit()
     check_tender(db, tender)
     log_action(
@@ -529,7 +564,176 @@ def check_tender(db: Session, tender: Tender, *, refresh: bool = True) -> list[T
             details="; ".join(f"{e.event_type}: {e.title}" for e in events)[:1500],
         )
     db.commit()
+    if events:
+        _notify(db, tender, events)
     return events
+
+
+def _notify(db: Session, tender: Tender, events: list[TenderEvent]) -> None:
+    from app.services import notification_service
+
+    try:
+        outdated = bool(analysis_outdated_events(db, tender, among=events))
+        notification_service.notify_tender_changed(db, tender, events, analysis_outdated=outdated)
+    except Exception as exc:  # noqa: BLE001 - письмо — побочный эффект, проверку не отменяет
+        db.rollback()
+        logger.warning(f"Письмо об изменениях {tender.external_id} не отправлено: {exc}")
+
+
+# --- разбор ИИ и изменения --------------------------------------------------------------------
+
+
+def _group_ids(db: Session, tender: Tender) -> list[uuid.UUID]:
+    """Записи одной закупки (раздел 93): разбор хранится у основной, а события — у той, что
+    выгружена в Bitrix24. Сверять нужно по всей группе."""
+
+    from app.services import tender_twins
+
+    subject = tender_twins.subject(db, tender)
+    return [subject.id, *(twin.id for twin in tender_twins.twins(db, subject))]
+
+
+def analysis_outdated_events(
+    db: Session, tender: Tender, *, among: list[TenderEvent] | None = None
+) -> list[TenderEvent]:
+    """Важные для оценки изменения, обнаруженные после текущего разбора ИИ.
+
+    Пусто — разбор актуален (или его нет: устареть нечему). Флаг не хранится, а вычисляется:
+    новый разбор сам «снимает» пометку, и её не нужно сбрасывать в каждом месте, где
+    пересчитывается оценка."""
+
+    from app.services import ai_profile_service, tender_twins
+
+    subject = tender_twins.subject(db, tender)
+    score = ai_profile_service.get_current(db, subject.id)
+    if score is None:
+        return []
+    if among is not None:
+        return [
+            e for e in among
+            if e.event_type in ANALYSIS_AFFECTING_EVENTS and e.detected_at > score.calculated_at
+        ]
+    return list(
+        db.scalars(
+            select(TenderEvent)
+            .where(
+                TenderEvent.tender_id.in_(_group_ids(db, tender)),
+                TenderEvent.event_type.in_(ANALYSIS_AFFECTING_EVENTS),
+                TenderEvent.detected_at > score.calculated_at,
+            )
+            .order_by(TenderEvent.detected_at.desc())
+            .limit(50)
+        )
+    )
+
+
+# --- новые события для пользователя (зелёная точка) ---------------------------------------------
+
+
+def _unseen_cutoff() -> datetime:
+    return datetime.now(timezone.utc) - timedelta(days=UNSEEN_EVENTS_DAYS)
+
+
+def unseen_counts(db: Session, user: User) -> dict[uuid.UUID, int]:
+    """Сколько событий по каждой закупке пользователь ещё не видел."""
+
+    rows = db.execute(
+        select(TenderEvent.tender_id, func.count())
+        .outerjoin(
+            TenderEventView,
+            (TenderEventView.tender_id == TenderEvent.tender_id)
+            & (TenderEventView.user_id == user.id),
+        )
+        .where(
+            TenderEvent.created_at >= _unseen_cutoff(),
+            (TenderEventView.seen_at.is_(None)) | (TenderEvent.created_at > TenderEventView.seen_at),
+        )
+        .group_by(TenderEvent.tender_id)
+    ).all()
+    return {tender_id: count for tender_id, count in rows}
+
+
+def seen_at(db: Session, user: User, tender_id: uuid.UUID) -> datetime | None:
+    view = db.get(TenderEventView, (user.id, tender_id))
+    return view.seen_at if view else None
+
+
+def mark_seen(db: Session, user: User, tender_id: uuid.UUID) -> None:
+    view = db.get(TenderEventView, (user.id, tender_id))
+    if view is None:
+        view = TenderEventView(user_id=user.id, tender_id=tender_id)
+    view.seen_at = datetime.now(timezone.utc)
+    db.merge(view)
+    db.commit()
+
+
+# --- автоматическое наблюдение за выгруженными в Bitrix24 -------------------------------------
+
+
+def ensure_for_bitrix(db: Session, tender: Tender, *, actor: User | None = None) -> TenderMonitor | None:
+    """Ставит выгруженную в Bitrix24 закупку под наблюдение (раздел 100).
+
+    Исходный слепок — из базы, без заходов на площадку: это ровно то, что только что ушло на
+    портал, и выгрузка не должна ждать ЕИС. Снятое человеком наблюдение не включается заново."""
+
+    monitor = get_monitor(db, tender.id)
+    if monitor is not None:
+        return monitor
+    now = datetime.now(timezone.utc)
+    snapshot = build_snapshot(db, tender)
+    if not snapshot["documents"]:
+        snapshot["documents_pending"] = True
+    monitor = TenderMonitor(
+        tender_id=tender.id,
+        enabled=True,
+        auto=True,
+        started_by_id=actor.id if actor else None,
+        snapshot=snapshot,
+        snapshot_at=now,
+        last_checked_at=now,
+        checks_count=0,
+    )
+    db.add(monitor)
+    db.flush()
+    return monitor
+
+
+def _auto_finished(tender: Tender, now: datetime) -> bool:
+    if tender.status == "cancelled":
+        return True
+    deadline = tender.application_end
+    if deadline is None:
+        return False
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    return deadline < now - timedelta(days=AUTO_MONITOR_DAYS_AFTER_DEADLINE)
+
+
+def enroll_bitrix_tenders(db: Session) -> int:
+    """Закупки, выгруженные в Bitrix24 до 12.11.2026 или мимо `ensure_for_bitrix`, — под
+    наблюдение; отменённые и давно завершённые из автоматического — долой."""
+
+    now = datetime.now(timezone.utc)
+    added = 0
+    missing = db.scalars(
+        select(Tender)
+        .join(BitrixDealLink, BitrixDealLink.tender_id == Tender.id)
+        .outerjoin(TenderMonitor, TenderMonitor.tender_id == Tender.id)
+        .where(BitrixDealLink.deal_id.is_not(None), TenderMonitor.tender_id.is_(None))
+    ).all()
+    for tender in missing:
+        if _auto_finished(tender, now):
+            continue
+        ensure_for_bitrix(db, tender)
+        added += 1
+    for monitor in db.scalars(
+        select(TenderMonitor).where(TenderMonitor.enabled.is_(True), TenderMonitor.auto.is_(True))
+    ).all():
+        tender = db.get(Tender, monitor.tender_id)
+        if tender is not None and _auto_finished(tender, now):
+            monitor.enabled = False
+    db.commit()
+    return added
 
 
 def run_all(db: Session, *, delay: float = DELAY_BETWEEN_TENDERS_SECONDS) -> dict[str, int]:
@@ -537,6 +741,11 @@ def run_all(db: Session, *, delay: float = DELAY_BETWEEN_TENDERS_SECONDS) -> dic
 
     from app.services import tender_event_service
 
+    try:
+        enroll_bitrix_tenders(db)
+    except Exception as exc:  # noqa: BLE001 - без новых закупок проверка остальных всё равно нужна
+        db.rollback()
+        logger.warning(f"Постановка выгруженных в Bitrix24 закупок под наблюдение не удалась: {exc}")
     monitors = list(db.scalars(select(TenderMonitor).where(TenderMonitor.enabled.is_(True))))
     checked = new_events = failed = 0
     for index, monitor in enumerate(monitors):

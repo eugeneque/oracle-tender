@@ -579,6 +579,10 @@ export function TenderAiScorePanel({
   const provider = useAiProvider();
   const conclusion = score?.conclusion ?? null;
   const busy = isRunning || isReviewing;
+  // Закупка изменилась после разбора (12.11.2026, раздел 100 ARCHITECTURE.md): новый срок,
+  // НМЦК, документы. Разбор сам не перезапускается — блок тускнеет и просит «Обновить».
+  const outdatedEvents = score?.outdated_events ?? [];
+  const outdated = !isRunning && outdatedEvents.length > 0;
   const mood: MiraMood = isReviewing
     ? "listening"
     : isRunning
@@ -604,6 +608,11 @@ export function TenderAiScorePanel({
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-[15px] font-semibold text-white">Мира</h3>
             {provider && <AiProviderPicker status={provider} />}
+            {outdated && (
+              <span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[11px] font-medium text-amber-300">
+                Информация неактуальная
+              </span>
+            )}
           </div>
           <p className={`mt-0.5 truncate text-xs ${busy ? "text-zinc-300" : "text-zinc-500"}`}>
             {busy
@@ -643,7 +652,27 @@ export function TenderAiScorePanel({
       )}
       <div className="relative mx-5 h-px bg-white/[0.06]" />
 
-      <div className="relative space-y-5 px-5 py-5">
+      {outdated && (
+        <div className="relative mx-5 mt-4 rounded-xl border border-amber-400/20 bg-amber-400/[0.06] px-3.5 py-2.5 text-xs text-amber-200">
+          <p className="font-medium">
+            После разбора закупка изменилась — заключение может быть неверным. Нажмите «Обновить».
+          </p>
+          <ul className="mt-1.5 space-y-0.5 text-amber-200/80">
+            {outdatedEvents.slice(0, 5).map((event, index) => (
+              <li key={`${event.event_type}-${index}`}>
+                {event.title} · {formatDateTime(event.detected_at)}
+              </li>
+            ))}
+            {outdatedEvents.length > 5 && <li>и ещё {outdatedEvents.length - 5}</li>}
+          </ul>
+        </div>
+      )}
+
+      <div
+        className={`relative space-y-5 px-5 py-5 transition-opacity ${
+          outdated ? "opacity-40 saturate-50" : ""
+        }`}
+      >
         {error && (
           <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>
         )}

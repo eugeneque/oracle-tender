@@ -861,7 +861,17 @@ def get_ai_score(
 
     tender = _get_subject_or_404(db, tender_id)
     score = ai_profile_service.get_current(db, tender.id)
-    return ai_profile_service.serialize(db, score) if score is not None else None
+    if score is None:
+        return None
+    data = ai_profile_service.serialize(db, score)
+    # Изменения закупки после разбора — пометка «Информация неактуальная» (раздел 100).
+    from app.services import tender_monitor_service
+
+    data["outdated_events"] = [
+        {"title": e.title, "event_type": e.event_type, "detected_at": e.detected_at}
+        for e in tender_monitor_service.analysis_outdated_events(db, db.get(Tender, tender_id) or tender)
+    ]
+    return data
 
 
 @router.get("/{tender_id}/ai-score/history", response_model=list[AiProfileScoreOut])

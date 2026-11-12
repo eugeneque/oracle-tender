@@ -24,6 +24,9 @@ class NotificationTrigger(str, enum.Enum):
     # Шестой — отчёт еженедельной сверки документов по СИ и руководств с источниками
     # (правка по итогам показа 15.09.2026): что переиздано, что появилось, что пропало.
     DOCUMENTS_UPDATED = "documents_updated"
+    # Седьмой — изменения по закупке, выгруженной в Bitrix24 (12.11.2026, раздел 100
+    # ARCHITECTURE.md): новый срок, НМЦК, документы, протоколы.
+    TENDER_CHANGED = "tender_changed"
 
 
 TRIGGER_TITLES: dict[str, str] = {
@@ -33,6 +36,7 @@ TRIGGER_TITLES: dict[str, str] = {
     NotificationTrigger.CRITICAL_ERROR.value: "Критическая ошибка системы",
     NotificationTrigger.MANUAL_BROADCAST.value: "Письмо администратора",
     NotificationTrigger.DOCUMENTS_UPDATED.value: "Обновление документов по СИ и руководств",
+    NotificationTrigger.TENDER_CHANGED.value: "Изменения по закупке",
 }
 
 
@@ -80,6 +84,7 @@ class NotificationSettings(Base):
     trigger_documents_updated: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True
     )
+    trigger_tender_changed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     # Порог итоговой AI-оценки по профилю (раздел 5.5.1 ТЗ), а не процента победителя:
     # с 03.09.2026 в список и в уведомления идёт `overall_score`.

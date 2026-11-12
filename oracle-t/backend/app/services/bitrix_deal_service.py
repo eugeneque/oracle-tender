@@ -39,6 +39,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -396,6 +397,19 @@ def _find_deal(client: BitrixClient, tender: Tender) -> int | None:
     return int(found[0]["ID"]) if found else None
 
 
+def _start_tracking(db: Session, tender: Tender, actor: User) -> None:
+    """Выгруженная закупка встаёт под наблюдение (12.11.2026, раздел 100 ARCHITECTURE.md):
+    выгрузка была единственным рукопожатием, и журнал событий портала не пополнялся."""
+
+    from app.services import tender_monitor_service
+
+    try:
+        with db.begin_nested():
+            tender_monitor_service.ensure_for_bitrix(db, tender, actor=actor)
+    except Exception as exc:  # noqa: BLE001 - сделка уже заведена; наблюдение доберёт планировщик
+        logger.warning(f"Наблюдение за {tender.external_id} не включено: {exc}")
+
+
 def push_tender(db: Session, tender_id: uuid.UUID, *, actor: User) -> dict[str, Any]:
     """Создаёт сделку под тендер или обновляет уже заведённую."""
 
@@ -456,6 +470,7 @@ def push_tender(db: Session, tender_id: uuid.UUID, *, actor: User) -> dict[str, 
     link.pushed_by_id = actor.id
     link.last_error = None
     db.merge(link)
+    _start_tracking(db, tender, actor)
     log_action(
         db,
         component="integrations",

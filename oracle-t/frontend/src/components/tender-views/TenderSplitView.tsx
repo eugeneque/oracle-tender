@@ -5,6 +5,8 @@ import type { Tender } from "../../api/types";
 import { DecisionMark } from "../DecisionMark";
 import { FoundInSources } from "../FoundInSources";
 import { RelevanceMark } from "../RelevanceMark";
+import { useUnseenEvents } from "../../hooks/useUnseenEvents";
+import { newEventsDot } from "../tender-detail/TenderEventsJournal";
 import { TenderDetailPanel } from "../TenderDetailPanel";
 import { TagRow } from "../tags/TagChip";
 import { ScoreBadge } from "../ui/ScoreBadge";
@@ -28,10 +30,13 @@ function SplitListItem({
   tender,
   isActive,
   onSelect,
+  newEvents = 0,
 }: {
   tender: Tender;
   isActive: boolean;
   onSelect: () => void;
+  /** Изменения закупки, которых пользователь ещё не видел — зелёная точка. */
+  newEvents?: number;
 }) {
   const left = daysLeft(tender.application_end);
   const price = formatPrice(tender.price, tender.currency);
@@ -66,6 +71,14 @@ function SplitListItem({
               className="mr-1 inline -translate-y-px text-amber-400"
               aria-label="В избранном"
             />
+          )}
+          {newEvents > 0 && (
+            <span
+              title={`Новых изменений по закупке: ${newEvents} — см. «Журнал событий»`}
+              className="mr-1.5 inline-flex -translate-y-px align-middle"
+            >
+              {newEventsDot}
+            </span>
           )}
           {tender.title}
         </span>
@@ -141,6 +154,7 @@ export function TenderSplitView({
   // Высота берётся у родителя (`flex-1` страницы), а не считается как `100vh - 320px`:
   // подобранная константа ломалась от любой правки шапки или фильтров — панель то выпирала
   // за экран, то оставляла под собой пустую полосу.
+  const unseen = useUnseenEvents();
   return (
     <div className="flex min-h-0 flex-1 gap-3">
       <div className="flex w-[300px] shrink-0 flex-col">
@@ -153,6 +167,7 @@ export function TenderSplitView({
                 tender={tender}
                 isActive={selected?.id === tender.id}
                 onSelect={() => onSelect(tender)}
+                newEvents={unseen[tender.id] ?? 0}
               />
             ))}
           </div>

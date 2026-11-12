@@ -35,6 +35,7 @@ import type {
   Tender,
   TenderDocument,
   TenderHistoryEntry,
+  TenderMonitoringState,
   TenderStage,
   TenderUpdate,
 } from "../api/types";
@@ -52,6 +53,7 @@ import { TenderUpperSoftwareBlock } from "./tender-detail/TenderUpperSoftwareBlo
 import { TenderRegistryBlock } from "./tender-detail/TenderRegistryBlock";
 import { TenderExtraTab } from "./tender-detail/TenderExtraTab";
 import { TenderHistoryTab } from "./tender-detail/TenderHistoryTab";
+import { TenderEventsJournal, newEventsDot } from "./tender-detail/TenderEventsJournal";
 import { TenderOverviewTab } from "./tender-detail/TenderOverviewTab";
 import { PositionsSummary, TenderRequirementsTab } from "./tender-detail/TenderRequirementsTab";
 import { TagChip } from "./tags/TagChip";
@@ -200,6 +202,10 @@ export function TenderDetailPanel({
   const [tender, setTender] = useState<Tender>(initialTender);
   const [activeTab, setActiveTab] = useState<TabKey>("overview");
   const [isTagPickerOpen, setIsTagPickerOpen] = useState(false);
+  // Изменения закупки под наблюдением (12.11.2026, раздел 100 ARCHITECTURE.md): журнал и
+  // зелёная точка у вкладки «Журнал событий», пока пользователь его не открыл.
+  const [monitoring, setMonitoring] = useState<TenderMonitoringState | null>(null);
+  const [eventsSeen, setEventsSeen] = useState(false);
 
   const [documents, setDocuments] = useState<TenderDocument[] | null>(null);
   const [docsError, setDocsError] = useState<string | null>(null);
@@ -310,7 +316,37 @@ export function TenderDetailPanel({
     setNiche(null);
     setError(null);
     setActionMessage(null);
+    setMonitoring(null);
+    setEventsSeen(false);
   }, [initialTender.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<TenderMonitoringState>(`/tenders/${initialTender.id}/monitoring`)
+      .then((state) => {
+        if (!cancelled) setMonitoring(state);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [initialTender.id]);
+
+  const hasNewEvents = !eventsSeen && (monitoring?.events.some((event) => event.is_new) ?? false);
+
+  // Открыл журнал — события просмотрены. Точки в самом журнале остаются до следующего захода:
+  // иначе не понять, что именно было новым. Список тендеров гасит точку по событию окна.
+  useEffect(() => {
+    if (activeTab !== "events" || !hasNewEvents) return;
+    setEventsSeen(true);
+    api
+      .post(`/tenders/${initialTender.id}/monitoring/seen`, {})
+      .then(() =>
+        window.dispatchEvent(new CustomEvent("tender-events-seen", { detail: initialTender.id })),
+      )
+      .catch(() => undefined);
+  }, [activeTab, hasNewEvents, initialTender.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -843,19 +879,29 @@ export function TenderDetailPanel({
     { key: "compliance", label: "Конкуренция" },
     { key: "calculation", label: "Расчёт" },
   ];
-  const tableTabs: { key: TabKey; label: string }[] = [
+  const tableTabs: { key: TabKey; label: string; dot?: boolean }[] = [
     { key: "lots", label: "Лоты" },
     { key: "changes", label: "Изменения" },
     { key: "protocols", label: "Протоколы" },
     { key: "contracts", label: "Договоры" },
-    { key: "events", label: "Журнал событий" },
+    { key: "events", label: "Журнал событий", dot: hasNewEvents },
   ];
-  const moreTabs: { key: TabKey; label: string; badge?: number }[] = [
+  const moreTabs: { key: TabKey; label: string; badge?: number; dot?: boolean }[] = [
     { key: "application", label: "Заявка" },
     { key: "card", label: "Карточка закупки" },
     ...tableTabs
-      .filter((tab) => cardTable(tab.key))
-      .map((tab) => ({ ...tab, badge: cardTableCount(tab.key) })),
+      .filter(
+        (tab) =>
+          cardTable(tab.key) ||
+          (tab.key === "events" && !!monitoring && (monitoring.enabled || monitoring.events.length > 0)),
+      )
+      .map((tab) => ({
+        ...tab,
+        badge:
+          tab.key === "events"
+            ? (cardTableCount(tab.key) ?? 0) + (monitoring?.events.length ?? 0)
+            : cardTableCount(tab.key),
+      })),
     { key: "history", label: "История" },
   ];
   const activeMoreTab = moreTabs.find((tab) => tab.key === activeTab);
@@ -1142,6 +1188,7 @@ export function TenderDetailPanel({
             trigger={
               <>
                 {activeMoreTab ? activeMoreTab.label : "Ещё"}
+                {moreTabs.some((tab) => tab.dot) && newEventsDot}
                 <ChevronDown size={14} />
               </>
             }
@@ -1149,7 +1196,10 @@ export function TenderDetailPanel({
               key: tab.key,
               label: (
                 <span className="flex items-center justify-between gap-3">
-                  {tab.label}
+                  <span className="flex items-center gap-1.5">
+                    {tab.label}
+                    {tab.dot && newEventsDot}
+                  </span>
                   {tab.badge !== undefined && tab.badge > 0 && (
                     <span className="text-[11px] tabular-nums text-zinc-500">{tab.badge}</span>
                   )}
@@ -1305,11 +1355,13 @@ export function TenderDetailPanel({
           />
         )}
 
+        {activeTab === "events" && <TenderEventsJournal state={monitoring} />}
+
         {(activeTab === "lots" ||
           activeTab === "changes" ||
           activeTab === "protocols" ||
           activeTab === "contracts" ||
-          activeTab === "events") && (
+          (activeTab === "events" && (cardTable("events") || !monitoring?.events.length))) && (
           <TenderCardTab
             card={card}
             isLoading={isCardLoading}

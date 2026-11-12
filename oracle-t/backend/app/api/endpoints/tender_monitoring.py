@@ -34,10 +34,16 @@ class EventOut(BaseModel):
     type_agreed: bool
     error: str | None
     sent_at: datetime | None
+    # Обнаружено после того, как пользователь последний раз открывал журнал (зелёная точка).
+    is_new: bool = False
+    # Может повлиять на разбор ИИ (раздел 100).
+    affects_analysis: bool = False
 
 
 class MonitoringState(BaseModel):
     enabled: bool
+    # Поставлено системой при выгрузке в Bitrix24, а не вручную (раздел 100).
+    auto: bool = False
     baseline_at: datetime | None
     last_checked_at: datetime | None
     checks_count: int
@@ -65,8 +71,12 @@ def _tender(db: Session, tender_id: uuid.UUID) -> Tender:
     return tender
 
 
-def _state(db: Session, tender: Tender, send_result: dict[str, Any] | None = None) -> MonitoringState:
+def _state(
+    db: Session, tender: Tender, user: User, send_result: dict[str, Any] | None = None
+) -> MonitoringState:
     monitor = tender_monitor_service.get_monitor(db, tender.id)
+    seen = tender_monitor_service.seen_at(db, user, tender.id)
+    cutoff = tender_monitor_service._unseen_cutoff()  # noqa: SLF001
     events = list(
         db.scalars(
             select(TenderEvent)
@@ -77,6 +87,7 @@ def _state(db: Session, tender: Tender, send_result: dict[str, Any] | None = Non
     )
     return MonitoringState(
         enabled=bool(monitor and monitor.enabled),
+        auto=bool(monitor and monitor.auto),
         baseline_at=monitor.snapshot_at if monitor else None,
         last_checked_at=monitor.last_checked_at if monitor else None,
         checks_count=monitor.checks_count if monitor else 0,
@@ -94,6 +105,8 @@ def _state(db: Session, tender: Tender, send_result: dict[str, Any] | None = Non
                 type_agreed=tender_monitor_service.EVENT_TYPES.get(e.event_type, False),
                 error=e.error,
                 sent_at=e.sent_at,
+                is_new=e.created_at >= cutoff and (seen is None or e.created_at > seen),
+                affects_analysis=e.event_type in tender_monitor_service.ANALYSIS_AFFECTING_EVENTS,
             )
             for e in events
         ],
@@ -139,11 +152,30 @@ def list_monitored(
     return result
 
 
+@router.get("/monitoring/unseen", response_model=dict[str, int])
+def unseen_events(
+    db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> dict[str, int]:
+    """Закупки с событиями, которых пользователь ещё не видел: id → число (зелёная точка в
+    списке тендеров, раздел 100)."""
+
+    return {str(k): v for k, v in tender_monitor_service.unseen_counts(db, user).items()}
+
+
+@router.post("/tenders/{tender_id}/monitoring/seen", status_code=status.HTTP_204_NO_CONTENT)
+def mark_events_seen(
+    tender_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> None:
+    """Пользователь открыл журнал событий — точки по этой закупке гаснут (только у него)."""
+
+    tender_monitor_service.mark_seen(db, user, _tender(db, tender_id).id)
+
+
 @router.get("/tenders/{tender_id}/monitoring", response_model=MonitoringState)
 def get_monitoring(
-    tender_id: uuid.UUID, db: Session = Depends(get_db), _user: User = Depends(get_current_user)
+    tender_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)
 ) -> MonitoringState:
-    return _state(db, _tender(db, tender_id))
+    return _state(db, _tender(db, tender_id), user)
 
 
 @router.put("/tenders/{tender_id}/monitoring", response_model=MonitoringState)
@@ -160,7 +192,7 @@ def set_monitoring(
         tender_monitor_service.enable(db, tender, actor=user)
     else:
         tender_monitor_service.disable(db, tender, actor=user)
-    return _state(db, tender)
+    return _state(db, tender, user)
 
 
 @router.post("/tenders/{tender_id}/monitoring/check", response_model=MonitoringState)
@@ -174,7 +206,7 @@ def check_monitoring(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Закупка не поставлена под наблюдение")
     tender_monitor_service.check_tender(db, tender)
     result = tender_event_service.send_pending(db, tender, actor_id=user.id)
-    return _state(db, tender, result)
+    return _state(db, tender, user, result)
 
 
 @router.post("/tenders/{tender_id}/monitoring/send", response_model=MonitoringState)
@@ -190,4 +222,4 @@ def send_events(
     if retry_errors:
         tender_event_service.retry_errors(db, tender)
     result = tender_event_service.send_pending(db, tender, actor_id=user.id)
-    return _state(db, tender, result)
+    return _state(db, tender, user, result)

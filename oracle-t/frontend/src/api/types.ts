@@ -1358,6 +1358,7 @@ export interface NotificationSettings {
   trigger_deadline_soon: boolean;
   trigger_critical_error: boolean;
   trigger_documents_updated: boolean;
+  trigger_tender_changed: boolean;
   ai_score_threshold: number;
   deadline_days_threshold: number;
   updated_at: string | null;
@@ -1480,6 +1481,13 @@ export interface ChecklistItem {
   mandatory: boolean | null;
 }
 
+/** Изменение закупки после разбора ИИ — разбор помечен «Информация неактуальная». */
+export interface OutdatedEvent {
+  title: string;
+  event_type: string;
+  detected_at: string;
+}
+
 export interface AiProfileScore {
   id: string;
   tender_id: string;
@@ -1516,6 +1524,8 @@ export interface AiProfileScore {
   participation_ids: string[];
   company_profile_snapshot: Record<string, unknown> | null;
   calculated_at: string;
+  /** Важные изменения закупки после этого разбора; непусто — разбор неактуален. */
+  outdated_events?: OutdatedEvent[];
 }
 
 export type ConclusionFit = "fit" | "fit_with_caveats" | "not_fit" | "unknown";
@@ -2224,10 +2234,16 @@ export interface TenderMonitoringEvent {
   type_agreed: boolean;
   error: string | null;
   sent_at: string | null;
+  /** Обнаружено после последнего просмотра журнала этим пользователем — зелёная точка. */
+  is_new: boolean;
+  /** Может повлиять на разбор ИИ (раздел 100 ARCHITECTURE.md). */
+  affects_analysis: boolean;
 }
 
 export interface TenderMonitoringState {
   enabled: boolean;
+  /** Поставлено системой при выгрузке в Bitrix24. */
+  auto: boolean;
   baseline_at: string | null;
   last_checked_at: string | null;
   checks_count: number;

@@ -415,6 +415,12 @@ class ChecklistItemOut(BaseModel):
     mandatory: bool | None = None
 
 
+class OutdatedEventOut(BaseModel):
+    title: str
+    event_type: str
+    detected_at: datetime
+
+
 class AiProfileScoreOut(BaseModel):
     """AI-оценка по профилю целиком — в том виде, в каком её рисует шапка карточки.
 
@@ -462,6 +468,9 @@ class AiProfileScoreOut(BaseModel):
     participation_ids: list[uuid.UUID]
     company_profile_snapshot: dict | None
     calculated_at: datetime
+    # Важные для оценки изменения закупки, найденные после этого разбора (12.11.2026, раздел
+    # 100 ARCHITECTURE.md): непусто — карточка помечает разбор «Информация неактуальная».
+    outdated_events: list[OutdatedEventOut] = []
 
 
 class LicenseItem(BaseModel):

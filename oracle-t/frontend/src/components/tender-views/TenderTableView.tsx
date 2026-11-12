@@ -16,6 +16,8 @@ import {
   statusLabel,
   tenderTypeLabel,
 } from "../../utils/format";
+import { useUnseenEvents } from "../../hooks/useUnseenEvents";
+import { newEventsDot } from "../tender-detail/TenderEventsJournal";
 
 /** Ключи совпадают с именами полей в API (`sort_by`): сортировка выполняется запросом к
  * серверу, поэтому промежуточный словарь «ключ колонки → имя поля» был бы лишним звеном. */
@@ -85,6 +87,7 @@ export function TenderTableView({
   onSortChange: (key: SortKey, direction: SortDirection) => void;
 }) {
   const sorted = tenders;
+  const unseen = useUnseenEvents();
 
   const toggleSort = (key: SortKey) => {
     if (key === sortKey) {
@@ -147,6 +150,11 @@ export function TenderTableView({
                   <div className="flex items-center gap-1.5">
                     <DecisionMark decision={tender.ai_decision} size="sm" />
                     <RelevanceMark tender={tender} compact />
+                    {(unseen[tender.id] ?? 0) > 0 && (
+                      <span title={`Новых изменений по закупке: ${unseen[tender.id]} — см. «Журнал событий»`}>
+                        {newEventsDot}
+                      </span>
+                    )}
                     {tender.is_bookmarked && (
                       <Star size={12} fill="currentColor" className="shrink-0 text-amber-400" aria-label="В избранном" />
                     )}

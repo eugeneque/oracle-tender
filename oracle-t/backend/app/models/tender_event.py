@@ -6,8 +6,9 @@ Bitrix24 завёл раздел «Журнал событий»: при обн�
 закупки на прошлую проверку — `tender_monitors.snapshot`; события лежат в `tender_events`
 и отправляются отдельным пакетом с пустыми `sections`.
 
-Отслеживаются не все закупки, а только включённые вручную (для пробного прогона заказчика —
-5–10 свежих процедур): проверка каждой означает повторный заход на площадку и в ЕИС.
+Под наблюдение встают закупки, выгруженные в Bitrix24 (автоматически, с 12.11.2026 —
+раздел 100 ARCHITECTURE.md), и включённые вручную: проверка каждой означает повторный заход
+на площадку и в ЕИС, поэтому все подряд собранные закупки не отслеживаются.
 """
 
 import enum
@@ -50,6 +51,9 @@ class TenderMonitor(Base):
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     checks_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Наблюдение поставила система при выгрузке в Bitrix24 (раздел 100): такое она сама и
+    # снимает, когда закупка отменена или давно завершена. Ручное — только человек.
+    auto: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     started_by_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -96,5 +100,25 @@ class TenderEvent(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+
+class TenderEventView(Base):
+    """Когда пользователь последний раз смотрел «Журнал событий» закупки (12.11.2026).
+
+    События, обнаруженные позже этой отметки, подсвечиваются зелёной точкой — в списке
+    тендеров и во вкладке журнала. Отметка своя у каждого: один открыл журнал — другим
+    точка остаётся."""
+
+    __tablename__ = "tender_event_views"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    tender_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenders.id", ondelete="CASCADE"), primary_key=True
+    )
+    seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -95,6 +95,7 @@ def to_out(db: Session, settings: NotificationSettings) -> NotificationSettingsO
         trigger_deadline_soon=settings.trigger_deadline_soon,
         trigger_critical_error=settings.trigger_critical_error,
         trigger_documents_updated=settings.trigger_documents_updated,
+        trigger_tender_changed=settings.trigger_tender_changed,
         ai_score_threshold=settings.ai_score_threshold,
         deadline_days_threshold=settings.deadline_days_threshold,
         updated_at=settings.updated_at if settings.smtp_host else None,
@@ -142,6 +143,7 @@ def update_settings(
         "trigger_deadline_soon",
         "trigger_critical_error",
         "trigger_documents_updated",
+        "trigger_tender_changed",
         "ai_score_threshold",
         "deadline_days_threshold",
     )
@@ -630,6 +632,99 @@ def notify_documents_updated(db: Session, *, subject: str, body: str) -> Notific
     if not settings.trigger_documents_updated:
         return None
     return _dispatch(db, trigger=NotificationTrigger.DOCUMENTS_UPDATED, subject=subject, body=body)
+
+
+def notify_tender_changed(
+    db: Session, tender: Tender, events: list, *, analysis_outdated: bool = False
+) -> Notification | None:
+    """Изменения по закупке под наблюдением (12.11.2026, раздел 100 ARCHITECTURE.md).
+
+    Одно письмо на проверку, а не на событие: новая редакция извещения обычно приносит сразу
+    срок, НМЦК и пару файлов — пять писем подряд про одну закупку читать перестают. Повторы
+    не отсекаются по тендеру (как у «нового релевантного»): каждое письмо — про новые события.
+    Если изменение влияет на разбор, письмо прямо говорит, что разбор пора повторить."""
+
+    import html as html_lib
+
+    settings = get_or_create(db)
+    if not settings.trigger_tender_changed or not events:
+        return None
+
+    from decimal import Decimal, InvalidOperation
+
+    def human(event, text: str | None) -> str:
+        """Дата ISO и НМЦК числом — для портала; в письме — привычный вид."""
+
+        if not text:
+            return "—"
+        if event.event_type.endswith("_DATE_CHANGED") or event.event_type == "APPLICATION_END_CHANGED":
+            try:
+                return datetime.fromisoformat(text).strftime("%d.%m.%Y %H:%M (UTC%z)").replace(
+                    "(UTC+0300)", "(МСК)"
+                )
+            except ValueError:
+                pass
+        if event.event_type == "AMOUNT_CHANGED":
+            try:
+                amount = Decimal(text)
+                currency = (event.data or {}).get("currency") or tender.currency
+                return f"{amount:,.2f}".replace(",", " ").removesuffix(".00") + f" {currency}"
+            except InvalidOperation:
+                pass
+        return text.strip()[:400]
+
+    lines = [*_tender_lines(tender), "", f"Обнаружено изменений: {len(events)}", ""]
+    rows = []
+    for event in events:
+        lines.append(f"• {event.title}")
+        if event.old_value or event.new_value:
+            lines.append(f"  Было: {human(event, event.old_value)}")
+            lines.append(f"  Стало: {human(event, event.new_value)}")
+        if event.note:
+            lines.append(f"  {event.note}")
+        rows.append(
+            "<tr>"
+            f"<td style='padding:6px 10px;border-bottom:1px solid #eee'><b>{html_lib.escape(event.title)}</b>"
+            + (f"<br><span style='color:#888'>{html_lib.escape(event.note)}</span>" if event.note else "")
+            + "</td>"
+            f"<td style='padding:6px 10px;border-bottom:1px solid #eee;color:#888'>{html_lib.escape(human(event, event.old_value))}</td>"
+            f"<td style='padding:6px 10px;border-bottom:1px solid #eee'>{html_lib.escape(human(event, event.new_value))}</td>"
+            "</tr>"
+        )
+    if analysis_outdated:
+        lines += [
+            "",
+            "Изменения могут повлиять на оценку: разбор ИИ помечен «Информация неактуальная». "
+            "Повторите разбор в карточке закупки.",
+        ]
+    head = "".join(
+        f"<p style='margin:2px 0'>{html_lib.escape(line)}</p>" for line in _tender_lines(tender)
+    )
+    html = (
+        "<div style='font-family:Inter,Arial,sans-serif;font-size:14px;color:#111'>"
+        f"{head}"
+        "<table style='border-collapse:collapse;margin-top:12px;width:100%'>"
+        "<tr><th align='left' style='padding:6px 10px'>Изменение</th>"
+        "<th align='left' style='padding:6px 10px'>Было</th>"
+        "<th align='left' style='padding:6px 10px'>Стало</th></tr>"
+        + "".join(rows)
+        + "</table>"
+        + (
+            "<p style='margin-top:12px;color:#b45309'><b>Разбор ИИ неактуален:</b> изменения "
+            "могут повлиять на оценку — повторите разбор в карточке закупки.</p>"
+            if analysis_outdated
+            else ""
+        )
+        + "</div>"
+    )
+    return _dispatch(
+        db,
+        trigger=NotificationTrigger.TENDER_CHANGED,
+        subject=f"Sova: изменения по закупке № {tender.external_id}",
+        body="\n".join(lines),
+        html=html,
+        tender=tender,
+    )
 
 
 def send_test_notification(db: Session, *, actor: User) -> Notification:

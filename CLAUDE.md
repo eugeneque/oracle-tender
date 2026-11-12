@@ -49,7 +49,7 @@ oracle-tender-main/            ← не git-репозиторий (git status/d
   реестр — `adapters/registry.py`.
 - `core/scheduler.py` (APScheduler: опрос площадок, сроки, уборка), `core/jobs.py` (фоновые задачи).
 - `models/` — одна сущность на файл; `alembic/versions/NNNN_name.py` — миграции с нумерацией
-  (последняя на 12.11.2026 — `0099_meter_market_remap_letters`), докстринг миграции объясняет «зачем».
+  (последняя на 12.11.2026 — `0100_bitrix_tender_tracking`), докстринг миграции объясняет «зачем».
 - Учёт токенов ИИ — `ai_usage_service` (пишут клиенты моделей), окно контекста моделей —
   `ai_provider_service.get_model_limits`/`input_budget_chars`; см. раздел 52 ARCHITECTURE.md.
 - Центр уведомлений в шапке — `GET /activity` (`activity_service`, задания планировщика —
@@ -63,7 +63,7 @@ oracle-tender-main/            ← не git-репозиторий (git status/d
   `components/catalog/SoftwareIntegrationsSection.tsx`; раздел 82 ARCHITECTURE.md.
 - Отслеживание изменений по закупкам и «Журнал событий» Bitrix24 — `tender_monitor_service`
   (слепок/сравнение, задание планировщика раз в 30 минут) и `tender_event_service` (пакет `events`);
-  раздел 84 ARCHITECTURE.md; условия поставки и документы процедуры для Bitrix24 —
+  раздел 84 ARCHITECTURE.md; выгруженные в Bitrix24 закупки встают под наблюдение сами, пометка «Информация неактуальная» у разбора, зелёные точки, письмо — раздел 100; условия поставки и документы процедуры для Bitrix24 —
   `delivery_terms_service`, раздел 85; условия договора и обеспечения (оплата, санкции, гарантия,
   обеспечение, комиссия) — `contract_conditions_service`, раздел 95; итоги из протоколов (участники,
   цены, победитель, наш результат по ИНН, `RESULT_CHANGED`) — `protocol_results_service`, раздел 96; сопоставление перечня Bitrix с кодом — `oracle-t/BITRIX_AI_GAP.md`.

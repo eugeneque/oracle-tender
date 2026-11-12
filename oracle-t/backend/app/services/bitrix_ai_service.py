@@ -1388,6 +1388,9 @@ def _finish(
         link.pushed_by_id = actor.id
         link.last_error = None
         db.merge(link)
+        from app.services.bitrix_deal_service import _start_tracking
+
+        _start_tracking(db, tender, actor)
     log_action(
         db,
         component="integrations",
