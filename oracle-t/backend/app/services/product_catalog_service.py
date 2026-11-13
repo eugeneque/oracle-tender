@@ -151,6 +151,7 @@ def search_si_types(
     found = adapter.search_by_manufacturer(
         manufacturer.legal_name, brand_name=manufacturer.brand_name
     )
+    found = si_type_linking.drop_foreign_brand_results(db, manufacturer, found)
 
     saved: list[SiType] = []
     for result in found:

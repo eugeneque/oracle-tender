@@ -57,6 +57,7 @@ export function CharacteristicLine({
   label,
   characteristic,
   shownValue,
+  vague,
   emptyHint,
   sourceLabels,
   sourceUrls,
@@ -69,6 +70,8 @@ export function CharacteristicLine({
   characteristic: Characteristic | null;
   // Значение выбранного корпуса вместо полного перечня; правка по-прежнему меняет всё поле.
   shownValue?: string;
+  // В источнике только «в зависимости от типа корпуса» — значения для модели нет.
+  vague?: boolean;
   emptyHint?: string | null;
   sourceLabels: Record<string, string>;
   sourceUrls: Record<string, string | null>;
@@ -130,6 +133,10 @@ export function CharacteristicLine({
           />
           {saving && <Loader2 size={13} className="animate-spin text-zinc-500" />}
         </span>
+      ) : c?.value && vague ? (
+        <Tooltip content={`В источнике: «${c.value}» — значения для корпуса этой модели нет. Уточните по руководству или «Описанию типа».`}>
+          <span className="text-zinc-600">—</span>
+        </Tooltip>
       ) : c?.value ? (
         <Tooltip content={originText(c, sourceLabels)} className="min-w-0 items-center gap-1.5">
           {needsCheck(c) && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" aria-label="не проверено" />}
@@ -279,7 +286,8 @@ export function MeterParametersTable({
                     <CharacteristicLine
                       label={parameter.fields.length > 1 ? item.label || item.field_name : undefined}
                       characteristic={item.characteristic}
-                      shownValue={selected?.value}
+                      shownValue={item.shown_value ?? selected?.value}
+                      vague={item.vague}
                       emptyHint={hint}
                       sourceLabels={sourceLabels}
                       sourceUrls={sourceUrls}

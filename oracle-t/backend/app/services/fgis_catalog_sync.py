@@ -153,6 +153,7 @@ def _lookup_model(db: Session, task: CatalogLookupTask, *, adapter: FgisAdapter)
     candidates = adapter.search_by_manufacturer(
         manufacturer.legal_name, brand_name=manufacturer.brand_name, fetch_cards=False
     )
+    candidates = si_type_linking.drop_foreign_brand_results(db, manufacturer, candidates)
     decision = pick_candidate(
         candidates, expected_kind=DeviceKind.ELECTRICITY_METER, model_name=task.model_name
     )

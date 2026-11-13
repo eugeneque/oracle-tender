@@ -429,6 +429,59 @@ def _temperature_check(value: str) -> Check | None:
     return Check("temperature", ("Диапазон рабочих температур",), judge, value.strip())
 
 
+# Диапазон температур внутри фразы ТЗ: «…удовлетворять требованиям к рабочему диапазону
+# температур от -40 до +70°C» (32616566457, замечание 12.11.2026) — такое требование
+# целиком не разбирается (в нём ещё климатическое исполнение), и «не соответствует» ставила
+# модель при приборе на −40…+70 °C.
+_SIGNED = r"[-−–+]?\s*(?:минус\s*|плюс\s*)?\d+(?:[.,]\d+)?"
+_RANGE_IN_TEXT = re.compile(
+    rf"(?:от\s*)?({_SIGNED})\s*(?:°\s*[сc])?\s*(?:до|\.\.\.?|…|÷)\s*({_SIGNED})\s*°\s*[сc]",
+    re.IGNORECASE,
+)
+_CLIMATE_RE = re.compile(r"(?<![А-ЯA-Z])(УХЛ|ХЛ|ОМ|У|Т|О|М|В)\s*(\d)(?:[.,](\d))?(?![0-9])")
+
+
+def temperature_in_text(text: str | None) -> tuple[float, float] | None:
+    """Единственный диапазон температур во фразе про температуру; иначе None."""
+
+    if not text or not re.search(r"температур", text, re.IGNORECASE):
+        return None
+    found = {
+        parsed
+        for low, high in _RANGE_IN_TEXT.findall(text)
+        if (parsed := _temperature_range(f"от {low} до {high}"))
+    }
+    return found.pop() if len(found) == 1 else None
+
+
+def climate_in_text(text: str | None) -> tuple[str, int] | None:
+    """Климатическое исполнение и категория размещения по ГОСТ 15150: «УХЛ2.1» → (УХЛ, 2)."""
+
+    found = {(m.group(1).upper(), int(m.group(2))) for m in _CLIMATE_RE.finditer(text or "")}
+    return found.pop() if len(found) == 1 else None
+
+
+# Исполнение прибора → какие исполнения ТЗ оно покрывает (ГОСТ 15150-69, табл. 1): УХЛ —
+# умеренный и холодный климат, О — общеклиматическое, В — всеклиматическое.
+_CLIMATE_COVERS = {
+    "УХЛ": {"УХЛ", "У", "ХЛ"},
+    "О": {"О", "УХЛ", "У", "ХЛ", "Т"},
+    "В": {"В", "О", "УХЛ", "У", "ХЛ", "Т", "М", "ОМ"},
+    "ОМ": {"ОМ", "М"},
+}
+
+
+def climate_fits(product_value: str | None, wanted: tuple[str, int]) -> bool | None:
+    """Подходит ли исполнение прибора: климат покрывает требуемый, а категория размещения не
+    мягче (1 — на открытом воздухе — годится для 2, 3, 4). Нет исполнения у прибора — None."""
+
+    own = climate_in_text(product_value)
+    if own is None:
+        return None
+    letters, placement = own
+    return wanted[0] in _CLIMATE_COVERS.get(letters, {letters}) and placement <= wanted[1]
+
+
 # --------------------------------------------------------------------------- степень защиты
 
 _IP = re.compile(r"ip\s*(\d)(\d)", re.IGNORECASE)
@@ -460,10 +513,17 @@ _DIMENSIONS_NAME = re.compile(
 )
 
 
-def _sides(value: str) -> tuple[float, float, float] | None:
-    """Ровно три стороны «A×B×C [мм]»; перечень исполнений, пояснения — None."""
+# Пояснение порядка сторон после размеров: «(высота × ширина × глубина)», «(Ш×В×Г)».
+_SIDE_ORDER_NOTE = re.compile(
+    r"\s*\((?:\s*(?:ш|в|г|д|ширина|высота|глубина|длина)\w*\s*[×хx*,]?\s*){2,3}\)\s*$", re.IGNORECASE
+)
 
-    match = _SIDES.match(value.strip(" ."))
+
+def _sides(value: str) -> tuple[float, float, float] | None:
+    """Ровно три стороны «A×B×C [мм]»; перечень исполнений, пояснения — None. Пояснение
+    порядка сторон в скобках («(высота × ширина × глубина)») значения не меняет."""
+
+    match = _SIDES.match(_SIDE_ORDER_NOTE.sub("", value).strip(" ."))
     return tuple(_number(item) for item in match.groups()) if match else None  # type: ignore[return-value]
 
 
@@ -490,11 +550,13 @@ def _dimensions_check(name: str, value: str) -> Check | None:
         own = _sides(product_value)
         if own is None:
             return None
-        if all(a <= b for a, b in zip(own, limit)):
-            return [True]
-        if any(a > b for a, b in zip(sorted(own), sorted(limit))):
-            return [False]
-        return None
+        # Порядок сторон в ТЗ и у производителя разный (Ш×В×Г, В×Ш×Г, «a×b×c» по ГОСТ), и
+        # подписи сторон в документации прибора чаще всего нет. Поэтому стороны сравниваются
+        # упорядоченными: прибор подходит, если его стороны по возрастанию не больше
+        # пределов по возрастанию — то есть он помещается в заданный объём при каком-то
+        # положении; не подходит — если не помещается ни при каком (12.11.2026: раньше
+        # «подходит» засчитывалось только в порядке записи, остальное уходило модели).
+        return [all(a <= b for a, b in zip(sorted(own), sorted(limit)))]
 
     return Check("dimensions", ("Габаритные размеры",), judge, f"не более {value.strip().removeprefix('не более').strip()}")
 
@@ -556,6 +618,13 @@ def requirement_checks(text: str) -> list[Check] | None:
         dimensions = _dimensions_check(name, value)
         if dimensions is not None:
             return [dimensions]
+    else:
+        # «габариты не более 120 × 100 × 80 мм (высота × ширина × глубина)» — без двоеточия
+        # (32616566457, замечание 12.11.2026).
+        bare = re.match(r"^(габарит\w*(?:\s+размер\w*)?)\s+(не\s+более\s+.+)$", text, re.IGNORECASE)
+        if bare:
+            dimensions = _dimensions_check(bare.group(1), bare.group(2))
+            return [dimensions] if dimensions is not None else None
     text = _expand_paired(text)
     if not text or ":" not in text:
         return None

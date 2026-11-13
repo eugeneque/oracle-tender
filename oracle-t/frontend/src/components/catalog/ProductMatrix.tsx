@@ -47,8 +47,10 @@ const ROWS: { key: RowKey; label: string }[] = [
   { key: "3_indirect", label: "Трёхфазные косвенного включения" },
   { key: "3", label: "Трёхфазные, включение не определено" },
   { key: "hv", label: "Высоковольтные (ВПУ)" },
-  { key: "unknown", label: "Фазность не определена" },
 ];
+// Строки «Фазность не определена» больше нет (замечание 12.11.2026): в ней оказывались
+// поверочные установки, устройства регулирования и снятые с производства типы из реестра —
+// к счётчикам, которые сравниваются в закупках, они не относятся.
 
 function rowsOf(p: Product): RowKey[] {
   const rows = new Set<RowKey>();
@@ -60,7 +62,14 @@ function rowsOf(p: Product): RowKey[] {
     else if (kind.startsWith("3ph_indirect")) rows.add("3_indirect");
   }
   if (rows.size) return [...rows];
-  return [p.phases === 1 ? "1" : p.phases === 3 ? "3" : "unknown"];
+  return p.phases === 1 ? ["1"] : p.phases === 3 ? ["3"] : [];
+}
+
+// Код корпуса в обозначении: МИРТЕК-12-РУ-SP17, НАРТИС-И100-W115 (как `body_code` на сервере).
+const BODY_CODE_RE = /(?:^|[\s\-‑])(?:SP|D|W)\d{1,3}[a-z]?(?=$|[\s\-‑,.;)])/;
+
+function hasBodyCode(p: Product): boolean {
+  return BODY_CODE_RE.test(p.model_code ?? "") || BODY_CODE_RE.test(p.model_name);
 }
 
 function columnsOf(p: Product): ColumnKey[] {
@@ -105,6 +114,15 @@ export function ProductMatrix({
     };
   }, [products]);
 
+  // Запись на всю серию: у модели нет кода корпуса, а у моделей того же типа СИ он есть
+  // («НАРТИС-И100» рядом с «НАРТИС-И100-W112»). Она стоит во всех столбцах своих корпусов,
+  // и без пометки читалась как отдельный прибор — «где-то указан корпус, где-то нет»
+  // (замечание 12.11.2026).
+  const familyIds = useMemo(() => {
+    const typesWithBodies = new Set(products.filter((p) => p.si_type_id && hasBodyCode(p)).map((p) => p.si_type_id));
+    return new Set(products.filter((p) => p.si_type_id && !hasBodyCode(p) && typesWithBodies.has(p.si_type_id)).map((p) => p.id));
+  }, [products]);
+
   const columnCount = (col: ColumnKey) =>
     new Set(rows.flatMap((r) => (cells.get(`${r.key}:${col}`) ?? []).map((p) => p.id))).size;
 
@@ -116,6 +134,7 @@ export function ProductMatrix({
       p.model_name !== productDisplayName(p.model_name) ? p.model_name : null,
       p.execution ? `Исполнение: ${p.execution}` : null,
       p.data_source === "fgis" ? `Заведена из реестра ФГИС${p.registry_modification ? `: ${p.registry_modification}` : ""}` : null,
+      familyIds.has(p.id) ? "Запись на всю серию, без кода корпуса: показана во всех столбцах, где у серии есть корпус" : null,
       needsReview ? `Проверить: ${p.review_reason ?? "нужна проверка"}` : null,
     ]
       .filter(Boolean)
@@ -136,7 +155,10 @@ export function ProductMatrix({
             </span>
             {/* Регистрационный номер в Госреестре СИ; «без кода СИ» — пометка, а не пустое
                 место (вопрос тестировщика 18.09.2026). */}
-            <span className="block font-mono text-[10px] text-zinc-500">{siCode ?? "без кода СИ"}</span>
+            <span className="block font-mono text-[10px] text-zinc-500">
+              {siCode ?? "без кода СИ"}
+              {familyIds.has(p.id) && <span className="font-sans"> · вся серия</span>}
+            </span>
           </span>
           {needsReview && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" aria-label="нужно проверить" />}
         </button>

@@ -260,6 +260,10 @@ export interface MeterParameterField {
   characteristic: Characteristic | null;
   // Значение по корпусам («W1» → «192×122×57 мм»); пусто — значение одно на модель.
   variants?: { keys: string[]; value: string }[];
+  // Значение для корпуса этой модели из перечня серии (12.11.2026).
+  shown_value?: string | null;
+  // В поле только оговорка «в зависимости от типа корпуса» — ответа нет.
+  vague?: boolean;
 }
 
 export interface MeterParameterFact {

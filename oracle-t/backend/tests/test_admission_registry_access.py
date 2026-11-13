@@ -23,7 +23,7 @@ from app.adapters.admission_registries import (
     _rows_from_records,
 )
 from app.db.session import SessionLocal
-from app.models.manufacturer import Manufacturer, Product, ProductDataSource
+from app.models.manufacturer import Manufacturer, Product, ProductDataSource, SiType
 from app.models.registry_record import ProductRegistryRecord
 from app.services import registry_polling
 
@@ -411,3 +411,59 @@ def test_gisp_card_tells_when_and_how_long_it_is_polled(client, admin_token):
     gisp = {source["key"]: source for source in resp.json()}["gisp"]
     assert "по понедельникам в 02:30" in gisp["detail"]
     assert "до 5 мин, до 3 попыток" in gisp["detail"]
+
+
+def _mirtek_keys(model_name: str, model_code: str | None, *type_names: str):
+    manufacturer = Manufacturer(legal_name="ООО «МИРТЕК»", brand_name="МИРТЕК", is_mirtek=True)
+    own = registry_polling._split_body(model_code) or registry_polling._split_body(model_name)
+    bases = sorted({own[0], *type_names})
+    return registry_polling._ProductKeys(
+        product=Product(model_code=model_code, model_name=model_name),
+        patterns=[p for p in map(registry_polling._designation_pattern, [model_code or "", *type_names]) if p],
+        manufacturer_tokens=registry_polling._manufacturer_tokens(manufacturer),
+        body=own[1],
+        body_patterns=[registry_polling._body_pattern(base) for base in bases],
+    )
+
+
+def _prepared(product_name: str, organization: str = 'ООО "РИМ-РУС"'):
+    row = RegistryRow(record_number="1", product_name=product_name, organization=organization, valid_to=date(2031, 1, 1))
+    row.raw = f"{product_name} {organization}"
+    return row, [(row, registry_polling._fold(row.raw), registry_polling._fold(organization))]
+
+
+def test_registry_row_of_another_housing_is_not_ours():
+    """Замечание 12.11.2026: МИРТЕК-232-РУ-SP37 получил запись ГИСП «МИРТЕК-32-РУ-D37-2», а
+    МИРТЕК-12-РУ-SP17 — «МИРТЕК-12-РУ-D17-2»: совпало обозначение типа, корпус — чужой."""
+
+    keys = _mirtek_keys("МИРТЕК-232-РУ-SP37", None, "МИРТЕК-32-РУ")
+    _, prepared = _prepared("Счетчики электрической энергии трехфазные МИРТЕК-32-РУ-D37-2-A1R1-230-5-100A")
+    assert registry_polling._best_row(keys, prepared) is None
+
+    keys = _mirtek_keys("МИРТЕК-12-РУ-D17", "МИРТЕК-12-РУ-D17", "МИРТЕК-12-РУ")
+    row, prepared = _prepared("Счетчики электрической энергии однофазные МИРТЕК-12-РУ-D17-2")
+    assert registry_polling._best_row(keys, prepared) is row
+
+
+def test_zak_list_of_housings_counts_only_listed_ones():
+    text = (
+        "Счетчик трехфазный «МИРТЕК-32-РУ». Версия ПО: 1.0 в следующих модификациях: "
+        "МИРТЕК-32-РУ-W31-A1R1-230-xx, МИРТЕК-32-РУ-W32-A1R1-230-xx, МИРТЕК-32-РУ-SP31-A1R1-230-xx"
+    )
+    row, prepared = _prepared(text, "")
+    assert registry_polling._best_row(_mirtek_keys("МИРТЕК-232-РУ-SP37", None, "МИРТЕК-32-РУ"), prepared) is None
+    assert registry_polling._best_row(_mirtek_keys("МИРТЕК-32-РУ-SP31", "МИРТЕК-32-РУ-SP31", "МИРТЕК-32-РУ"), prepared) is row
+    # Строка без кодов корпусов — про весь тип.
+    row, prepared = _prepared("Счетчик однофазный «МИРТЕК-12-РУ»", "")
+    assert registry_polling._best_row(_mirtek_keys("МИРТЕК-12-РУ-SP17", "МИРТЕК-12-РУ-SP17", "МИРТЕК-12-РУ"), prepared) is row
+
+
+def test_type_alias_from_sibling_models():
+    """МИРТЕК-212-РУ-SP17 без обозначения по реестру ищется как МИРТЕК-12-РУ-SP17: так
+    записаны соседние модели того же типа."""
+
+    si_type = SiType(id=uuid.uuid4(), notation="МИРТЕК-212-РУ", si_code="1-1")
+    sibling = Product(model_name="МИРТЕК-212-РУ-D17", model_code="МИРТЕК-12-РУ-D17", si_type_id=si_type.id)
+    target = Product(model_name="МИРТЕК-212-РУ-SP17", model_code=None, si_type_id=si_type.id)
+    aliases = registry_polling._type_aliases([sibling, target], {si_type.id: si_type})
+    assert aliases == {si_type.id: {"МИРТЕК-12-РУ"}}

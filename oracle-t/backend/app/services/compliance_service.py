@@ -40,6 +40,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import contextlib
 
 import math
@@ -69,6 +71,7 @@ from app.models.log import LogLevel
 from app.models.manufacturer import Manufacturer, Product, ProductCharacteristic, ProductStatus, SiType
 from app.models.tender import Tender
 from app.models.user import User
+from app.services import characteristic_values, product_form_factor
 from app.services.audit import log_action
 from app.seed.meter_parameters import (
     GISP_PP719_URL,
@@ -85,6 +88,9 @@ from app.services.meter_kind import kind_group, kind_labels, kinds_from_text, pr
 from app.services.compliance_numeric import (
     CatalogModel,
     ENABLED as NUMERIC_ENABLED,
+    climate_fits,
+    climate_in_text,
+    temperature_in_text,
     lost_numbers,
     prejudge,
     requirement_checks,
@@ -1187,6 +1193,7 @@ def _evaluate_manufacturer(
     apply_confidence_floor(requirements, verdicts)
     apply_transformer_scope(requirements, verdicts)
     apply_duration_check(requirements, verdicts)
+    apply_temperature_guard(requirements, verdicts, lambda: catalog_models(db, manufacturer))
     apply_evidence_check(requirements, verdicts)
     apply_expert_rules(manufacturer, requirements, verdicts, made_kinds=made_kinds)
     apply_lot_variants(requirements, verdicts)
@@ -1892,6 +1899,79 @@ def apply_duration_check(
         )
 
 
+_TEMPERATURE_FIELD = "Диапазон рабочих температур"
+_CLIMATE_FIELD = "Климатическое исполнение"
+
+
+def apply_temperature_guard(
+    requirements: list[Requirement],
+    verdicts: dict[int, RequirementVerdict],
+    models: Callable[[], list[CatalogModel]],
+) -> None:
+    """«Не соответствует» модели по требованию с диапазоном температур, который прибор
+    производителя покрывает, — неверный вывод (замечание 12.11.2026, 32616566457: «УХЛ2.1 …
+    рабочий диапазон температур от −40 до +70 °C» — у МИРТЕК ✗ при приборах на −40…+70 °C).
+
+    Фраза целиком кодом не разбирается (в ней ещё климатическое исполнение), поэтому
+    разбирается по частям: диапазон температур — у какой-либо модели каталога он шире
+    требуемого; климатическое исполнение, если названо, — по полю «Климатическое исполнение».
+    Обе части подтверждены — «соответствует»; температура подтверждена, а исполнения в
+    каталоге нет — «нет данных» с пояснением, что проверить (не «не соответствует»: ответа
+    против прибора нет). `models` — ленивый вызов: каталог читается, только если есть что
+    проверять."""
+
+    loaded: list[CatalogModel] | None = None
+    for index, requirement in enumerate(requirements, start=1):
+        verdict = verdicts.get(index)
+        if verdict is None or verdict.status != ComplianceStatus.NOT_MEETS.value:
+            continue
+        if verdict.source in ("rule", "tz", "astra", "human_review"):
+            continue
+        text = requirement.text or requirement.normalized_text or ""
+        wanted = temperature_in_text(text) or temperature_in_text(requirement.normalized_text)
+        if wanted is None:
+            continue
+        if loaded is None:
+            loaded = models()
+        climate = climate_in_text(text)
+        best: tuple[int, str] | None = None
+        for model in loaded:
+            own = temperature_in_text(f"температур {model.values.get(_TEMPERATURE_FIELD) or ''}")
+            if own is None or own[0] > wanted[0] or own[1] < wanted[1]:
+                continue
+            fits = climate_fits(model.values.get(_CLIMATE_FIELD), climate) if climate else True
+            if fits is False:
+                continue
+            rank = 2 if fits else 1
+            line = f"{model.name}: {model.values[_TEMPERATURE_FIELD]}"
+            if climate and fits:
+                line += f", исполнение {model.values[_CLIMATE_FIELD]}"
+            if best is None or rank > best[0]:
+                best = (rank, line)
+        if best is None:
+            continue
+        span = f"{wanted[0]:+g}…{wanted[1]:+g} °C"
+        if best[0] == 2:
+            verdicts[index] = RequirementVerdict(
+                number=index,
+                status=ComplianceStatus.MEETS.value,
+                source="catalog",
+                explanation=f"{best[1]} (требуется {span}) [сверено кодом]"[:300],
+                confidence=0.9,
+            )
+        else:
+            verdicts[index] = RequirementVerdict(
+                number=index,
+                status=ComplianceStatus.NO_DATA.value,
+                source=verdict.source,
+                explanation=(
+                    f"Диапазон температур подходит — {best[1]} (требуется {span}); "
+                    f"климатическое исполнение {climate[0]}{climate[1]} в каталоге не указано — проверить по паспорту"
+                )[:300],
+                confidence=0.5,
+            )
+
+
 # Параметры, которые сравниваются числом: «не соответствует» по ним без названного значения
 # из карточки — не вывод, а догадка модели.
 _NUMERIC_PARAMETER_RE = re.compile(
@@ -2191,6 +2271,24 @@ def apply_expert_rules(
             )
 
 
+def _model_value(product: Product, field_name: str, value: str) -> str:
+    """Значение поля для корпуса этой модели, если записан перечень серии: «D17: 130×90×70 мм;
+    SP17: 220×165×75 мм» у МИРТЕК-12-РУ-D17 → «130×90×70 мм» (12.11.2026). Без этого
+    габариты такой модели кодом не сверялись вовсе — перечень не разбирается как три стороны."""
+
+    narrowed = product_form_factor.model_specific_value(
+        field_name, value, model_code=product.model_code, model_name=product.model_name, family_source=False
+    )
+    if narrowed and narrowed != value:
+        return narrowed
+    if not characteristic_values.is_family_level(value):
+        return value
+    tokens = characteristic_values.designation_tokens(
+        product.model_code, product.model_name, product.execution, product.registry_modification
+    )
+    return characteristic_values.resolve_family_value(value, tokens) or value
+
+
 def catalog_models(db: Session, manufacturer: Manufacturer) -> list[CatalogModel]:
     """Модели производителя со значениями характеристик для предрешения кодом. Без
     руководства: оно — третий шаг сопоставления, только для оставшихся без ответа."""
@@ -2212,7 +2310,7 @@ def catalog_models(db: Session, manufacturer: Manufacturer) -> list[CatalogModel
     for product in products:
         characteristics = by_product.get(product.id, [])
         values = {
-            item.field_name: item.value
+            item.field_name: _model_value(product, item.field_name, item.value)
             for item in characteristics
             if item.value and item.source != "user_manual"
         }

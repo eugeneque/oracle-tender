@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 
 from loguru import logger
@@ -119,6 +119,11 @@ class _ProductKeys:
     product: Product
     patterns: list[re.Pattern[str]]
     manufacturer_tokens: list[str]
+    # Код корпуса модели («SP17») и «обозначение + код корпуса» в строке реестра: строка,
+    # где за обозначением типа названы только чужие корпуса, к модели не относится
+    # (замечание 12.11.2026, см. `_row_bodies`).
+    body: str | None = None
+    body_patterns: list[re.Pattern[str]] = field(default_factory=list)
 
 
 def _designation_pattern(designation: str) -> re.Pattern[str] | None:
@@ -144,33 +149,101 @@ def _manufacturer_tokens(manufacturer: Manufacturer) -> list[str]:
     return tokens
 
 
+_BODY_AFTER_TYPE = r"[\s\-‐‑–.]?(SP|D|W)(\d{1,3})(?![0-9])"
+
+
+def _body_pattern(type_designation: str) -> re.Pattern[str] | None:
+    """«Обозначение типа» + код корпуса сразу за ним: «МИРТЕК-32-РУ-D37-2-A1R1…» → D37."""
+
+    base = _designation_pattern(type_designation)
+    if base is None:
+        return None
+    return re.compile(base.pattern.removesuffix("(?![0-9])") + _BODY_AFTER_TYPE)
+
+
+def _split_body(designation: str | None) -> tuple[str, str] | None:
+    """«МИРТЕК-12-РУ-SP17» → («МИРТЕК-12-РУ», «SP17»); без кода корпуса в конце — None."""
+
+    match = re.match(r"^(.*?)[\s\-‐‑–]+((?:SP|D|W)\d{1,3})$", (designation or "").strip())
+    return (match.group(1), match.group(2)) if match else None
+
+
+def _type_aliases(products: list[Product], si_types: dict[uuid.UUID, SiType]) -> dict[uuid.UUID, set[str]]:
+    """Обозначение, под которым модели типа записаны в реестрах, если оно отличается от
+    обозначения типа: тип ФГИС «МИРТЕК-212-РУ» (владивостокский завод), а исполнения —
+    «МИРТЕК-12-РУ-D17-…». Выводится из соседних моделей того же типа: у МИРТЕК-212-РУ-D17
+    обозначение по реестру «МИРТЕК-12-РУ-D17» — значит, «МИРТЕК-212-РУ» в реестрах пишется как
+    «МИРТЕК-12-РУ». Без этого МИРТЕК-212-РУ-SP17 (обозначение не заполнено) не находился ни в
+    ПП 719, ни в ЗАК (замечание 12.11.2026)."""
+
+    aliases: dict[uuid.UUID, set[str]] = {}
+    for product in products:
+        si_type = si_types.get(product.si_type_id) if product.si_type_id else None
+        if not si_type or not si_type.notation or not product.model_code:
+            continue
+        by_name, by_code = _split_body(product.model_name), _split_body(product.model_code)
+        if not by_name or not by_code or _fold(by_name[1]) != _fold(by_code[1]):
+            continue
+        if _fold(by_name[0]) == _fold(si_type.notation) and _fold(by_code[0]) != _fold(si_type.notation):
+            aliases.setdefault(si_type.id, set()).add(by_code[0])
+    return aliases
+
+
 def _product_keys(db: Session) -> list[_ProductKeys]:
     manufacturers = {m.id: m for m in db.scalars(select(Manufacturer))}
     si_types = {s.id: s for s in db.scalars(select(SiType))}
+    products = list(db.scalars(select(Product)))
+    aliases = _type_aliases(products, si_types)
     keys: list[_ProductKeys] = []
-    for product in db.scalars(select(Product)):
-        designations = [product.model_code]
+    for product in products:
         si_type = si_types.get(product.si_type_id) if product.si_type_id else None
-        if si_type and si_type.notation:
-            designations.append(si_type.notation)
+        type_names = [si_type.notation] if si_type and si_type.notation else []
+        type_names += sorted(aliases.get(si_type.id, ())) if si_type else []
+        designations = [product.model_code]
+        by_name = _split_body(product.model_name)
+        if not product.model_code and by_name and si_type and si_type.id in aliases:
+            designations += [f"{alias}-{by_name[1]}" for alias in sorted(aliases[si_type.id])]
+        designations += type_names
         patterns = [p for p in (_designation_pattern(d) for d in designations if d) if p]
         if not patterns:
             continue
+        own = _split_body(product.model_code) or by_name
+        bases = {own[0]} if own else set()
+        bases.update(type_names)
         manufacturer = manufacturers.get(product.manufacturer_id)
         keys.append(
             _ProductKeys(
                 product=product,
                 patterns=patterns,
                 manufacturer_tokens=_manufacturer_tokens(manufacturer) if manufacturer else [],
+                body=_fold(own[1]) if own else None,
+                body_patterns=[p for p in (_body_pattern(b) for b in sorted(bases)) if p],
             )
         )
     return keys
+
+
+def _row_bodies(keys: _ProductKeys, folded_raw: str) -> set[str]:
+    """Коды корпусов, названные в строке реестра сразу за обозначением типа модели."""
+
+    return {
+        match.group(1) + match.group(2)
+        for pattern in keys.body_patterns
+        for match in pattern.finditer(folded_raw)
+    }
 
 
 def _best_row(keys: _ProductKeys, rows: list[tuple[RegistryRow, str, str]]) -> RegistryRow | None:
     found: list[RegistryRow] = []
     for row, folded_raw, folded_org in rows:
         if not any(pattern.search(folded_raw) for pattern in keys.patterns):
+            continue
+        # Обозначение типа есть, но за ним названы только другие корпуса: ГИСП
+        # «МИРТЕК-32-РУ-D37-2» — не запись МИРТЕК-232-РУ-SP37, перечень ЗАК «…-W31, -W32,
+        # -SP31» — не допуск SP37 (замечание 12.11.2026). Строка без кодов корпусов
+        # относится ко всему типу и засчитывается, как раньше.
+        bodies = _row_bodies(keys, folded_raw) if keys.body else set()
+        if bodies and keys.body not in bodies:
             continue
         # У ГИСП есть колонка организации: обозначение чужого производителя не засчитывается.
         # Исключение — бренд в самом наименовании: «МИРТЕК-32-РУ» в реестре ГИСП записан на

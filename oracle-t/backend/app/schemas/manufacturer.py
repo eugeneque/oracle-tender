@@ -167,6 +167,11 @@ class MeterParameterFieldOut(BaseModel):
     characteristic: CharacteristicOut | None
     # Значение по корпусам: [{keys: ["W1"], value: "…"}]; пусто — значение одно на модель.
     variants: list[dict] = []
+    # Значение для корпуса этой модели, если в поле записан перечень серии («на щиток,
+    # DIN-рейку, опору ЛЭП» у D17 → «DIN-рейка»); `None` — показывать значение как есть.
+    shown_value: str | None = None
+    # В поле только оговорка без значения («в зависимости от типа корпуса») — ответа нет.
+    vague: bool = False
 
 
 class MeterParameterFactOut(BaseModel):

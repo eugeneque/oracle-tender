@@ -448,3 +448,57 @@ def _clear_unlinked_flag(product: Product) -> None:
     if (product.review_reason or "").startswith(UNLINKED_REASON_PREFIX):
         product.review_status = ReviewStatus.OK.value
         product.review_reason = None
+
+
+# --------------------------------------------------------------------------- чужие марки
+
+
+def _brand_words(manufacturer: Manufacturer) -> set[str]:
+    """Марка производителя словами (≥ 4 букв): «МИРТЕК», «НАРТИС», «РиМ» отбрасывается —
+    короткое слово совпало бы внутри чужих обозначений."""
+
+    words: set[str] = set()
+    for name in (manufacturer.brand_name,):
+        for word in re.split(r"[^0-9A-Za-zА-Яа-яЁё]+", name or ""):
+            if len(word) >= 4:
+                words.add(word.upper().replace("Ё", "Е"))
+    return words
+
+
+def foreign_brand(db: Session, manufacturer: Manufacturer, *texts: str | None) -> str | None:
+    """Марка другого производителя из справочника, которой назван тип СИ («МИРТЕК-12-РУ»), —
+    либо `None`.
+
+    Причина (замечание 12.11.2026): у РиМ (АО «Радио и Микроэлектроника») в каталоге
+    оказались МИРТЕК-12-РУ и МИРТЕК-32-РУ. В ФГИС их изготовителем записан контрактный завод
+    ООО «РИМ-РУС», и поиск по марке «РиМ» признавал типы своими (`matched_by="brand"`).
+    Обозначение с чужой маркой в самом названии — не прибор этого производителя."""
+
+    text = " ".join(t for t in texts if t).upper().replace("Ё", "Е")
+    if not text:
+        return None
+    own = _brand_words(manufacturer)
+    others = db.scalars(select(Manufacturer).where(Manufacturer.id != manufacturer.id))
+    for other in others:
+        for word in _brand_words(other) - own:
+            if re.search(rf"(?<![0-9A-ZА-Я]){re.escape(word)}(?![0-9A-ZА-Я])", text):
+                return other.brand_name
+    return None
+
+
+def drop_foreign_brand_results(db: Session, manufacturer: Manufacturer, results: list) -> list:
+    """Выдача поиска ФГИС без типов, названных чужой маркой, если тип признан своим только по
+    марке/ядру названия (`matched_by="brand"`): совпадение по юрлицу надёжно и не трогается."""
+
+    kept = []
+    for result in results:
+        if getattr(result, "matched_by", None) == "brand":
+            other = foreign_brand(db, manufacturer, result.notation, result.type_name)
+            if other:
+                logger.info(
+                    f"ФГИС: тип {result.si_code} «{result.notation or result.type_name}» назван маркой "
+                    f"«{other}» — у «{manufacturer.brand_name}» не сохраняется"
+                )
+                continue
+        kept.append(result)
+    return kept

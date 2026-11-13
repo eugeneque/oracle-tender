@@ -306,20 +306,24 @@ export function TenderComplianceTab({
       {/* Таблица не сжимается под ширину панели (14.10.2026): при десятке производителей
           колонки по 72 px обрезали названия, а текст требования ломался в столбик. Теперь у
           колонок есть минимальная ширина, таблица прокручивается вбок, а столбец требований
-          закреплён слева — при прокрутке видно, о каком требовании речь. */}
-      <div className="overflow-x-auto rounded-xl border border-white/[0.08]">
+          закреплён слева — при прокрутке видно, о каком требовании речь.
+          12.11.2026 (замечание «неудобно просматривать таблицу конкурентов»): при прокрутке
+          вниз шапка с производителями уходила, и в середине таблицы колонки были безымянными.
+          Таблица прокручивается внутри своей рамки, шапка закреплена сверху, а у ячейки в
+          подсказке — производитель и вердикт. */}
+      <div className="max-h-[75vh] overflow-auto rounded-xl border border-white/[0.08]">
         <table className="w-full min-w-max border-separate border-spacing-0 text-[13px]">
           <thead>
             <tr>
-              <th className="sticky left-0 z-10 min-w-[320px] max-w-[440px] border-b border-r border-white/[0.08] bg-zinc-900 px-4 py-3 text-left text-xs font-medium text-zinc-400">
+              <th className="sticky left-0 top-0 z-30 min-w-[320px] max-w-[440px] border-b border-r border-white/[0.08] bg-zinc-900 px-4 py-3 text-left text-xs font-medium text-zinc-400">
                 Требование
                 <span className="ml-1.5 font-normal tabular-nums text-zinc-600">{matrix.requirements.length}</span>
               </th>
               {manufacturers.map((manufacturer) => (
                 <th
                   key={manufacturer.id}
-                  className={`min-w-[104px] max-w-[132px] border-b border-white/[0.08] px-2 py-3 text-center align-bottom ${
-                    manufacturer.isMirtek ? "bg-indigo-500/[0.08]" : ""
+                  className={`sticky top-0 z-20 min-w-[104px] max-w-[132px] border-b border-white/[0.08] bg-zinc-900 px-2 py-3 text-center align-bottom ${
+                    manufacturer.isMirtek ? "bg-[linear-gradient(rgba(99,102,241,0.08),rgba(99,102,241,0.08))]" : ""
                   }`}
                   title={manufacturer.name}
                 >
@@ -373,7 +377,7 @@ export function TenderComplianceTab({
                           }`}
                         >
                           <span
-                            title={entry ? complianceLabel(entry.status) : "Нет данных"}
+                            title={`${manufacturer.name}: ${entry ? complianceLabel(entry.status) : "Нет данных"}`}
                             className={`relative inline-flex h-7 w-7 items-center justify-center rounded-lg text-sm ${STATUS_CLASSES[status]}`}
                           >
                             {STATUS_SHORT[status]}

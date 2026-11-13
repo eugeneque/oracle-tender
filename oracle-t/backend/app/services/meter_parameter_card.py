@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
@@ -33,7 +34,13 @@ from app.seed.meter_parameters import (
     RULE_ONLY_MANUFACTURERS,
     THREE_POSITION_RELAY_BRANDS,
 )
-from app.services import characteristic_values, registry_records_service, upper_software_service
+from app.services import (
+    characteristic_values,
+    product_form_factor,
+    registry_records_service,
+    software_integration_service,
+    upper_software_service,
+)
 from app.services.characteristic_extraction import list_characteristics
 
 # Параметры, ответ на которые лежит в реестре допуска, а не в характеристиках.
@@ -111,6 +118,9 @@ class ParameterField:
     # Значение по исполнениям корпуса: [{"keys": ["W1"], "value": "192×122×57 мм"}, …]. Пусто —
     # значение одно на модель (05.11.2026).
     variants: list[dict] = field(default_factory=list)
+    # Значение для корпуса этой модели из перечня серии (12.11.2026, см. `_model_value`).
+    shown_value: str | None = None
+    vague: bool = False
 
 
 @dataclass
@@ -128,9 +138,9 @@ class ParameterRow:
         """Есть ли у модели ответ на параметр: значение хотя бы в одном поле либо
         сведение, которое что-то утверждает (а не «не проверялось»)."""
 
-        return any(item.characteristic and item.characteristic.value for item in self.fields) or any(
-            fact.tone != "muted" for fact in self.facts
-        )
+        return any(
+            item.characteristic and item.characteristic.value and not item.vague for item in self.fields
+        ) or any(fact.tone != "muted" for fact in self.facts)
 
 
 def _registry_facts(db: Session, product: Product) -> dict[str, ParameterFact]:
@@ -201,6 +211,78 @@ def _housing_variants(characteristic: ProductCharacteristic | None) -> list[dict
     return [{"keys": sorted(keys), "value": text} for keys, text in keyed]
 
 
+# Оговорка без значения: «в зависимости от типа корпуса», «зависит от исполнения».
+_VAGUE_RE = re.compile(
+    r"^\s*(?:в\s+зависимост\w*|завис\w*)\s+от\s+(?:тип\w*\s+)?(?:корпус\w*|исполнени\w*|модификаци\w*)\s*\.?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _model_value(product: Product, item: ParameterField) -> None:
+    """Значение поля для этой модели, а не для серии (замечание 12.11.2026).
+
+    В карточке МИРТЕК-12-РУ-D17 «Способ крепления» был «на щиток, DIN-рейку, опору ЛЭП», а
+    «Размеры» — «в зависимости от типа корпуса» или размеры всех корпусов сразу: значения
+    пришли из «Описания типа» / руководства на весь тип. Код корпуса в обозначении модели
+    (D17) выбирает свой вариант — тем же правилом, что и при записи характеристик
+    (`product_form_factor.model_specific_value`, `characteristic_values.resolve_family_value`).
+    Хранимое значение не меняется: правка в строке по-прежнему правит всё поле."""
+
+    value = item.characteristic.value if item.characteristic else None
+    if not value:
+        return
+    if _VAGUE_RE.match(value):
+        item.vague = True
+        return
+    narrowed = product_form_factor.model_specific_value(
+        item.field_name,
+        value,
+        model_code=product.model_code,
+        model_name=product.model_name,
+        family_source=False,
+    )
+    if narrowed and narrowed != value:
+        item.shown_value = narrowed
+        return
+    # «W1, W2, D17, SP17» — перечень корпусов серии; у модели с кодом корпуса — он сам.
+    code = product_form_factor.body_code(product.model_code, product.model_name)
+    if item.field_name == product_form_factor.FIELD_BODY and code:
+        listed = set(re.findall(r"[A-Za-zА-Яа-я]{1,3}\d{1,3}", value))
+        if len(listed) > 1 and code in listed:
+            item.shown_value = code
+            return
+    if not characteristic_values.is_family_level(value):
+        return
+    tokens = characteristic_values.designation_tokens(
+        product.model_code, product.model_name, product.execution, product.registry_modification
+    )
+    picked = characteristic_values.resolve_family_value(value, tokens)
+    if picked:
+        item.shown_value = picked
+        item.variants = []
+
+
+def _single_card_field(parameter, fields: list[ParameterField]) -> list[ParameterField]:
+    """Для параметров с одним ответом (`card_fields`) — одно поле без подписи: первое
+    заполненное, а если пусто всё — первое, чтобы администратору было куда вписать."""
+
+    shown = [item for item in fields if item.field_name in parameter.card_fields]
+    filled = [item for item in shown if item.characteristic and item.characteristic.value and not item.vague]
+    return (filled or shown)[:1]
+
+
+def _specialist_fact(db: Session, product: Product) -> ParameterFact | None:
+    """П36: интеграции, подтверждённые специалистом МИРТЕК (раздел 82), — их карточка
+    показывала только в шапке, а строка параметра брала лишь публичные списки площадок, и у
+    каждой модели линейки не хватало своих систем (замечание 12.11.2026)."""
+
+    rows = software_integration_service.product_integrations(db, product)
+    if not rows:
+        return None
+    names = [row["name"] + ("" if row["has_mirtek_verdict"] == "yes" else " (частично)") for row in rows]
+    return ParameterFact("Подтверждено специалистом МИРТЕК: " + ", ".join(names), tone="ok")
+
+
 def product_parameters(db: Session, product: Product) -> list[ParameterRow]:
     characteristics = {
         (item.group_name, item.field_name): item for item in list_characteristics(db, product.id)
@@ -225,20 +307,25 @@ def product_parameters(db: Session, product: Product) -> list[ParameterRow]:
         )
         for field_name in parameter.fields:
             group_name = _GROUP_OF_FIELD[field_name]
-            row.fields.append(
-                ParameterField(
-                    group_name,
-                    field_name,
-                    characteristics.get((group_name, field_name)),
-                    label=FIELD_LABELS.get(field_name, field_name),
-                    variants=_housing_variants(characteristics.get((group_name, field_name))),
-                )
+            item = ParameterField(
+                group_name,
+                field_name,
+                characteristics.get((group_name, field_name)),
+                label=FIELD_LABELS.get(field_name, field_name),
+                variants=_housing_variants(characteristics.get((group_name, field_name))),
             )
+            _model_value(product, item)
+            row.fields.append(item)
+        if parameter.card_fields:
+            row.fields = _single_card_field(parameter, row.fields)
 
         registry = _REGISTRY_BY_PARAMETER.get(parameter.no)
         if registry and registry in registry_facts:
             row.facts.append(registry_facts[registry])
         if parameter.no == 36:
+            specialist = _specialist_fact(db, product)
+            if specialist:
+                row.facts.append(specialist)
             row.facts.append(_upper_software_fact(db, product))
         if parameter.rule == RULE_ASTRA:
             row.facts.append(_astra_fact(manufacturer))

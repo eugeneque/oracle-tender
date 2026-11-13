@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ExternalLink, X } from "lucide-react";
+import { ChevronDown, ExternalLink, X } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
 import type { Characteristic, DataSource, MeterParameter, Product, ProductIntegration, ProductSupport, SiType } from "../../api/types";
@@ -38,6 +38,23 @@ type View = "parameters" | "appendix";
 
 // Пока идёт опрос реестра, источники перечитываются: опрос фоновый и длится минуты.
 const RUNNING_REFRESH_MS = 5000;
+
+// Значение — кусок условного обозначения модели («RF2400/6», «MOD», «P2-B-D-F2»): это код
+// позиции обозначения, а не характеристика, в карточке он только путает (12.11.2026).
+function isDesignationPiece(value: string, product: Product): boolean {
+  const text = value.trim().toUpperCase();
+  if (!text || /\s/.test(text) || text.length > 16) return false;
+  const designations = [product.registry_modification, product.model_code, product.model_name]
+    .filter(Boolean)
+    .map((d) => `-${(d as string).toUpperCase().replace(/\s+/g, "")}-`);
+  return designations.some((d) => d.includes(`-${text}-`));
+}
+
+function otherSpecifications(product: Product): [string, string][] {
+  return Object.entries(product.extra_specifications ?? {}).filter(
+    ([, value]) => typeof value === "string" && !isDesignationPiece(value, product),
+  ) as [string, string][];
+}
 
 function readView(): View {
   try {
@@ -174,6 +191,7 @@ export function ProductDrawer({
   }, [characteristics]);
 
   const filled = parameters.filter((p) => p.filled).length;
+  const otherSpecs = otherSpecifications(product);
   const reloadAfterSourceAction = async () => {
     setCharacteristics(await api.get<Characteristic[]>(`/products/${productId}/characteristics`));
     setRegistryVersion((v) => v + 1);
@@ -435,19 +453,24 @@ export function ProductDrawer({
             <ProductRegistrySection productId={product.id} isAdmin={isAdmin} version={registryVersion} />
           </section>
 
-          {Object.keys(product.extra_specifications ?? {}).length > 0 && (
-            // Характеристики с сайта производителя, которым не нашлось поля в справочнике:
-            // это данные, а не мусор — человек может перенести значение в нужное поле.
-            // Перечни («Интерфейсы», «Дополнительные функции») и дубли полей справочника сюда
-            // больше не попадают — их раскладывает обход сайта (замечание 13.10.2026, п.8).
-            <section className="rounded-xl border border-white/[0.08] px-4 py-3">
-              <h3 className="mb-1 text-[11px] font-medium uppercase tracking-wide text-zinc-500">Вне справочника</h3>
-              <p className="mb-2 text-[11px] text-zinc-600">
-                Есть на сайте производителя, но в справочнике для этого нет поля. Если значение относится к параметру выше — перенесите его вручную.
+          {otherSpecs.length > 0 && (
+            // Характеристики с сайта производителя, которым нет места среди параметров для ПУ
+            // и в справочнике (постоянная счётчика, потребляемая мощность…). Замечание
+            // 12.11.2026: «непонятно, для чего поле „Вне справочника“» — в нём к тому же
+            // стояли куски условного обозначения («Основной интерфейс: RF2400/6»,
+            // «Протоколы: MOD»). Куски обозначения не показываются, блок свёрнут и назван
+            // по смыслу: это справка, к сверке с ТЗ она не относится.
+            <details className="group rounded-xl border border-white/[0.08] px-4 py-3">
+              <summary className="flex cursor-pointer list-none items-center justify-between text-[11px] font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-300">
+                <span>Прочие сведения с сайта производителя · {otherSpecs.length}</span>
+                <ChevronDown size={14} className="transition-transform group-open:rotate-180" />
+              </summary>
+              <p className="mb-2 mt-2 text-[11px] text-zinc-600">
+                Для справки: в параметры для ПУ эти сведения не входят и при сверке с ТЗ не используются. Если значение относится к параметру выше — перенесите его вручную.
               </p>
               <table className="w-full text-left text-sm">
                 <tbody>
-                  {Object.entries(product.extra_specifications).map(([key, value]) => (
+                  {otherSpecs.map(([key, value]) => (
                     <tr key={key} className="border-t border-white/[0.06]">
                       <td className="w-1/3 py-1.5 pr-4 text-zinc-400">{key}</td>
                       <td className="py-1.5 text-zinc-100">{value}</td>
@@ -455,7 +478,7 @@ export function ProductDrawer({
                   ))}
                 </tbody>
               </table>
-            </section>
+            </details>
           )}
         </div>
       </div>
