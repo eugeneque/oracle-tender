@@ -120,3 +120,47 @@ def test_run_stops_when_model_not_configured(db_session, monkeypatch):
     monkeypatch.setattr(markup, "run_structured", fake)
     stats = markup.run(db_session, mit_numbers=[meter_type.mit_number])
     assert stats["stopped"] == 1 and len(calls) == 1
+
+
+def test_recheck_splits_grouped_modification_by_analyst_codes(db_session, monkeypatch):
+    """Замечание 13.11.2026 (Тайпит): «НЕВА СТ221 …BCS-G3» привязан шаблоном к сведённой строке
+    «G4/G3» — «GSM и RS», хотя G3 — NB-IoT (по РЭ). Перепроверка с расшифровкой кодов аналитика
+    переносит написание в свою модификацию, ровную строку правит, ручную привязку не трогает."""
+
+    meter_type, (group, g3e) = _type(db_session, ["НЕВА СТ221 G4/G3", "НЕВА СТ221 G3E"])
+    meter_type.code_notes = "G3 — NB-IoT; G3E — NB-IoT и RS"
+    g3 = _variant(db_session, meter_type.id, "НЕВА СТ221 2AR2S 29 BCS-G3")
+    g4 = _variant(db_session, meter_type.id, "НЕВА СТ221 2AR2S 29 BCS-G4")
+    exact = _variant(db_session, meter_type.id, "НЕВА СТ221 2AR2S 29 BCS-G3E")
+    manual = _variant(db_session, meter_type.id, "НЕВА СТ221 G3 вручную")
+    for variant, mod, by in ((g3, group, "auto"), (g4, group, "auto"), (exact, g3e, "auto"), (manual, group, "manual")):
+        variant.modification_id, variant.mapped_by = mod.id, by
+    db_session.flush()
+    seen = {}
+
+    def fake(db, *, system_prompt, user_text, response_model, temperature):
+        seen["text"] = user_text
+        return response_model(
+            items=[
+                {"id": g3.id, "name": "НЕВА СТ221 G3", "phase": "1ф", "design": "din", "interface": "NB-IoT",
+                 "smart_890": "yes", "confidence": "high", "reason": "G3 — NB-IoT по расшифровке аналитика"},
+                {"id": g4.id, "modification_id": group.id, "interface": "RS", "confidence": "high"},
+                {"id": exact.id, "name": "НЕВА СТ221 G3E", "interface": "NB-IoT и RS", "confidence": "high",
+                 "reason": "G3E — NB-IoT и RS"},
+            ]
+        )
+
+    monkeypatch.setattr(markup, "run_structured", fake)
+    stats = markup.markup_type(db_session, meter_type, recheck=True)
+
+    assert "G3 — NB-IoT" in seen["text"] and "сейчас: НЕВА СТ221 G4/G3" in seen["text"]
+    assert "вручную" not in seen["text"]
+    assert stats["created"] == 1 and stats["mapped"] == 1 and stats["corrected"] == 1
+    for variant in (g3, g4, exact, manual):
+        db_session.refresh(variant)
+    new = db_session.get(MeterMarketModification, g3.modification_id)
+    assert (new.name, new.interface, g3.mapped_by) == ("НЕВА СТ221 G3", "NB-IoT", "ai")
+    assert g4.modification_id == group.id  # интерфейс противоречит строке — привязку не меняем
+    db_session.refresh(g3e)
+    assert exact.modification_id == g3e.id and g3e.interface == "NB-IoT и RS" and "RS» → «NB-IoT и RS" in g3e.comment
+    assert (manual.modification_id, manual.mapped_by) == (group.id, "manual")

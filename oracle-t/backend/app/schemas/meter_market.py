@@ -38,6 +38,7 @@ class TypeIn(BaseModel):
     cert_valid_to: date | None = None
     mpi_years: int | None = None
     notation: str | None = None
+    code_notes: str | None = None
 
 
 class TypeSmartIn(BaseModel):

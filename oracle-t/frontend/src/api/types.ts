@@ -2481,6 +2481,7 @@ export interface MarketType {
   mpi_years: number | null;
   in_report: boolean;
   review_status: "new" | "included" | "excluded";
+  code_notes: string | null;
   created_at: string;
   modifications: number;
   unmapped: number;

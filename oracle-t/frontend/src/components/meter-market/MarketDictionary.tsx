@@ -412,12 +412,68 @@ function TypesList({ canEdit, report, fail, reviewStatus }: EditProps & { review
                   )}
                 </div>
               </div>
+              {openId === type.id && <CodeNotes type={type} canEdit={canEdit} report={report} fail={fail} onSaved={load} />}
               {openId === type.id && <Modifications typeId={type.id} canEdit={canEdit} report={report} fail={fail} />}
             </div>
           ))}
         </div>
       )}
     </Panel>
+  );
+}
+
+/** «Расшифровка кодов» (13.11.2026, раздел 108 ARCHITECTURE.md): то, чего нет в «Описании типа», но
+ * есть в руководстве по эксплуатации («G3 — NB-IoT»). ИИ ставит её выше описания и расшифровывает по ней
+ * каждое написание — и новые исполнения из «Аршина», которых нет в таблице. */
+function CodeNotes({ type, canEdit, report, fail, onSaved }: EditProps & { type: MarketType; onSaved: () => void }) {
+  const [value, setValue] = useState(type.code_notes ?? "");
+  const [busy, setBusy] = useState(false);
+  const dirty = value.trim() !== (type.code_notes ?? "").trim();
+  const save = async () => {
+    try {
+      await api.patch(`/meter-market/types/${type.id}`, { code_notes: value });
+      report(`Расшифровка кодов ${type.mit_number} сохранена`);
+      onSaved();
+    } catch (err) {
+      fail(err, "Не удалось сохранить расшифровку кодов");
+    }
+  };
+  const decode = async () => {
+    setBusy(true);
+    try {
+      if (dirty) await api.patch(`/meter-market/types/${type.id}`, { code_notes: value });
+      await api.post(`/meter-market/types/${type.id}/markup`, {});
+      report(`ИИ расшифровывает написания ${type.mit_number} заново — результат появится через несколько минут`);
+    } catch (err) {
+      fail(err, "Не удалось запустить расшифровку");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mt-2 rounded-xl border border-white/[0.06] px-3 py-2">
+      <label className="text-xs text-zinc-500" htmlFor={`code-notes-${type.id}`}>
+        Расшифровка кодов обозначения (по руководству по эксплуатации) — для ИИ главнее описания типа
+      </label>
+      <textarea
+        id={`code-notes-${type.id}`}
+        className={`${INPUT} mt-1 min-h-[3.5rem] w-full`}
+        placeholder="G3 — NB-IoT; G4E — GSM и RS; AS — только активная энергия"
+        value={value}
+        disabled={!canEdit}
+        onChange={(e) => setValue(e.target.value)}
+      />
+      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+        <button type="button" className={BUTTON} disabled={!canEdit || !dirty} title={canEdit ? undefined : NO_RIGHT} onClick={() => void save()}>
+          Сохранить
+        </button>
+        <button type="button" className={PRIMARY} disabled={!canEdit || busy} title={canEdit ? "ИИ заново расшифрует все написания типа, кроме размеченных вручную" : NO_RIGHT}
+          onClick={() => void decode()}>
+          Расшифровать заново
+        </button>
+        <span className="text-xs text-zinc-600">Ручная разметка не меняется</span>
+      </div>
+    </div>
   );
 }
 

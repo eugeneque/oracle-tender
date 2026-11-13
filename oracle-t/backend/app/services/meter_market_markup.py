@@ -22,8 +22,22 @@
 уверенностью не применяется — написание остаётся в «Разметить»: ложная привязка хуже честного
 «не размечено».
 
-Запуск: `python -m app.services.meter_market_markup run [--types 61544-15,87229-22] [--min-count N]`;
-после ночной загрузки поверок — само, для новых написаний (`core/scheduler.py`).
+Расшифровка кодов аналитика и перепроверка (13.11.2026, раздел 108). Аналитик (Тайпит): «надо, чтобы
+Сова расшифровывала модификацию из Аршина по описанию типа и РЭ, а не сопоставляла с таблицей» —
+в таблице несколько исполнений сведены в одну строку («НЕВА СТ221 G4/G3» — «GSM и RS»), хотя G3 —
+модем NB-IoT. Описание типа этого не говорит («G — GSM/GPRS модем»), а руководство по эксплуатации —
+да; такие знания аналитик пишет у типа в «Расшифровке кодов» (`meter_market_types.code_notes`), и
+модель ставит их выше описания. Режим `recheck` отдаёт модели и уже привязанные написания (шаблоном,
+импортом, ИИ — не вручную): если расшифровка написания расходится с атрибутами строки, к которой оно
+привязано, написание уходит в отдельную модификацию по своему коду («НЕВА СТ221 G3»). Атрибуты
+заведённой модификации ИИ правит, только когда написание — ровно она (то же имя-ключ) и либо у типа
+есть расшифровка аналитика, либо интерфейса/исполнения в строке нет («н/д»); старое значение
+остаётся в комментарии. Указанную по id модификацию с противоречащим интерфейсом модель не получает —
+написание остаётся как было.
+
+Запуск: `python -m app.services.meter_market_markup run [--types 61544-15,87229-22] [--min-count N] [--recheck]`;
+после ночной загрузки поверок — само, для новых написаний (`core/scheduler.py`); перепроверка типа —
+кнопка «Расшифровать заново» в справочнике.
 """
 
 from __future__ import annotations
@@ -60,11 +74,19 @@ SYSTEM_PROMPT = """\
 Поверители во ФГИС «Аршин» пишут модификацию счётчика как придётся. Тебе дан тип средства
 измерений (номер ГРСИ), фрагмент его «Описания типа» — главное в нём расшифровка структуры
 условного обозначения, — уже заведённые модификации типа и список написаний из поверок.
+Если дана «Расшифровка кодов от аналитика» (по руководству по эксплуатации), она ГЛАВНЕЕ
+описания типа и твоих знаний: «G3 — NB-IoT» значит NB-IoT, даже если в описании «G — GSM».
+Расшифровывай каждое написание по его собственным кодам, а не по похожей строке справочника.
 
 По каждому написанию (id) ответь:
 1. Если написание — это одна из уже заведённых модификаций (тот же корпус/модель, тот же вид
    энергии и интерфейс; их имена — шаблоны поиска, слова в любом порядке), укажи её
-   modification_id и не заполняй name.
+   modification_id и не заполняй name. Если модификация сводит несколько кодов («G4/G3»,
+   «G3E/G4E»), а у кода написания другой интерфейс или вид энергии, чем у неё, — не указывай её,
+   а дай name по коду написания («НЕВА СТ221 G3»). Если написание — ровно заведённая
+   модификация, но её интерфейс не совпадает с расшифровкой или «н/д», дай name, равное её имени,
+   и правильные атрибуты. «сейчас: …» у написания — текущая привязка, она может быть ошибочной.
+   interface заполняй всегда — по расшифровке написания.
 2. Иначе дай name — каноническое имя модификации: обозначение типа и значимые коды структуры
    обозначения, определяющие корпус/исполнение, вид измеряемой энергии, интерфейс и опции, —
    БЕЗ тока, напряжения и класса точности («НЕВА МТ 114 AS E4PC 5(60)A» → «НЕВА МТ 114 AS E4PC»).
@@ -142,6 +164,7 @@ def _user_text(
 ) -> str:
     lines = [
         f"Тип СИ: {meter_type.mit_number}",
+        f"Расшифровка кодов от аналитика (главнее описания типа): {meter_type.code_notes or '—'}",
         f"Обозначение: {meter_type.notation or '—'}",
         f"Наименование: {meter_type.title or '—'}",
         f"МПИ типа, лет: {meter_type.mpi_years if meter_type.mpi_years is not None else '—'}",
@@ -156,7 +179,12 @@ def _user_text(
     if not modifications:
         lines.append("— нет")
     lines += ["", "Написания из поверок (id; написание; поверок):"]
-    lines += [f"- id={s['id']}; {s['raw']}; {s['count']}" for s in spellings]
+    current = {m.id: m.name for m in modifications}
+    lines += [
+        f"- id={s['id']}; {s['raw']}; {s['count']}"
+        + (f"; сейчас: {current[s['current']]}" if s.get("current") in current else "")
+        for s in spellings
+    ]
     lines += ["", "Фрагмент «Описания типа» (ФГИС «Аршин»):", description or "не загружено — суди по обозначению и знаниям о линейке."]
     return "\n".join(lines)
 
@@ -175,12 +203,47 @@ def _interface(value: str) -> str:
     return normalize_interface(value) or "н/д"
 
 
-def apply_answer(
-    db: Session, meter_type: MeterMarketType, spellings: list[dict[str, Any]], answer: MarkupAnswer
-) -> dict[str, int]:
-    """Привязывает написания по ответу модели; новые модификации заводит в справочник."""
+def _known(value: str | None) -> bool:
+    return bool(value) and value not in ("н/д", "nd")
 
-    stats = {"mapped": 0, "created": 0, "skipped": 0}
+
+def _correct_existing(
+    meter_type: MeterMarketType, mod: MeterMarketModification, item: SpellingMarkup, now: datetime
+) -> bool:
+    """Написание — ровно эта модификация, а расшифровка даёт другой интерфейс/исполнение. Правит
+    строку, только если у типа есть расшифровка кодов аналитика или в строке «н/д»: иначе слово
+    модели против слова аналитика — оставляем аналитика."""
+
+    if item.confidence.strip().lower() != "high":
+        return False
+    changes = []
+    interface = _interface(item.interface)
+    if _known(interface) and interface != mod.interface and (meter_type.code_notes or not _known(mod.interface)):
+        changes.append(f"интерфейс «{mod.interface or 'н/д'}» → «{interface}»")
+        mod.interface = interface
+    design = _design(item.design)
+    if design != "nd" and mod.design == "nd":
+        changes.append(f"исполнение «н/д» → «{DESIGN_LABELS.get(design, design)}»")
+        mod.design = design
+    if not changes:
+        return False
+    note = f"ИИ по расшифровке кодов ({now:%d.%m.%Y}): {', '.join(changes)}; {(item.reason or '').strip()}"
+    mod.comment = (f"{mod.comment}\n{note}" if mod.comment else note)[:1000]
+    return True
+
+
+def apply_answer(
+    db: Session,
+    meter_type: MeterMarketType,
+    spellings: list[dict[str, Any]],
+    answer: MarkupAnswer,
+    *,
+    recheck: bool = False,
+) -> dict[str, int]:
+    """Привязывает написания по ответу модели; новые модификации заводит в справочник. `recheck` —
+    уже привязанные (не вручную) написания переносятся, если расшифровка дала другую модификацию."""
+
+    stats = {"mapped": 0, "created": 0, "skipped": 0, "corrected": 0}
     by_id = {s["id"]: s for s in spellings}
     mods = db.scalars(select(MeterMarketModification).where(MeterMarketModification.type_id == meter_type.id)).all()
     by_key = {modification_key(m.name): m for m in mods}
@@ -196,9 +259,17 @@ def apply_answer(
         target: MeterMarketModification | None = None
         if item.modification_id is not None and item.modification_id in own_ids:
             target = db.get(MeterMarketModification, item.modification_id)
+            decoded = _interface(item.interface)
+            if target is not None and _known(decoded) and _known(target.interface) and decoded != target.interface:
+                # Модель указала строку, чей интерфейс противоречит её же расшифровке, — скорее
+                # всего, сведённую «G4/G3»: такой привязке не верим.
+                stats["skipped"] += 1
+                continue
         elif item.name.strip():
             name = re.sub(r"\s+", " ", item.name).strip()[:500]
             target = by_key.get(modification_key(name))
+            if target is not None and _correct_existing(meter_type, target, item, now):
+                stats["corrected"] += 1
             if target is None:
                 verdict = item.smart_890.strip().lower()
                 confidence = {"high": "высокая", "medium": "средняя"}.get(item.confidence.strip().lower(), "средняя")
@@ -226,11 +297,15 @@ def apply_answer(
         if target is None:
             stats["skipped"] += 1
             continue
-        # Все неразмеченные написания типа с тем же ключом — туда же (опечатки одного исполнения).
+        if target.id == spelling.get("current"):
+            continue  # перепроверка подтвердила привязку
+        # Все неразмеченные написания типа с тем же ключом — туда же (опечатки одного исполнения);
+        # при перепроверке — и привязанные не вручную.
+        scope = "mapped_by IS DISTINCT FROM 'manual'" if recheck else "modification_id IS NULL"
         result = db.execute(
             sql_text(
                 "UPDATE meter_market_variants SET modification_id = :m, mapped_by = :by "
-                "WHERE type_id = :t AND modification_id IS NULL AND (id = :v OR norm_key = :k)"
+                f"WHERE type_id = :t AND {scope} AND (id = :v OR norm_key = :k)"
             ),
             {"m": target.id, "by": MappedBy.AI.value, "t": meter_type.id, "v": spelling["id"], "k": spelling["norm_key"]},
         )
@@ -239,18 +314,23 @@ def apply_answer(
     return stats
 
 
-def _pending(db: Session, type_id: int, min_count: int, since: datetime | None = None) -> list[dict[str, Any]]:
+def _pending(
+    db: Session, type_id: int, min_count: int, since: datetime | None = None, *, recheck: bool = False
+) -> list[dict[str, Any]]:
     """Неразмеченные написания типа — по одному на ключ, самые массовые первыми. `since` — только
     появившиеся после этой отметки: ночное задание не переспрашивает модель о написаниях, по
-    которым она уже не уверена (они ждут человека в «Разметить»)."""
+    которым она уже не уверена (они ждут человека в «Разметить»). `recheck` — и привязанные не
+    вручную (`current` — их текущая модификация)."""
 
+    scope = "{v}.mapped_by IS DISTINCT FROM 'manual'" if recheck else "{v}.modification_id IS NULL"
     rows = db.execute(
         sql_text(
-            "SELECT DISTINCT ON (v.norm_key) v.id, v.raw, v.norm_key, x.c AS count FROM meter_market_variants v "
+            "SELECT DISTINCT ON (v.norm_key) v.id, v.raw, v.norm_key, v.modification_id AS current, x.c AS count "
+            "FROM meter_market_variants v "
             "JOIN (SELECT v2.norm_key, coalesce(sum(mv.count), 0) AS c FROM meter_market_variants v2 "
             "      LEFT JOIN meter_verification_monthly mv ON mv.variant_id = v2.id "
-            "      WHERE v2.type_id = :t AND v2.modification_id IS NULL GROUP BY 1) x ON x.norm_key = v.norm_key "
-            "WHERE v.type_id = :t AND v.modification_id IS NULL AND x.c >= :n "
+            f"      WHERE v2.type_id = :t AND {scope.format(v='v2')} GROUP BY 1) x ON x.norm_key = v.norm_key "
+            f"WHERE v.type_id = :t AND {scope.format(v='v')} AND x.c >= :n "
             + ("AND v.created_at >= :s " if since else "")
             + "ORDER BY v.norm_key, v.id"
         ),
@@ -260,12 +340,17 @@ def _pending(db: Session, type_id: int, min_count: int, since: datetime | None =
 
 
 def markup_type(
-    db: Session, meter_type: MeterMarketType, *, min_count: int = 1, since: datetime | None = None
+    db: Session,
+    meter_type: MeterMarketType,
+    *,
+    min_count: int = 1,
+    since: datetime | None = None,
+    recheck: bool = False,
 ) -> dict[str, int]:
-    stats = {"mapped": 0, "created": 0, "skipped": 0, "failed": 0}
+    stats = {"mapped": 0, "created": 0, "skipped": 0, "corrected": 0, "failed": 0}
     stats["mapped"] += remap_auto(db, meter_type.id)
     db.commit()
-    spellings = _pending(db, meter_type.id, min_count, since)
+    spellings = _pending(db, meter_type.id, min_count, since, recheck=recheck)
     if not spellings:
         return stats
     description = designation_excerpt(db, meter_type.mit_number)
@@ -284,7 +369,7 @@ def markup_type(
                 response_model=MarkupAnswer,
                 temperature=0.0,
             )
-            for key, value in apply_answer(db, meter_type, chunk, answer).items():
+            for key, value in apply_answer(db, meter_type, chunk, answer, recheck=recheck).items():
                 stats[key] += value
             db.commit()
         except (AiNotConfiguredError, AiQuotaExceededError):
@@ -300,10 +385,15 @@ def markup_type(
 
 
 def run(
-    db: Session, *, mit_numbers: list[str] | None = None, min_count: int = 1, since: datetime | None = None
+    db: Session,
+    *,
+    mit_numbers: list[str] | None = None,
+    min_count: int = 1,
+    since: datetime | None = None,
+    recheck: bool = False,
 ) -> dict[str, int]:
     """Размечает неразмеченные написания типов отчёта (или только `mit_numbers`; `since` — только
-    новые написания, так зовёт ночное задание)."""
+    новые написания, так зовёт ночное задание; `recheck` — расшифровать заново и привязанные)."""
 
     query = select(MeterMarketType).where(MeterMarketType.in_report.is_(True))
     if mit_numbers:
@@ -311,19 +401,20 @@ def run(
     pending_types = set(
         db.execute(
             sql_text(
-                "SELECT DISTINCT type_id FROM meter_market_variants WHERE modification_id IS NULL"
+                "SELECT DISTINCT type_id FROM meter_market_variants WHERE "
+                + ("mapped_by IS DISTINCT FROM 'manual'" if recheck else "modification_id IS NULL")
                 + (" AND created_at >= :s" if since else "")
             ),
             {"s": since},
         ).scalars()
     )
-    total = {"types": 0, "mapped": 0, "created": 0, "skipped": 0, "failed": 0}
+    total = {"types": 0, "mapped": 0, "created": 0, "skipped": 0, "corrected": 0, "failed": 0}
     for meter_type in db.scalars(query.order_by(MeterMarketType.mit_number)).all():
         if meter_type.id not in pending_types:
             continue
         total["types"] += 1
         try:
-            done = markup_type(db, meter_type, min_count=min_count, since=since)
+            done = markup_type(db, meter_type, min_count=min_count, since=since, recheck=recheck)
         except (AiNotConfiguredError, AiQuotaExceededError) as exc:
             logger.warning(f"Разметка ИИ остановлена: {exc}")
             total["failed"] += 1
@@ -337,7 +428,7 @@ def run(
 if __name__ == "__main__":
     from app.db.session import SessionLocal
 
-    usage = "python -m app.services.meter_market_markup run [--types 61544-15,87229-22] [--min-count N]"
+    usage = "python -m app.services.meter_market_markup run [--types 61544-15,87229-22] [--min-count N] [--recheck]"
     if len(sys.argv) < 2 or sys.argv[1] != "run":
         raise SystemExit(usage)
 
@@ -351,4 +442,11 @@ if __name__ == "__main__":
 
     selected = [x.strip() for x in (_arg("--types") or "").split(",") if x.strip()] or None
     with SessionLocal() as session:
-        print(run(session, mit_numbers=selected, min_count=int(_arg("--min-count") or 1)))
+        print(
+            run(
+                session,
+                mit_numbers=selected,
+                min_count=int(_arg("--min-count") or 1),
+                recheck="--recheck" in sys.argv,
+            )
+        )

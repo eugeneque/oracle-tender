@@ -246,7 +246,7 @@ def types(db: Session, *, review_status: str | None = None, search: str | None =
     rows = db.execute(
         text(
             "SELECT t.id, t.mit_number, t.title, t.notation, t.manufacturer_id, mf.name AS manufacturer, "
-            "t.cert_valid_to, t.mpi_years, t.in_report, t.review_status, t.created_at, "
+            "t.cert_valid_to, t.mpi_years, t.in_report, t.review_status, t.code_notes, t.created_at, "
             "(SELECT count(*) FROM meter_market_modifications m WHERE m.type_id = t.id) AS modifications, "
             "(SELECT count(*) FROM meter_market_variants v WHERE v.type_id = t.id AND v.modification_id IS NULL) AS unmapped, "
             "(SELECT coalesce(sum(mv.count), 0) FROM meter_market_variants v JOIN meter_verification_monthly mv "
@@ -271,6 +271,8 @@ def update_type(db: Session, type_id: int, values: dict[str, Any]) -> MeterMarke
     for key in ("manufacturer_id", "cert_valid_to", "mpi_years", "notation"):
         if key in values:
             setattr(si_type, key, values[key])
+    if "code_notes" in values:
+        si_type.code_notes = (values["code_notes"] or "").strip() or None
     db.flush()
     return si_type
 

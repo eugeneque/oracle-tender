@@ -169,6 +169,9 @@ class MeterMarketType(Base):
     review_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=TypeReviewStatus.NEW.value
     )
+    # Расшифровка кодов обозначения от аналитика — то, чего нет в «Описании типа», но есть в
+    # руководстве по эксплуатации («G3 — NB-IoT»). ИИ-разметка ставит её выше описания (раздел 108).
+    code_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

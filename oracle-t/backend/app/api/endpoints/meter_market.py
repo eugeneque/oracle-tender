@@ -376,6 +376,46 @@ def post_type_smart(
     return {"changed": changed}
 
 
+_markup_running: set[int] = set()
+
+
+@router.post("/types/{type_id}/markup")
+def post_type_markup(type_id: int, db: Session = Depends(get_db), user: User = Depends(require_analytics)) -> dict[str, Any]:
+    """«Расшифровать заново» (раздел 108): ИИ заново расшифровывает все написания типа, кроме
+    размеченных вручную, с учётом «Расшифровки кодов» аналитика. Десятки обращений к модели —
+    в фоновом потоке; результат виден в справочнике и отчёте через несколько минут."""
+
+    import threading
+
+    from loguru import logger
+
+    from app.db.session import SessionLocal
+    from app.services import meter_market_markup
+
+    si_type = db.get(MeterMarketType, type_id)
+    if si_type is None:
+        raise HTTPException(status_code=404, detail="Тип не найден")
+    if type_id in _markup_running:
+        raise HTTPException(status_code=409, detail="Расшифровка этого типа уже идёт — дождитесь окончания")
+    log_action(db, component="meter_market", action=f"type_markup:{si_type.mit_number}", result="success", user_id=user.id)
+    db.commit()
+
+    def work() -> None:
+        try:
+            with SessionLocal() as session:
+                meter_type = session.get(MeterMarketType, type_id)
+                stats = meter_market_markup.markup_type(session, meter_type, recheck=True)
+            logger.info(f"Рынок ПУ, расшифровка {si_type.mit_number}: {stats}")
+        except Exception as exc:  # noqa: BLE001 - фоновый поток: ошибка только в журнал
+            logger.warning(f"Рынок ПУ, расшифровка {si_type.mit_number} не выполнена: {exc}")
+        finally:
+            _markup_running.discard(type_id)
+
+    _markup_running.add(type_id)
+    threading.Thread(target=work, name=f"meter-markup-{type_id}", daemon=True).start()
+    return {"started": True}
+
+
 @router.get("/types/{type_id}/modifications")
 def get_modifications(type_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> list[dict[str, Any]]:
     return dictionary.modifications(db, type_id)
