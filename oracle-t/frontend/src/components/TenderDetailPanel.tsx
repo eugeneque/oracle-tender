@@ -1013,7 +1013,7 @@ export function TenderDetailPanel({
             {/* «Загрузить в Битрикс» иконкой (20.10.2026): раньше выгрузка была только на
                 отдельной странице, и её не находили. Там кнопка в шапке страницы, здесь не
                 дублируется. */}
-            {expandable && <BitrixUploadButton tenderId={tender.id} stage={tender.stage} compact />}
+            {expandable && <BitrixUploadButton tenderId={tender.id} stage={tender.stage} compact onTenderChanged={applyTender} />}
             {/* Черта отделяет действия над закупкой от управления самой панелью. */}
             <span className="mx-1 h-4 w-px bg-white/[0.08]" />
             {/* Полная карточка открывается в новой вкладке (24.10.2026): список с фильтрами

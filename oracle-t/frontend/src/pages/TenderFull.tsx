@@ -62,7 +62,7 @@ export function TenderFullPage() {
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {tender && <TenderMonitoringButton tenderId={tender.id} />}
-            {tender && <BitrixUploadButton tenderId={tender.id} stage={tender.stage} />}
+            {tender && <BitrixUploadButton tenderId={tender.id} stage={tender.stage} onTenderChanged={setTender} />}
             <Link
               to="/tenders"
               className="flex shrink-0 items-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/5"

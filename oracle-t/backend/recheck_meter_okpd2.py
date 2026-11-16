@@ -21,7 +21,10 @@ def main() -> None:
         tenders = db.scalars(
             select(Tender).where(
                 Tender.ai_relevant.is_(False),
-                Tender.okpd2_code.like(f"{service.METER_OKPD2_PREFIX}%"),
+                # Код в названии («ОКПД2 26.51.63.130 Поставка…», 16.11.2026) — правило
+                # теперь читает и его, а поле `okpd2_code` у таких закупок часто пустое.
+                Tender.okpd2_code.like(f"{service.METER_OKPD2_PREFIX}%")
+                | Tender.title.like(f"%{service.METER_OKPD2_PREFIX}%"),
             )
         ).all()
         fixed = 0

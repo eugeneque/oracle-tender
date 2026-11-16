@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 
 import { ApiError, api } from "../../api/client";
-import type { BitrixTenderState, TenderStage } from "../../api/types";
+import type { BitrixTenderState, Tender, TenderStage } from "../../api/types";
 
 /**
  * «Загрузить в Битрикс» на странице тендера (20.10.2026): закупка с анализом уходит в сделку
@@ -28,15 +28,22 @@ import type { BitrixTenderState, TenderStage } from "../../api/types";
  * Недоступная выгрузка (20.10.2026): кнопка выглядит заблокированной, но нажимается — и
  * объясняет в попапе, почему закупку нельзя отправить (этап, Битрикс не подключён, выгрузка
  * выключена). Раньше причина пряталась в подсказке у неактивной кнопки, и её не находили.
+ *
+ * «Взять на проверку и отправить» (16.11.2026): попап «Сначала проверьте закупку» читали как
+ * поломку — «а в Битрикс передача как?». Для новой закупки в попапе теперь кнопка, которая
+ * сама переводит её на «На проверке» и сразу отправляет. `onTenderChanged` — чтобы карточка
+ * показала новый этап.
  */
 export function BitrixUploadButton({
   tenderId,
   stage,
   compact = false,
+  onTenderChanged,
 }: {
   tenderId: string;
   stage: TenderStage;
   compact?: boolean;
+  onTenderChanged?: (tender: Tender) => void;
 }) {
   const [state, setState] = useState<BitrixTenderState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -63,15 +70,7 @@ export function BitrixUploadButton({
 
   if (!state) return null;
 
-  const upload = async () => {
-    if (!state.can_upload) {
-      setPopup("blocked");
-      return;
-    }
-    const question = state.deal_id
-      ? `Обновить сделку ${state.deal_id} в Bitrix24 данными и анализом этой закупки?`
-      : "Создать в Bitrix24 сделку по этой закупке и выгрузить в неё анализ?";
-    if (!window.confirm(question)) return;
+  const send = async () => {
     setIsBusy(true);
     setError(null);
     try {
@@ -88,6 +87,50 @@ export function BitrixUploadButton({
           ? err.message
           : "Не удалось выгрузить в Bitrix24",
       );
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const upload = async () => {
+    if (!state.can_upload) {
+      setPopup("blocked");
+      return;
+    }
+    const question = state.deal_id
+      ? `Обновить сделку ${state.deal_id} в Bitrix24 данными и анализом этой закупки?`
+      : "Создать в Bitrix24 сделку по этой закупке и выгрузить в неё анализ?";
+    if (!window.confirm(question)) return;
+    await send();
+  };
+
+  // Мешает только этап: новую закупку можно взять на проверку прямо из попапа. Отклонённую —
+  // нет: «Отклонён» ставит человек, и молча отменять его решение кнопкой выгрузки нельзя.
+  const onlyStageBlocks = stage === "ai_selected" && (state.reason ?? "").includes("«На проверке»");
+
+  const takeAndSend = async () => {
+    setIsBusy(true);
+    setError(null);
+    try {
+      const updated = await api.patch<Tender>(`/tenders/${tenderId}/stage`, {
+        stage: "under_review",
+      });
+      onTenderChanged?.(updated);
+      const next = await api.get<BitrixTenderState>(
+        `/integrations/bitrix24/tenders/${tenderId}`,
+      );
+      setState(next);
+      setPopup(null);
+      if (next.can_upload) {
+        await send();
+      } else {
+        setPopup("blocked");
+      }
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : "Не удалось сменить этап",
+      );
+      setPopup(null);
     } finally {
       setIsBusy(false);
     }
@@ -118,10 +161,19 @@ export function BitrixUploadButton({
         <BlockedReasonPopup
           title="Нельзя отправить в Битрикс"
           reason={state.reason ?? "Отправка в Bitrix24 сейчас недоступна."}
-          advice={blockedAdvice(state.reason ?? "")}
+          advice={
+            onlyStageBlocks
+              ? "Можно сделать это отсюда: закупка перейдёт на «На проверке» и сразу уйдёт в Bitrix24."
+              : blockedAdvice(state.reason ?? "")
+          }
           dealId={state.deal_id}
           dealUrl={state.deal_url}
           onClose={() => setPopup(null)}
+          action={
+            onlyStageBlocks
+              ? { label: "Взять на проверку и отправить", busy: isBusy, onClick: () => void takeAndSend() }
+              : undefined
+          }
         />
       ) : (
         <BlockedReasonPopup
@@ -289,6 +341,7 @@ function BlockedReasonPopup({
   dealId,
   dealUrl,
   onClose,
+  action,
 }: {
   title: string;
   reason: string;
@@ -296,6 +349,7 @@ function BlockedReasonPopup({
   dealId: number | null;
   dealUrl: string | null;
   onClose: () => void;
+  action?: { label: string; busy: boolean; onClick: () => void };
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -345,12 +399,23 @@ function BlockedReasonPopup({
             <ExternalLink size={13} />
           </a>
         )}
+        {action && (
+          <button
+            autoFocus
+            onClick={action.onClick}
+            disabled={action.busy}
+            className="mt-5 flex w-full items-center justify-center gap-1.5 rounded-lg bg-indigo-500 py-2 text-sm font-medium text-snow transition-colors hover:bg-indigo-400 disabled:opacity-50"
+          >
+            {action.busy ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+            {action.label}
+          </button>
+        )}
         <button
-          autoFocus
+          autoFocus={!action}
           onClick={onClose}
-          className="mt-5 w-full rounded-lg bg-white/[0.08] py-2 text-sm font-medium text-zinc-200 transition-colors hover:bg-white/[0.12]"
+          className={`${action ? "mt-2" : "mt-5"} w-full rounded-lg bg-white/[0.08] py-2 text-sm font-medium text-zinc-200 transition-colors hover:bg-white/[0.12]`}
         >
-          Понятно
+          {action ? "Отмена" : "Понятно"}
         </button>
       </div>
     </div>

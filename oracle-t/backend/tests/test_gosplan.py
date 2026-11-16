@@ -188,6 +188,69 @@ def test_all_feed_shows_one_card_with_every_source(monkeypatch):
         db.close()
 
 
+def test_all_feed_keeps_procurement_when_only_one_twin_fails_filter(monkeypatch):
+    """Пропажа 16.11.2026 (32616535832, 32616555108): в «Всех» представитель выбирался
+    без оглядки на фильтр — модель отклонила самую раннюю запись, и вся закупка исчезала,
+    хотя запись площадки фильтру отвечала. Теперь представитель — проходящая запись; а
+    «Неактуально» человека по-прежнему прячет закупку целиком."""
+
+    import app.services.tender_service as tender_service_module
+    from app.db.session import SessionLocal
+    from app.models.tender import Tender
+
+    registry_number = _unique_registry_number()
+    db = SessionLocal()
+    try:
+        sources = [
+            Source(
+                key=f"stub_{kind}_{uuid.uuid4().hex[:8]}",
+                name=f"Тестовый {kind}",
+                url="https://example.test",
+                type=kind,
+                adapter_key="stub",
+                adapter_status="implemented",
+            )
+            for kind in ("eis", "gosplan")
+        ]
+        db.add_all(sources)
+        db.commit()
+        earliest, platform = sources
+
+        monkeypatch.setattr(
+            tender_service_module,
+            "get_adapter",
+            lambda key, **kwargs: _StubRegistryAdapter(registry_number, title="Поставка ПУ"),
+        )
+        poll_source(db, earliest)
+        poll_source(db, platform)
+        first = db.scalar(select(Tender).where(Tender.source_id == earliest.id))
+        first.ai_relevant = False
+        db.commit()
+
+        def shown(**extra):
+            return [
+                row.source_id
+                for row in db.scalars(
+                    select(Tender).where(
+                        Tender.registry_number == registry_number,
+                        *tender_service_module._build_conditions(
+                            tender_service_module.TenderFilters(feed="all", **extra)
+                        ),
+                    )
+                )
+            ]
+
+        assert shown() == [earliest.id]
+        assert shown(hide_ai_rejected=True) == [platform.id]
+
+        first.relevance_status = "rejected"
+        first.relevance_marked_at = func.now()
+        db.commit()
+        assert shown(hide_ai_rejected=True) == []
+    finally:
+        db.close()
+
+
 def test_all_feed_merges_republished_procedure_without_eis_number():
     """Замечание 09.11.2026: ценовой запрос «Транснефть – Дружба» лежал на ЭТП ГПБ и на
     Сбербанк-АСТ без номера ЕИС — в «Всех» две карточки. Совпадают наименование, заказчик

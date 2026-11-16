@@ -720,8 +720,11 @@ def ai_score_subquery():
     )
 
 
-def feed_condition_for(feed: str | None):
-    """Условие «закупка из этого канала сбора» — для списка, доски, выгрузки и счётчиков."""
+def feed_condition_for(feed: str | None, prefer=None):
+    """Условие «закупка из этого канала сбора» — для списка, доски, выгрузки и счётчиков.
+
+    `prefer` — остальные условия фильтра: в канале «Все» представителем закупки становится
+    запись, которая им отвечает (см. `_all_feeds_representatives`)."""
 
     if feed in SEPARATE_FEED_SOURCE_TYPES:
         types = select(Source.id).where(Source.type == feed)
@@ -730,11 +733,11 @@ def feed_condition_for(feed: str | None):
         types = select(Source.id).where(Source.type.notin_(SEPARATE_FEED_SOURCE_TYPES))
         return Tender.source_id.in_(types)
     if feed == FEED_ALL:
-        return Tender.id.in_(_all_feeds_representatives())
+        return Tender.id.in_(_all_feeds_representatives(prefer))
     return None
 
 
-def _all_feeds_representatives():
+def _all_feeds_representatives(prefer=None):
     """Канал «Все» (08.11.2026): по одной записи на закупку из всех каналов.
 
     Внутри канала дубли не создаются (`_upsert_tender`), но между каналами — намеренно:
@@ -749,14 +752,23 @@ def _all_feeds_representatives():
     порядку. Записи самой этой площадки не схлопываются между собой: на одной площадке
     одинаковые наименование, заказчик и день — это разные процедуры (лоты отдельными
     закупками), а не перепубликация.
-    Где ещё нашлась закупка, карточке подсказывает `feed_sources_by_tender`."""
+    Где ещё нашлась закупка, карточке подсказывает `feed_sources_by_tender`.
+
+    Представитель выбирается среди записей, отвечающих фильтру (`prefer`, 16.11.2026).
+    Раньше им становилась самая ранняя запись, а фильтр накладывался уже на неё: если именно
+    она не проходила (модель отклонила строку ЕИС, у строки Госплана нет заказчика для поиска,
+    срок у площадки другой), из списка пропадала вся закупка, хотя соседняя запись фильтру
+    отвечала. Так «пропали» 32616555108 и 32616535832 (Холодов видел их в пятницу, в
+    понедельник их не было). Решение человека по-прежнему главнее: отмеченная запись —
+    представитель, даже если не проходит, иначе «Неактуально» обходилось бы двойником."""
 
     feed_rank = case(
         (Source.type == SourceType.GOSPLAN.value, 1),
         (Source.type == SourceType.TENDERPLAN.value, 2),
         else_=0,
     )
-    order = (Tender.relevance_marked_at.is_(None), feed_rank, Tender.created_at, Tender.id)
+    passes = () if prefer is None else (case((prefer, 0), else_=1),)
+    order = (Tender.relevance_marked_at.is_(None), *passes, feed_rank, Tender.created_at, Tender.id)
     by_number = (
         select(
             Tender.id.label("id"),
@@ -954,9 +966,6 @@ def _build_conditions(filters: TenderFilters) -> list:
         )
         for word in search_words(filters.search):
             conditions.append(haystack.ilike(f"%{word}%"))
-    feed_condition = feed_condition_for(filters.feed)
-    if feed_condition is not None:
-        conditions.append(feed_condition)
     if filters.source_keys and filters.feed == FEED_ALL:
         conditions.append(_found_in_sources_condition(filters.source_keys))
     elif filters.source_keys:
@@ -1093,6 +1102,11 @@ def _build_conditions(filters: TenderFilters) -> list:
         if filters.ai_score_max is not None:
             conditions.append(ai_score <= filters.ai_score_max)
 
+    # Канал — последним: в «Всех» представитель закупки выбирается среди записей, которые
+    # отвечают остальным условиям (`_all_feeds_representatives`).
+    feed_condition = feed_condition_for(filters.feed, and_(*conditions) if conditions else None)
+    if feed_condition is not None:
+        conditions.append(feed_condition)
     return conditions
 
 
