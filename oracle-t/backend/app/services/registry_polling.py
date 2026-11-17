@@ -124,6 +124,12 @@ class _ProductKeys:
     # (замечание 12.11.2026, см. `_row_bodies`).
     body: str | None = None
     body_patterns: list[re.Pattern[str]] = field(default_factory=list)
+    # Обозначения типа/семейства («ПУЛЬСАР 3») и хвосты, приклеенные к ним в названии самой
+    # модели («/3М» у «Пульсар 3/3М»): строка реестра с другим хвостом — другая модификация
+    # (замечание 17.11.2026, см. `_tail_ok`). Пустой `type_patterns` — проверка выключена.
+    type_patterns: list[re.Pattern[str]] = field(default_factory=list)
+    own_patterns: list[re.Pattern[str]] = field(default_factory=list)
+    variants: set[str] = field(default_factory=set)
 
 
 def _designation_pattern(designation: str) -> re.Pattern[str] | None:
@@ -189,6 +195,38 @@ def _type_aliases(products: list[Product], si_types: dict[uuid.UUID, SiType]) ->
     return aliases
 
 
+_TAIL_RE = re.compile(r"[\-‐‑–./]?([0-9A-ZА-Я][0-9A-ZА-Я.\-‐‑–/]*)")
+
+
+def _tails(patterns: list[re.Pattern[str]], folded: str) -> set[str]:
+    """Что приклеено сразу (без пробела) за обозначением типа: «ПУЛЬСАР 3/3МС» → «3МС»,
+    «ПУЛЬСАР 1Т» → «Т», «МИРТЕК-12-РУ-D17-2» → «D17-2». Пустое множество — за обозначением
+    ничего нет или дальше пробел, и строка относится ко всему семейству."""
+
+    found: set[str] = set()
+    for pattern in patterns:
+        for match in pattern.finditer(folded):
+            tail = _TAIL_RE.match(folded, match.end())
+            if tail:
+                found.add(tail.group(1).rstrip(".-‐‑–/"))
+    found.discard("")
+    return found
+
+
+def _tail_ok(keys: _ProductKeys, folded_raw: str) -> bool:
+    """Запись реестра про конкретную модификацию («Пульсар 3/3МС») не относится к другим
+    моделям того же типа. Раньше модель каталога с обозначением на уровне семейства
+    («Пульсар 3») получала первую же запись семейства, и десятки моделей, которых в реестре нет,
+    ссылались на один номер. Своё обозначение модели в строке — годится; строка про всё
+    семейство (без приклеенного хвоста) — годится; иначе хвост строки должен совпасть с хвостом
+    названия самой модели."""
+
+    if not keys.type_patterns or any(p.search(folded_raw) for p in keys.own_patterns):
+        return True
+    row_tails = _tails(keys.type_patterns, folded_raw)
+    return not row_tails or bool(row_tails & keys.variants)
+
+
 def _product_keys(db: Session) -> list[_ProductKeys]:
     manufacturers = {m.id: m for m in db.scalars(select(Manufacturer))}
     si_types = {s.id: s for s in db.scalars(select(SiType))}
@@ -207,6 +245,11 @@ def _product_keys(db: Session) -> list[_ProductKeys]:
         patterns = [p for p in (_designation_pattern(d) for d in designations if d) if p]
         if not patterns:
             continue
+        type_patterns = [p for p in (_designation_pattern(d) for d in type_names) if p]
+        folded_types = {_fold(t) for t in type_names}
+        own_designations = [d for d in designations if d and _fold(d) not in folded_types]
+        own_patterns = [p for p in (_designation_pattern(d) for d in own_designations) if p]
+        variants = _tails(type_patterns, _fold(product.model_name)) | _tails(type_patterns, _fold(product.model_code))
         own = _split_body(product.model_code) or by_name
         bases = {own[0]} if own else set()
         bases.update(type_names)
@@ -218,6 +261,9 @@ def _product_keys(db: Session) -> list[_ProductKeys]:
                 manufacturer_tokens=_manufacturer_tokens(manufacturer) if manufacturer else [],
                 body=_fold(own[1]) if own else None,
                 body_patterns=[p for p in (_body_pattern(b) for b in sorted(bases)) if p],
+                type_patterns=type_patterns,
+                own_patterns=own_patterns,
+                variants=variants,
             )
         )
     return keys
@@ -244,6 +290,8 @@ def _best_row(keys: _ProductKeys, rows: list[tuple[RegistryRow, str, str]]) -> R
         # относится ко всему типу и засчитывается, как раньше.
         bodies = _row_bodies(keys, folded_raw) if keys.body else set()
         if bodies and keys.body not in bodies:
+            continue
+        if not _tail_ok(keys, folded_raw):
             continue
         # У ГИСП есть колонка организации: обозначение чужого производителя не засчитывается.
         # Исключение — бренд в самом наименовании: «МИРТЕК-32-РУ» в реестре ГИСП записан на

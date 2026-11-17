@@ -467,3 +467,35 @@ def test_type_alias_from_sibling_models():
     target = Product(model_name="МИРТЕК-212-РУ-SP17", model_code=None, si_type_id=si_type.id)
     aliases = registry_polling._type_aliases([sibling, target], {si_type.id: si_type})
     assert aliases == {si_type.id: {"МИРТЕК-12-РУ"}}
+
+
+def _family_keys(model_name: str, model_code: str, type_name: str, brand: str = "Пульсар"):
+    manufacturer = Manufacturer(legal_name=f"ООО «{brand}»", brand_name=brand)
+    type_patterns = [registry_polling._designation_pattern(type_name)]
+    own = [p for p in [registry_polling._designation_pattern(model_code)] if p and registry_polling._fold(model_code) != registry_polling._fold(type_name)]
+    return registry_polling._ProductKeys(
+        product=Product(model_code=model_code, model_name=model_name),
+        patterns=[*own, *type_patterns],
+        manufacturer_tokens=registry_polling._manufacturer_tokens(manufacturer),
+        type_patterns=type_patterns,
+        own_patterns=own,
+        variants=registry_polling._tails(type_patterns, registry_polling._fold(model_name))
+        | registry_polling._tails(type_patterns, registry_polling._fold(model_code)),
+    )
+
+
+def test_registry_row_of_another_modification_is_not_for_family_models():
+    """Замечание 17.11.2026: все модели «Пульсар 3» получали запись «Пульсар 3/3МС» — модель
+    с хвостом «/3М» или без него (в реестре её нет) ссылалась на чужую запись."""
+
+    row, prepared = _prepared("Счетчик электрической энергии трехфазный ПУЛЬСАР 3/3МС", 'ООО НПП "ТЕПЛОВОДОХРАН"')
+    prepared = [(row, prepared[0][1], registry_polling._fold('Пульсар'))]
+    mc = _family_keys("Электросчетчик «Пульсар 3/3МС» RS-485", "Пульсар 3", "ПУЛЬСАР 3")
+    m = _family_keys("Электросчетчик «Пульсар 3/3М» RS-485", "Пульсар 3", "ПУЛЬСАР 3")
+    plain = _family_keys("Электросчетчик «Пульсар 3» RS-485", "Пульсар 3", "ПУЛЬСАР 3")
+    assert registry_polling._best_row(mc, prepared) is row
+    assert registry_polling._best_row(m, prepared) is None
+    assert registry_polling._best_row(plain, prepared) is None
+    # Строка про всё семейство годится всем.
+    family, fam_prepared = _prepared("Счетчик «Пульсар 3»", "")
+    assert registry_polling._best_row(m, fam_prepared) is family
