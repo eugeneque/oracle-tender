@@ -156,7 +156,8 @@ def build_events_payload(
     db: Session, tender: Tender, events: list[TenderEvent], *, request_id: str | None = None
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    return {
+    fields = event_deal_fields(db, tender, events)
+    payload = {
         "schema_version": bitrix.SCHEMA_VERSION,
         "request_id": request_id or f"sova-{uuid.uuid4()}",
         "deal_id": bitrix._deal_id(db, tender),  # noqa: SLF001
@@ -164,12 +165,18 @@ def build_events_payload(
         "generated_at": _z(now),
         "full_snapshot": False,
         "lookup": bitrix.build_lookup(db, tender),
-        "deal_fields": event_deal_fields(db, tender, events),
+        "deal_fields": fields,
         # Для журнала без изменений анализа — пустые разделы; документы — только по событиям о
         # них, участники и итог — по событиям о протоколе и результате.
         "sections": event_sections(db, tender, events),
         "events": [event_out(event) for event in events],
     }
+    # Цена закупки ушла в `amount` — вид цены и НДС идут с ней (API_CHANGE 17.11.2026, п. 4).
+    if "amount" in fields:
+        pricing = bitrix.build_pricing(tender)
+        if pricing:
+            payload["pricing"] = pricing
+    return payload
 
 
 def pending_events(db: Session, tender_id: uuid.UUID) -> list[TenderEvent]:

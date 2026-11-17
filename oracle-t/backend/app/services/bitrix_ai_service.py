@@ -436,6 +436,55 @@ def build_deal_fields(db: Session, tender: Tender) -> dict[str, Any]:
     )
 
 
+_PRICING_VAT_BASIS = {"included": "INCLUDED", "excluded": "EXCLUDED", "not_applicable": "NOT_TAXABLE"}
+
+
+def _pricing_kind(quote: str) -> str | None:
+    """Вид цены по формулировке документа. Не определился однозначно — `None`: вид не
+    выдумывается (API_CHANGE 17.11.2026, п. 4), а без вида Bitrix24 цену закупки всё равно не
+    считает подтверждённой НМЦК."""
+
+    text = (quote or "").lower()
+    if re.search(r"единичн\w*\s+расцен|сумм\w*\s+цен\s+единиц|цен\w*\s+единиц", text):
+        return "UNIT_SUM"
+    lot = bool(re.search(r"\bлот", text))
+    contract = bool(re.search(r"(?:цен|стоимост|сумм)\w*\s+(?:договор|контракт)", text))
+    if lot == contract:  # ни того ни другого либо оба сразу — неоднозначно
+        return None
+    return "LOT_MAX" if lot else "CONTRACT_MAX"
+
+
+def build_pricing(tender: Tender) -> dict[str, Any] | None:
+    """Блок `pricing` верхнего уровня пакета (API_CHANGE 17.11.2026, п. 4): исходная сумма,
+    вид цены и НДС — только то, что прямо найдено в документации (`price_vat_service`, р. 106).
+    Не найдено, вид цены не определился, цена не в рублях или это уже договорная цена после
+    победы — блока нет. Ставка НДС — только из источника (`rate_assumed` — наша подстановка 22 %,
+    её не отправляем). `source_updated_at` не передаём: даты версии документа у нас нет, а дата
+    скачивания или отправки — не она."""
+
+    record = tender.price_vat or {}
+    if not record or (tender.currency or "RUB") != "RUB":
+        return None
+    basis = _PRICING_VAT_BASIS.get(record.get("mode"))
+    kind = _pricing_kind(record.get("quote") or "")
+    amount = record.get("doc_price")
+    if basis is None or kind is None or not amount:
+        return None
+    rate = None
+    if basis != "NOT_TAXABLE" and record.get("vat_rate") and not record.get("rate_assumed"):
+        rate = _number(Decimal(record["vat_rate"]))
+    return _compact(
+        {
+            "source_amount": f"{Decimal(amount):.2f}",
+            "amount_kind": kind,
+            "vat_basis": basis,
+            "vat_rate": rate,
+            "source_document": _clip(record.get("document"), 500),
+            "source_text": _clip(record.get("quote"), 1000),
+        }
+    )
+
+
 # --- подробные строки ---------------------------------------------------------------------------
 
 
@@ -1251,7 +1300,7 @@ def build_payload(
     digest = hashlib.sha1(
         json.dumps(sections, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:8]
-    return {
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "request_id": request_id or f"sova-{uuid.uuid4()}",
         "deal_id": deal_id,
@@ -1263,6 +1312,12 @@ def build_payload(
         "deal_fields": build_deal_fields(db, tender),
         "sections": sections,
     }
+    # После победы цена — договорная, НМЦК-блок не отправляем (как и `amount` в событиях).
+    if _result_status(db, tender) != "WIN":
+        pricing = build_pricing(tender)
+        if pricing:
+            payload["pricing"] = pricing
+    return payload
 
 
 def serialize(payload: dict[str, Any]) -> bytes:

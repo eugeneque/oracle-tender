@@ -145,3 +145,39 @@ def test_nothing_found_keeps_previous_value(db_session):
     tender.price_vat = {"mode": "included", "price_with_vat": "1.00"}
     assert service.refresh(db_session, tender) is None
     assert tender.price_vat == {"mode": "included", "price_with_vat": "1.00"}
+
+
+# --- блок `pricing` для Bitrix24 (API_CHANGE 17.11.2026) ----------------------------------------
+
+
+def _tender_with(record, currency="RUB"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(price_vat=record, currency=currency)
+
+
+def test_pricing_block_from_documents():
+    from app.services.bitrix_ai_service import build_pricing
+
+    record = {
+        "mode": "included", "doc_price": "100.00", "vat_rate": "22", "rate_assumed": False,
+        "document": "Извещение.docx",
+        "quote": "Начальная (максимальная) цена лота — 100 рублей, включая НДС 22%",
+    }
+    assert build_pricing(_tender_with(record)) == {
+        "source_amount": "100.00", "amount_kind": "LOT_MAX", "vat_basis": "INCLUDED",
+        "vat_rate": 22, "source_document": "Извещение.docx", "source_text": record["quote"],
+    }
+
+
+def test_pricing_does_not_invent_values():
+    from app.services.bitrix_ai_service import build_pricing
+
+    base = {"mode": "excluded", "doc_price": "100.00", "vat_rate": "22", "rate_assumed": True,
+            "quote": "НМЦК 100 руб. без НДС"}
+    assert build_pricing(_tender_with(base)) is None  # вид цены не определился
+    ok = dict(base, quote="Максимальное значение цены договора 100 руб. без НДС")
+    block = build_pricing(_tender_with(ok))
+    assert block["amount_kind"] == "CONTRACT_MAX" and "vat_rate" not in block  # ставка — наша
+    assert build_pricing(_tender_with(ok, currency="USD")) is None
+    assert build_pricing(_tender_with(None)) is None
