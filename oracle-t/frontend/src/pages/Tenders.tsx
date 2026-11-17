@@ -364,6 +364,8 @@ interface TendersFilters {
   /** Канал сбора — переключатель «Стандартные ресурсы | Госплан» в шапке страницы. */
   feed: TenderFeed;
   search: string;
+  /** Организация-заказчик: все закупки одного заказчика (17.11.2026). */
+  customer: string;
   sourceKeys: string[];
   publishFrom: string;
   publishTo: string;
@@ -444,6 +446,7 @@ function parseMarkedList(value: string | null): MarkedList | null {
 const DEFAULT_FILTERS: TendersFilters = {
   feed: "all",
   search: "",
+  customer: "",
   sourceKeys: [],
   publishFrom: "",
   publishTo: "",
@@ -527,6 +530,7 @@ function buildFilterParams(filters: TendersFilters): URLSearchParams {
   const params = new URLSearchParams();
   params.set("feed", filters.feed);
   if (filters.search.trim()) params.set("search", filters.search.trim());
+  if (filters.customer.trim()) params.set("customer", filters.customer.trim());
   for (const key of filters.sourceKeys) params.append("source", key);
   if (filters.publishFrom) params.set("publish_date_from", filters.publishFrom);
   if (filters.publishTo) params.set("publish_date_to", filters.publishTo);
@@ -783,6 +787,17 @@ function FiltersPanel({
       {/* Поиск живёт в строке над панелью и здесь не дублируется: два поля с одним и тем же
           значением на одном экране читаются как два разных фильтра. */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="sm:col-span-2">
+          <label className="mb-1 block text-xs text-zinc-500">Организация-заказчик</label>
+          <input
+            type="text"
+            value={filters.customer}
+            onChange={(e) => onChange({ customer: e.target.value })}
+            placeholder="Наименование организации"
+            maxLength={300}
+            className="w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white placeholder-zinc-600 outline-none focus:border-indigo-500"
+          />
+        </div>
         <div>
           <label className="mb-1 block text-xs text-zinc-500">Сумма: от</label>
           <input
@@ -1149,6 +1164,7 @@ function Pagination({
 function countActiveFilters(filters: TendersFilters): number {
   let count = 0;
   const simpleKeys: Array<keyof TendersFilters> = [
+    "customer",
     "priceMin",
     "priceMax",
     "deadlineFrom",

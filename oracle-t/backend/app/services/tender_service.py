@@ -512,6 +512,10 @@ class TenderFilters:
     суток — в `list_tenders`."""
 
     search: str | None = None
+    # Заказчик (17.11.2026): все закупки одной организации. Отдельно от `search`, который
+    # ищет и по наименованию, и по номеру — «Больница» в общем поиске приносит и закупки
+    # на поставку для больниц от других заказчиков.
+    customer: str | None = None
     source_keys: list[str] = field(default_factory=list)
     publish_date_from: date | None = None
     publish_date_to: date | None = None
@@ -966,6 +970,11 @@ def _build_conditions(filters: TenderFilters) -> list:
         )
         for word in search_words(filters.search):
             conditions.append(haystack.ilike(f"%{word}%"))
+    if filters.customer:
+        # Слова — в названии заказчика, форма и кавычки не мешают (как в общем поиске).
+        customer_haystack = _folded(func.coalesce(Tender.customer_name, ""))
+        for word in search_words(filters.customer):
+            conditions.append(customer_haystack.ilike(f"%{word}%"))
     if filters.source_keys and filters.feed == FEED_ALL:
         conditions.append(_found_in_sources_condition(filters.source_keys))
     elif filters.source_keys:

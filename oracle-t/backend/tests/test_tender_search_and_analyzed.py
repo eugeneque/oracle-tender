@@ -62,6 +62,21 @@ def test_search_by_customer_ignores_legal_form_and_quotes(db_session):
     assert tender.id not in _found(db_session, f"энергосбыт {marker} тюмень")
 
 
+def test_customer_filter_matches_only_customer_name(db_session):
+    """Фильтр «Организация-заказчик» (17.11.2026): слово из наименования закупки заказчика
+    не совпадает, форма и кавычки не мешают, число закупок в счётчике то же, что в списке."""
+
+    marker = uuid.uuid4().hex[:6]
+    own = _tender(db_session, "Поставка счётчиков", customer=f"МУП «Горсвет {marker}»")
+    other = _tender(db_session, f"Закупка для Горсвет {marker}", customer="ООО «Прочий»")
+
+    filters = TenderFilters(customer=f'МУП "ГОРСВЕТ {marker}"')
+    found = {t.id for t in list_tenders(db_session, limit=1000, filters=filters)}
+    assert own.id in found
+    assert other.id not in found
+    assert count_tenders(db_session, filters=filters) == 1
+
+
 def test_analyzed_filter_counts_only_tenders_with_requirements(db_session):
     db = db_session
     marker = uuid.uuid4().hex[:6]

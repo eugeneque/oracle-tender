@@ -106,6 +106,7 @@ router = APIRouter(prefix="/tenders", tags=["tenders"])
 
 def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, каждый отдельным query-параметром
     search: str | None = Query(default=None, max_length=200),
+    customer: str | None = Query(default=None, max_length=300, description="Организация-заказчик (по названию)"),
     source: list[str] | None = Query(default=None, description="Ключи источников (можно несколько)"),
     publish_date_from: date | None = None,
     publish_date_to: date | None = None,
@@ -164,6 +165,7 @@ def tender_filters(  # noqa: PLR0913 - фильтры раздела 5.6 ТЗ, �
 
     return TenderFilters(
         search=search,
+        customer=customer,
         source_keys=source or [],
         publish_date_from=publish_date_from,
         publish_date_to=publish_date_to,
