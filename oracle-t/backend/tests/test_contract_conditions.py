@@ -56,7 +56,7 @@ def _cond(**kw) -> ConditionAnswer:
         kind="PREPAYMENT", presence="PRESENT", value="30 % от цены договора в течение 10 рабочих дней",
         amount="", percent="30", base="от цены договора", term="в течение 10 рабочих дней", day_type="",
         trigger_event="с даты заключения договора", payer="заказчик", allowed_forms="", obligation_model="",
-        lot="1", document="Проект договора.docx", page="п. 3.2", quote="Аванс в размере 30 % от цены договора",
+        result="", lot="1", document="Проект договора.docx", page="п. 3.2", quote="Аванс в размере 30 % от цены договора",
     )
     return ConditionAnswer(**{**base, **kw})
 

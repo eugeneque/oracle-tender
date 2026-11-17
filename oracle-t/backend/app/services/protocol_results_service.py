@@ -94,6 +94,22 @@ class ProtocolAnswer(pydantic.BaseModel):
     lot: str
     procedure_outcome: str
     failed_reason: str
+    amends: str
+    amended_document: str
+    quote: str
+
+
+class RoundAnswer(pydantic.BaseModel):
+    """Ценовое предложение в ходе торгов (аукцион, переторжка): п. 78 перечня."""
+
+    document: str
+    lot: str
+    round: str
+    name: str
+    inn: str
+    application_number: str
+    price: str
+    bid_time: str
     quote: str
 
 
@@ -119,6 +135,7 @@ class ParticipantAnswer(pydantic.BaseModel):
 class ProtocolsAnswer(pydantic.BaseModel):
     protocols: list[ProtocolAnswer]
     participants: list[ParticipantAnswer]
+    rounds: list[RoundAnswer]
 
 
 _SYSTEM_PROMPT = f"""Ты разбираешь протоколы закупки (вскрытие, рассмотрение заявок, \
@@ -142,6 +159,9 @@ protocols — по записи на каждый файл протокола:
 - procedure_outcome: HELD — победитель определён; FAILED — закупка признана несостоявшейся; \
 CANCELLED — отменена; IN_PROGRESS — рассмотрение продолжается; пусто — не сказано. \
 failed_reason — основание, если закупка несостоявшаяся.
+- amends: yes — протокол прямо назван изменением, исправлением или новой редакцией другого \
+протокола («внесение изменений в протокол», «редакция 2»); no — нет; amended_document — имя \
+файла (или название) изменяемого протокола, если оно понятно из текста.
 
 participants — запись на каждого участника в каждом протоколе, где он упомянут:
 - name — наименование участника как в протоколе; inn — только цифры (10 или 12), kpp — 9 цифр; \
@@ -155,6 +175,11 @@ application_number — номер заявки.
 - place — порядковый номер (место) заявки, если присвоен; is_winner: yes — участник прямо \
 назван победителем (или с ним заключается договор); no — назван не победителем; unknown.
 - delivery_term — предложенный участником срок поставки, если он есть в протоколе.
+
+rounds — ценовые предложения по ходу торгов, если протокол их перечисляет (журнал аукциона, \
+ценовые предложения, переторжка): запись на каждое предложение — round (номер раунда, шага или \
+«переторжка»), участник (name/inn/application_number), price числом, bid_time — время подачи \
+как в документе. Нет таких сведений — пустой список; итоговые цены участников сюда не дублируй.
 Отвечай по-русски."""
 
 
@@ -215,11 +240,19 @@ def normalize(answer: ProtocolsAnswer, *, ours: set[str] | None = None) -> dict[
                     "lot_number": _clean(item.lot, 30) or "1",
                     "outcome": _enum(item.procedure_outcome, _OUTCOMES),
                     "failed_reason": _clean(item.failed_reason, 1000),
+                    "amends": _tri(item.amends),
+                    "amended_document": _clean(item.amended_document, 500),
                     "quote": _clean(item.quote, 600),
                 }
             )
         )
-    final_docs = {p["document"] for p in protocols if p.get("is_final") is True}
+    # Редакции протоколов (п. 84): протокол, изменённый более поздним, больше не источник итога —
+    # его записи участников не перекрывают новые, а сам он помечен «заменён».
+    superseded = _superseded(protocols)
+    for protocol in protocols:
+        if protocol["document"] in superseded:
+            protocol["superseded_by"] = superseded[protocol["document"]]
+    final_docs = {p["document"] for p in protocols if p.get("is_final") is True and p["document"] not in superseded}
 
     # Записи по протоколам: сначала промежуточные, затем итоговые — итоговые перекрывают.
     raw: list[dict[str, Any]] = []
@@ -246,6 +279,8 @@ def normalize(answer: ProtocolsAnswer, *, ours: set[str] | None = None) -> dict[
             }
         )
         if not (entry.get("name") or entry.get("inn") or entry.get("application_number")):
+            continue
+        if entry.get("document") in superseded:
             continue
         entry["final"] = entry.get("document") in final_docs
         raw.append(entry)
@@ -293,7 +328,10 @@ def normalize(answer: ProtocolsAnswer, *, ours: set[str] | None = None) -> dict[
     )
     for lot in lot_numbers:
         members = [p for p in participants.values() if p["lot_number"] == lot]
-        finals = [p for p in protocols if p["lot_number"] == lot and p.get("is_final") is True]
+        finals = [
+            p for p in protocols
+            if p["lot_number"] == lot and p.get("is_final") is True and p["document"] not in superseded
+        ]
         latest = finals[-1] if finals else next((p for p in reversed(protocols) if p["lot_number"] == lot), None)
         winners = [p for p in members if p.get("final_winner")]
         lot_conflicts = list(conflicts.get(lot, []))
@@ -324,6 +362,9 @@ def normalize(answer: ProtocolsAnswer, *, ours: set[str] | None = None) -> dict[
                 "participants_count": len(members) or None,
                 "conflicts": lot_conflicts,
                 "quote": (latest or {}).get("quote"),
+                "revision_of": (latest or {}).get("amended_document") if (latest or {}).get("amends") else None,
+                "superseded_documents": sorted(d for d, by in superseded.items() if any(
+                    p["document"] == d and p["lot_number"] == lot for p in protocols)),
             }
         )
         our = [p for p in members if p["is_ours"]]
@@ -337,7 +378,98 @@ def normalize(answer: ProtocolsAnswer, *, ours: set[str] | None = None) -> dict[
         p.pop("final_winner", None)
         p.pop("preliminary_winner", None)
         out_participants.append(_compact(p))
-    return {"protocols": protocols, "participants": out_participants, "lots": lots}
+    rounds = _rounds(answer.rounds, ours, superseded)
+    for lot_info in lots:
+        lot_info["confidence"] = confidence(lot_info, single_lot=len(lots) <= 1)
+    return {"protocols": protocols, "participants": out_participants, "lots": lots, "rounds": rounds}
+
+
+def _superseded(protocols: list[dict[str, Any]]) -> dict[str, str]:
+    """Изменённый протокол → протокол-изменение. Имя изменяемого сопоставляется с файлами
+    без учёта регистра и расширения; не нашли — связи нет (не выдумываем)."""
+
+    def norm(name: str) -> str:
+        return re.sub(r"\.\w{2,4}$", "", name or "").casefold().strip()
+
+    by_name = {norm(p["document"]): p["document"] for p in protocols}
+    out: dict[str, str] = {}
+    for p in protocols:
+        target = p.get("amended_document")
+        if not p.get("amends") or not target:
+            continue
+        match = by_name.get(norm(target)) or next(
+            (doc for key, doc in by_name.items() if key and (key in norm(target) or norm(target) in key)), None
+        )
+        if match and match != p["document"]:
+            out[match] = p["document"]
+    return out
+
+
+def _rounds(items: list[RoundAnswer], ours: set[str], superseded: dict[str, str]) -> list[dict[str, Any]]:
+    """Раунды цен (п. 78): только предложения с ценой числом; повтор той же записи — один."""
+
+    out: list[dict[str, Any]] = []
+    seen: set[tuple] = set()
+    for item in items[:MAX_PARTICIPANTS]:
+        document = _clean(item.document)
+        if document in superseded:
+            continue
+        price = parse_number(item.price)
+        if price is None:
+            continue
+        inn = _digits(item.inn)
+        entry = _compact(
+            {
+                "document": document,
+                "lot_number": _clean(item.lot, 30) or "1",
+                "round": _clean(item.round, 50),
+                "name": _clean(item.name, 500),
+                "inn": inn if _INN_RE.match(inn) else None,
+                "application_number": _clean(item.application_number, 50),
+                "price": price,
+                "bid_time": _clean(item.bid_time, 50),
+                "quote": _clean(item.quote, 600),
+            }
+        )
+        marker = (entry.get("lot_number"), entry.get("round"), _identity(entry), price)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        entry["is_ours"] = bool(entry.get("inn") and entry["inn"] in ours)
+        out.append(entry)
+    return out
+
+
+def confidence(lot: dict[str, Any], *, single_lot: bool) -> dict[str, Any]:
+    """Уверенность по полям итога (п. 86) — правилом, а не самооценкой модели: итоговый
+    протокол, цитата, противоречия, предварительный победитель, лот и редакция. Возвращает
+    {поле: число 0–1} и `basis` — почему так."""
+
+    conflicts = bool(lot.get("conflicts"))
+    final = bool(lot.get("final"))
+    quoted = bool(lot.get("quote"))
+    basis: list[str] = []
+    out: dict[str, Any] = {}
+    if conflicts:
+        basis.append("противоречия между протоколами")
+    if not final:
+        basis.append("итогового протокола нет")
+    if not quoted:
+        basis.append("нет подтверждающей цитаты")
+    if lot.get("winner") or lot.get("preliminary_winner"):
+        out["winner"] = 0.2 if conflicts else (0.9 if final and quoted else 0.6 if final else 0.3)
+    if lot.get("winner_price") is not None:
+        out["price"] = 0.2 if conflicts else (0.9 if final and quoted else 0.6)
+    if lot.get("our_result"):
+        out["result"] = 0.2 if conflicts else (0.9 if final and lot["our_result"] != "PENDING" else 0.5)
+    out["lot"] = 0.9 if single_lot else 0.7
+    if not single_lot:
+        basis.append("несколько лотов — проверить привязку")
+    out["version"] = 0.9 if (lot.get("protocol_number") or lot.get("protocol_date")) and not lot.get("superseded_documents") else 0.7
+    if lot.get("superseded_documents"):
+        basis.append("есть изменённые редакции протокола")
+    out["basis"] = "; ".join(basis) or "итоговый протокол с цитатой, противоречий нет"
+    return out
 
 
 def _our_result(
@@ -466,7 +598,7 @@ def get_results(db: Session, tender: Tender) -> dict[str, Any]:
     """Итог закупки — у основной записи группы (`tender_twins`), с какой записи ни спросили."""
 
     record = _record(db, tender)
-    empty: dict[str, Any] = {"documents": [], "protocols": [], "participants": [], "lots": []}
+    empty: dict[str, Any] = {"documents": [], "protocols": [], "participants": [], "lots": [], "rounds": []}
     return {**empty, **(record.payload if record else {})}
 
 

@@ -23,6 +23,8 @@ Bitrix24 принимает изменения по тендерам в «Жур
 
 from __future__ import annotations
 
+import hashlib
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -42,7 +44,7 @@ from app.models.tender_document import DocumentClass, TenderDocument
 from app.models.bitrix_deal import BitrixDealLink
 from app.models.tender_event import EventDelivery, TenderEvent, TenderEventView, TenderMonitor
 from app.models.user import User
-from app.services import document_service, eis_card_dates, tender_card_service
+from app.services import document_service, eis_card_dates, eis_card_tables, tender_card_service, tender_positions
 from app.services.audit import log_action
 
 # Коды событий — по документации Bitrix24 «События СОВА и Bitrix24» (редакция 2026-11-05,
@@ -142,6 +144,12 @@ def _our_result(db: Session, tender: Tender) -> str | None:
     return our_result(db, tender)
 
 
+def _position_label(item: Any) -> str:
+    number = (item.position_no or "").strip().rstrip(".")
+    label = f"{number}. {item.name}" if number else item.name
+    return label[:300] + (f" (лот {item.lot_number})" if item.lot_number not in (None, "1") else "")
+
+
 def build_snapshot(db: Session, tender: Tender) -> dict[str, Any]:
     """Слепок наблюдаемых показателей закупки в виде, пригодном для сравнения и для JSONB."""
 
@@ -169,7 +177,46 @@ def build_snapshot(db: Session, tender: Tender) -> dict[str, Any]:
         doc.source_url: {"name": doc.file_name, "class": doc.document_class}
         for doc in document_service.list_tender_documents(db, tender.id)
     }
-    return {"fields": fields, "security": security, "documents": documents}
+    # 17.11.2026 (раздел 113): официальный этап, журнал ЕИС, редакции протоколов и договоров,
+    # изменения/разъяснения и позиции спецификации. Сравниваются, только если ключ был и в
+    # прошлом слепке: у снятых раньше слепков их нет, и первая проверка не выдумывает событий.
+    card_payload = payload or {}
+    positions = {
+        _position_label(item):
+        (str(item.quantity.normalize()) if item.quantity is not None else None) or item.quantity_text or ""
+        for item in tender_positions.list_positions(db, tender)
+    }
+    return {
+        "fields": fields,
+        "security": security,
+        "documents": documents,
+        "stage": eis_card_tables.official_stage(card_payload),
+        "journal": eis_card_tables.notable_journal(card_payload),
+        "card_protocols": eis_card_tables.documents_map(card_payload, "protocols"),
+        "card_contracts": eis_card_tables.documents_map(card_payload, "contracts"),
+        "card_changes": eis_card_tables.documents_map(card_payload, "changes"),
+        "positions": positions,
+        "doc_security": _doc_security(db, tender),
+    }
+
+
+def _doc_security(db: Session, tender: Tender) -> dict[str, str]:
+    """Обеспечение заявки и договора по разбору документации (раздел 95) — п. 59: условия
+    меняются в новой редакции документации, а поля карточки ЕИС у коммерческих площадок пусты."""
+
+    from app.services.contract_conditions_service import get_conditions
+
+    out: dict[str, str] = {}
+    for item in get_conditions(db, tender)["conditions"]:
+        if item.get("kind") not in ("APPLICATION_SECURITY", "CONTRACT_SECURITY"):
+            continue
+        parts = [item.get("value"), f"{item['percent']} %" if item.get("percent") is not None else None,
+                 f"{item['amount']} руб." if item.get("amount") is not None else None, item.get("allowed_forms")]
+        if item.get("presence") == "NOT_REQUIRED":
+            parts = ["не требуется"]
+        key = f"{item['kind']}:{item.get('lot_number') or '1'}"
+        out[key] = "; ".join(p for p in parts if p)[:500]
+    return out
 
 
 # --- сравнение --------------------------------------------------------------------------------
@@ -358,7 +405,195 @@ def diff_snapshots(old: dict[str, Any], new: dict[str, Any]) -> list[dict[str, A
             changes.append(_document_event(url, doc, old_docs))
     # `DOCUMENT_REMOVED` намеренно не формируем: Bitrix24 просит передавать его только при
     # подтверждённом удалении, а пропажа файла из выдачи площадки чаще означает сбой страницы.
+    changes.extend(_card_changes(old, new, changes))
     return changes
+
+
+# --- этап, журнал и таблицы карточки ЕИС (раздел 113) ---------------------------------------------
+
+_ROUND_CANCEL_RE = re.compile(r"отмен\w*.{0,80}?(переторж|дополнительн\w+\s+ценов|аукцион|торг|ценов\w+\s+предложен)", re.I | re.S)
+_PROCEDURE_CANCEL_RE = re.compile(r"отмен\w*\s+(?:определения\s+поставщика|закупки|процедуры)|переведена на этап «[^»]*отменен", re.I)
+_FAS_RE = re.compile(r"жалоб|предписан|антимонопол|\bФАС\b", re.I)
+_CARD_SOURCE = "Карточка закупки ЕИС"
+
+
+def _fas_kind(text: str) -> str:
+    lowered = text.lower()
+    if "предписан" in lowered:
+        return "PRESCRIPTION"
+    if "решени" in lowered:
+        return "DECISION"
+    return "COMPLAINT"
+
+
+_FAS_TITLES = {
+    "COMPLAINT": "Подана жалоба на закупку (журнал ЕИС)",
+    "DECISION": "Опубликовано решение по жалобе (журнал ЕИС)",
+    "PRESCRIPTION": "Выдано предписание по закупке (журнал ЕИС)",
+}
+
+
+def _card_changes(old: dict[str, Any], new: dict[str, Any], found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Изменения по этапу, журналу и таблицам карточки ЕИС. Каждый блок сравнивается, только
+    если он был и в прошлом слепке (иначе первая проверка после обновления выдала бы всю
+    историю закупки событиями)."""
+
+    out: list[dict[str, Any]] = []
+    types = lambda: {c["event_type"] for c in found + out}  # noqa: E731 - короткая проверка дублей
+
+    # Официальный этап (пп. 62, 63, 66): формулировка ЕИС главнее классификации СОВЫ.
+    if "stage" in old and new.get("stage") and old.get("stage") and new["stage"] != old["stage"]:
+        before, after = old["stage"], new["stage"]
+        if eis_card_tables.is_suspended(after):
+            code, title = "PROCEDURE_SUSPENDED", "Процедура приостановлена"
+        elif eis_card_tables.is_suspended(before) and not eis_card_tables.is_cancelled(after):
+            code, title = "PROCEDURE_RESUMED", "Процедура возобновлена"
+        elif eis_card_tables.is_cancelled(after):
+            code, title = "PROCEDURE_CANCELLED", "Процедура отменена"
+        else:
+            code, title = "PROCEDURE_STATUS_CHANGED", f"Этап закупки: {after}"
+        out.append(
+            _change(code, "stage", title, before, after, source_document=_CARD_SOURCE,
+                    note="Официальная формулировка этапа из карточки ЕИС.")
+        )
+        # Статус по классификации СОВЫ о том же переходе — дубль официального.
+        found[:] = [c for c in found if c.get("field_key") != "status"]
+
+    # Журнал событий ЕИС (пп. 41–47, 62, 66, 67): приостановка, возобновление, жалоба,
+    # предписание, отмена раунда — с моментом из самого журнала.
+    if "journal" in old:
+        for key, entry in (new.get("journal") or {}).items():
+            if key in (old.get("journal") or {}):
+                continue
+            text, at = entry.get("text") or "", entry.get("at")
+            common = {"source_document": "Журнал событий закупки ЕИС", "effective_at": at}
+            lowered = text.lower()
+            if "приостан" in lowered and "PROCEDURE_SUSPENDED" not in types():
+                out.append(_change("PROCEDURE_SUSPENDED", "stage", "Процедура приостановлена", None, text[:500],
+                                   note="Запись журнала событий ЕИС.", **common))
+            elif "возобнов" in lowered and "PROCEDURE_RESUMED" not in types():
+                out.append(_change("PROCEDURE_RESUMED", "stage", "Процедура возобновлена", None, text[:500],
+                                   note="Запись журнала событий ЕИС.", **common))
+            elif _FAS_RE.search(text):
+                kind = _fas_kind(text)
+                out.append(_change("PROCEDURE_STATUS_CHANGED", f"fas:{key}"[:300], _FAS_TITLES[kind], None, text[:500],
+                                   data={"fas_event": kind},
+                                   note="Запись журнала событий ЕИС; текст жалобы и решения — в реестре жалоб ЕИС.",
+                                   **common))
+            elif (match := _ROUND_CANCEL_RE.search(text)) and not _PROCEDURE_CANCEL_RE.search(text):
+                rebid = "переторж" in match.group(1).lower() or "дополнительн" in match.group(1).lower()
+                field = "rebid_date" if rebid else "auction_date"
+                out.append(_change(
+                    "REBID_DATE_CHANGED" if rebid else "AUCTION_DATE_CHANGED", field,
+                    "Отменена переторжка" if rebid else "Отменён аукцион (раунд торгов)",
+                    (old.get("fields") or {}).get(field), None,
+                    note="Подтверждённая отмена раунда по журналу ЕИС; процедура в целом не отменена.",
+                    data={"round_cancelled": True}, **common))
+            elif "отмен" in lowered and "PROCEDURE_CANCELLED" not in types() and _PROCEDURE_CANCEL_RE.search(text):
+                out.append(_change("PROCEDURE_CANCELLED", "stage", "Процедура отменена", None, text[:500],
+                                   note="Запись журнала событий ЕИС.", **common))
+
+    # Протоколы карточки (п. 84): новая редакция или признание недействующим — файл часто
+    # остаётся по тому же адресу, и по составу документов это не видно.
+    if "card_protocols" in old:
+        before_all = old.get("card_protocols") or {}
+        for name, doc in (new.get("card_protocols") or {}).items():
+            prev = before_all.get(name)
+            if prev is None:
+                continue
+            if doc.get("revision") and doc.get("revision") != prev.get("revision"):
+                out.append(_change(
+                    "PROTOCOL_PUBLISHED", f"card-protocol:{name}"[:300], f"Новая редакция протокола: {name}",
+                    f"Редакция {prev.get('revision') or '—'}", f"Редакция {doc['revision']}",
+                    source_document=name, source_version=doc["revision"], effective_at=doc.get("placed"),
+                    data={"protocol_kind": name, "is_final": True if "итог" in name.lower() else None, "is_revision": True},
+                    note="Редакция протокола из карточки ЕИС; итоги перечитываются из нового текста."))
+            elif (doc.get("status") or "") != (prev.get("status") or "") and "недейств" in (doc.get("status") or "").lower():
+                out.append(_change(
+                    "PROTOCOL_PUBLISHED", f"card-protocol:{name}"[:300], f"Протокол признан недействующим: {name}",
+                    prev.get("status"), doc.get("status"), source_document=name, source_version=doc.get("revision"),
+                    data={"protocol_kind": name, "is_revision": True, "is_active": False},
+                    note="Статус протокола в карточке ЕИС сменился на «Недействующая»."))
+
+    # Сведения о договоре (пп. 88, 94): договор заключён; новая редакция сведений — изменение
+    # условий (допсоглашение) или исполнение.
+    if "card_contracts" in old:
+        before_all = old.get("card_contracts") or {}
+        for name, doc in (new.get("card_contracts") or {}).items():
+            prev = before_all.get(name)
+            if prev is None:
+                out.append(_change(
+                    "CONTRACT_CHANGED", f"card-contract:{name}"[:300], f"Опубликованы сведения о заключённом договоре: {name}",
+                    None, name, source_document=name, source_version=doc.get("revision"), effective_at=doc.get("placed"),
+                    note="Реестр договоров ЕИС: договор по закупке заключён (сведения размещены)."))
+            elif doc.get("revision") and doc.get("revision") != prev.get("revision"):
+                out.append(_change(
+                    "CONTRACT_CHANGED", f"card-contract:{name}"[:300], f"Изменены сведения о договоре: {name}",
+                    f"Редакция {prev.get('revision') or '—'}", f"Редакция {doc['revision']}",
+                    source_document=name, source_version=doc["revision"], effective_at=doc.get("placed"),
+                    note="Новая редакция сведений о договоре в ЕИС: изменение условий (дополнительное соглашение) "
+                         "или исполнение; что именно изменилось — в карточке договора ЕИС."))
+
+    # Изменения, разъяснения и запросы заказчика (пп. 52, 60, 65): редакция того же документа и
+    # запросы заказчика (по 223-ФЗ — в той же таблице).
+    if "card_changes" in old:
+        before_all = old.get("card_changes") or {}
+        for name, doc in (new.get("card_changes") or {}).items():
+            prev = before_all.get(name)
+            lowered = name.lower()
+            if prev is None and "запрос" in lowered:
+                out.append(_change(
+                    "DOCUMENT_ADDED", f"card-change:{name}"[:300], f"Запрос заказчика: {name}", None, name,
+                    source_document=name, source_version=doc.get("revision"), effective_at=doc.get("placed"),
+                    data={"customer_request": True},
+                    note="Запрос заказчика из карточки ЕИС. Касается ли он нашей заявки — по тексту запроса."))
+            elif prev is not None and doc.get("revision") and doc.get("revision") != prev.get("revision"):
+                out.append(_change(
+                    "DOCUMENT_REPLACED", f"card-change:{name}"[:300], f"Новая редакция: {name}",
+                    f"Редакция {prev.get('revision') or '—'}", f"Редакция {doc['revision']}",
+                    source_document=name, source_version=doc["revision"], effective_at=doc.get("placed"),
+                    note="Номер редакции — из карточки ЕИС."))
+
+    # Обеспечение по документации (п. 59) — после нового разбора документации.
+    old_ds, new_ds = old.get("doc_security"), new.get("doc_security")
+    if old_ds and new_ds:
+        for key in sorted(set(old_ds) | set(new_ds)):
+            if key in new_ds and old_ds.get(key) != new_ds[key]:
+                kind = "APPLICATION" if key.startswith("APPLICATION") else "CONTRACT"
+                label = "заявки" if kind == "APPLICATION" else "исполнения договора"
+                out.append(_change(
+                    "SECURITY_CHANGED", f"doc-security:{key}", f"Изменились условия обеспечения {label} (документация)",
+                    old_ds.get(key), new_ds[key], data={"security_kind": kind},
+                    note="По разбору документации (новая редакция); поля карточки ЕИС могли не измениться."))
+
+    # Позиции спецификации (пп. 53, 55): состав и количество после нового разбора документации.
+    old_pos, new_pos = old.get("positions"), new.get("positions")
+    if old_pos and new_pos and old_pos != new_pos:
+        diff = []
+        for label in list(old_pos) + [k for k in new_pos if k not in old_pos]:
+            if old_pos.get(label) != new_pos.get(label):
+                diff.append({"key": _key_of(label), "field": label[:300],
+                             "old_value": old_pos.get(label) if label in old_pos else None,
+                             "new_value": new_pos.get(label) if label in new_pos else None})
+        added = sum(1 for d in diff if d["old_value"] is None and d["field"] not in old_pos)
+        removed = sum(1 for d in diff if d["field"] not in new_pos)
+        changed = len(diff) - added - removed
+        render = lambda data: "\n".join(f"{k}: {v or '—'}" for k, v in list(data.items())[:40])  # noqa: E731
+        lots_touched = {
+            (m.group(1) if (m := re.search(r"\(лот (\S+)\)$", d["field"])) else "1") for d in diff
+        }
+        multi_lot = any(re.search(r"\(лот \S+\)$", label) for label in list(old_pos) + list(new_pos))
+        lot_scope = {"scope": "LOT", "lot_number": next(iter(lots_touched))} if multi_lot and len(lots_touched) == 1 else {}
+        out.append(_change(
+            "TECHNICAL_REQUIREMENT_CHANGED", "positions", "Изменился состав или количество позиций",
+            render(old_pos)[:3000], render(new_pos)[:3000],
+            data={"changes": diff[:50]}, **lot_scope,
+            note=f"Позиций добавлено {added}, убрано {removed}, изменено количество у {changed} — по разбору спецификации."))
+    return out
+
+
+def _key_of(label: str) -> str:
+    return "pos-" + hashlib.sha1(label.encode("utf-8")).hexdigest()[:10]
 
 
 # --- повторный сбор данных --------------------------------------------------------------------
@@ -503,6 +738,16 @@ def _last_event_id(db: Session, tender_id: uuid.UUID, field_key: str) -> str | N
     )
 
 
+def _parse_at(value: Any) -> datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else None
+
+
 def record_events(
     db: Session, tender: Tender, changes: list[dict[str, Any]], *, detected_at: datetime | None = None
 ) -> list[TenderEvent]:
@@ -517,7 +762,9 @@ def record_events(
             event_type=event_type,
             field_key=change["field_key"],
             title=change["title"][:300],
-            scope="PROCEDURE",
+            # Лот — только если изменение точно относится к одному лоту (п. 50); иначе процедура.
+            scope=change.get("scope") or "PROCEDURE",
+            lot_number=change.get("lot_number") if change.get("scope") == "LOT" else None,
             old_value=change.get("old_value"),
             new_value=change.get("new_value"),
             detected_at=detected_at,
@@ -525,6 +772,8 @@ def record_events(
             source_document=(change.get("source_document") or None),
             source_url=change.get("source_url") or tender.source_url,
             note=change.get("note"),
+            effective_at=_parse_at(change.get("effective_at")),
+            source_version=(str(change["source_version"])[:100] if change.get("source_version") else None),
             supersedes_event_id=_last_event_id(db, tender.id, change["field_key"]),
             delivery=EventDelivery.PENDING.value if agreed else EventDelivery.HELD.value,
         )
@@ -532,6 +781,110 @@ def record_events(
         db.flush()
         events.append(event)
     return events
+
+
+_TEXT_DIFF_EVENTS = {"TECHNICAL_REQUIREMENT_CHANGED", "CONTRACT_CHANGED", "DOCUMENT_REPLACED"}
+
+
+def enrich_document_changes(db: Session, tender: Tender, changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Содержание изменений документов (раздел 113, пп. 52–54, 60, 35): новая редакция ТЗ или
+    договора сравнивается по тексту с прежней (`document_diff`), разъяснение — кратким
+    содержанием и тем, на что оно влияет. Без текста событие остаётся как было."""
+
+    from app.services import document_diff
+
+    docs = None
+    for change in changes:
+        key = change.get("field_key") or ""
+        if not key.startswith("doc:"):
+            continue
+        if change["event_type"] not in _TEXT_DIFF_EVENTS | {"CLARIFICATION_PUBLISHED"}:
+            continue
+        if docs is None:
+            docs = list(document_service.list_tender_documents(db, tender.id))
+        url = key[4:]
+        current = next((d for d in docs if d.source_url == url), None)
+        if current is None or not current.extracted_text:
+            continue
+        if change["event_type"] == "CLARIFICATION_PUBLISHED":
+            excerpt = document_diff.clarification_excerpt(current.extracted_text)
+            areas = document_diff.impact_areas(excerpt)
+            if excerpt:
+                change["new_value"] = excerpt
+                change["data"] = {**(change.get("data") or {}), "affects": areas, "document": current.file_name}
+                change["note"] = (
+                    "Содержание — из текста разъяснения (без пересказа). Влияет на: "
+                    + (", ".join(areas) if areas else "по словам текста не определить") + "."
+                )
+            continue
+        previous = [
+            d for d in docs
+            if d.id != current.id and d.extracted_text
+            and (d.document_class == current.document_class or d.file_name == current.file_name)
+            and (d.created_at or now_utc()) <= (current.created_at or now_utc())
+        ]
+        if not previous:
+            continue
+        prior = max(previous, key=lambda d: d.created_at or now_utc())
+        diff = document_diff.diff_texts(prior.extracted_text, current.extracted_text)
+        if not diff["total"]:
+            change["note"] = f"Текст совпадает с прежней редакцией «{prior.file_name}»: содержательных изменений нет."
+            continue
+        before, after = document_diff.summary_values(diff)
+        change["old_value"], change["new_value"] = before, after
+        change["data"] = {**(change.get("data") or {}), "changes": diff["changes"], "compared_with": prior.file_name}
+        change["note"] = (
+            f"Сравнение с «{prior.file_name}»: изменено фрагментов — {diff['total']}"
+            + (f", показаны первые {len(diff['changes'])}" if diff["total"] > len(diff["changes"]) else "")
+            + (". Изменений очень много — возможно, другой документ или другое распознавание; нужна проверка." if diff["noisy"] else ".")
+        )
+    # После сравнения текстов: продление гарантии видно по изменённым фрагментам о сроках.
+    _bank_guarantee_notes(db, tender, changes)
+    return changes
+
+
+def _bank_guarantee_notes(db: Session, tender: Tender, changes: list[dict[str, Any]]) -> None:
+    """п. 32: срок сдвинулся — нужно ли продлевать банковскую гарантию. Гарантия должна
+    покрывать новый срок, если документация допускает её как форму обеспечения; решение о
+    продлении — за сотрудником, здесь только пометка с основанием."""
+
+    from app.services.contract_conditions_service import get_conditions
+
+    conditions = get_conditions(db, tender)["conditions"]
+
+    def guarantee(kind: str) -> dict[str, Any] | None:
+        return next(
+            (c for c in conditions if c.get("kind") == kind and "гарант" in (c.get("allowed_forms") or c.get("value") or "").lower()),
+            None,
+        )
+
+    for change in changes:
+        shift = None
+        if change["event_type"] == "APPLICATION_END_CHANGED" and change.get("old_value") and change.get("new_value"):
+            try:
+                shift = datetime.fromisoformat(change["new_value"]) - datetime.fromisoformat(change["old_value"])
+            except ValueError:
+                shift = None
+            item = guarantee("APPLICATION_SECURITY")
+            if shift and shift.total_seconds() > 0 and item:
+                days = shift.days or 1
+                change["data"] = {**(change.get("data") or {}), "bank_guarantee_check": "APPLICATION"}
+                change["note"] = ((change.get("note") or "") + (
+                    f" Срок подачи сдвинут на {days} дн. позже; обеспечение заявки допускается банковской гарантией — "
+                    "проверьте, что срок действия выданной гарантии покрывает новые даты (продление — решение тендерного отдела)."
+                )).strip()
+        elif change["event_type"] == "CONTRACT_CHANGED" and re.search(r"срок", f"{change.get('old_value')}{change.get('new_value')}", re.I):
+            item = guarantee("CONTRACT_SECURITY")
+            if item:
+                change["data"] = {**(change.get("data") or {}), "bank_guarantee_check": "CONTRACT"}
+                change["note"] = ((change.get("note") or "") + (
+                    " Изменение касается сроков, обеспечение договора допускается банковской гарантией — "
+                    "проверьте, требуется ли продление гарантии."
+                )).strip()
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def check_tender(db: Session, tender: Tender, *, refresh: bool = True) -> list[TenderEvent]:
@@ -546,7 +899,8 @@ def check_tender(db: Session, tender: Tender, *, refresh: bool = True) -> list[T
     events: list[TenderEvent] = []
     now = datetime.now(timezone.utc)
     if monitor.snapshot:
-        events = record_events(db, tender, diff_snapshots(monitor.snapshot, new_snapshot), detected_at=now)
+        changes = enrich_document_changes(db, tender, diff_snapshots(monitor.snapshot, new_snapshot))
+        events = record_events(db, tender, changes, detected_at=now)
     else:
         monitor.snapshot_at = now
     monitor.snapshot = new_snapshot

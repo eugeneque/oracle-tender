@@ -64,10 +64,13 @@ KINDS: dict[str, str] = {
     "APPLICATION_SECURITY": "Обеспечение заявки",  # пп. 30–31
     "PLATFORM_COMMISSION": "Комиссия площадки",  # п. 4
     "CUSTOMER_OBLIGATION": "Обязательства заказчика по объёму",  # п. 95
+    # п. 28 (17.11.2026, раздел 113): обязательное действие поставщика — что сделать, после
+    # какого события, в какой срок и чем подтверждается (уведомление, акт, документ).
+    "SUPPLIER_OBLIGATION": "Обязательное действие поставщика",
 }
 # Виды, которых в договоре бывает несколько (санкции разных видов, гарантия и срок поставки
 # по разной продукции); остальные — одно условие на лот, лишние повторы модели отбрасываются.
-MULTI_KINDS = {"PENALTY", "WARRANTY", "DELIVERY_TERM"}
+MULTI_KINDS = {"PENALTY", "WARRANTY", "DELIVERY_TERM", "SUPPLIER_OBLIGATION"}
 _PRESENCE = {"PRESENT", "NOT_REQUIRED"}
 _DAY_TYPES = {"CALENDAR", "WORKING"}
 _OBLIGATION_MODELS = {"GUARANTEED_VOLUME", "LIMIT_ONLY", "MINIMUM_PLUS_LIMIT"}
@@ -77,7 +80,7 @@ _CONDITIONS_RE = re.compile(
     r"|срок\w*\s+действи|действует\s+до|подписа|заключ\w+\s+(?:договор|контракт)|комисси"
     r"|оператор\w*\s+(?:электронной\s+)?площадк|тариф|максимальн\w+\s+(?:цен|сумм|значени)|лимит"
     r"|цена\s+(?:договора|контракта)|объ[её]м|минимальн|доставк|отгрузк|срок\w*\s+поставк"
-    r"|рабоч\w+\s+дн|календарн|возврат",
+    r"|рабоч\w+\s+дн|календарн|возврат|обязан|уведом",
     re.IGNORECASE,
 )
 
@@ -97,6 +100,7 @@ class ConditionAnswer(pydantic.BaseModel):
     payer: str
     allowed_forms: str
     obligation_model: str
+    result: str
     lot: str
     document: str
     page: str
@@ -150,6 +154,11 @@ _SYSTEM_PROMPT = f"""Ты разбираешь закупочную докуме
 - PLATFORM_COMMISSION — плата оператору площадки: кто платит, тариф (percent, base) и сумма \
 (amount) — сумма только если указана в тексте.
 - SIGNING_DEADLINE — предельный срок подписания договора (term, trigger_event).
+- SUPPLIER_OBLIGATION — каждое обязательное действие поставщика по договору отдельной записью, \
+кроме самой поставки, оплаты и обеспечения (они — свои виды): уведомить о готовности к \
+отгрузке, согласовать график, передать документы, предоставить отчёт, провести обучение и т. п. \
+value — что сделать; trigger_event — после какого события; term — в какой срок; result — чем \
+подтверждается выполнение (уведомление, акт, документ), если сказано.
 Неиспользуемые поля — пустые строки. Отвечай по-русски."""
 
 
@@ -249,6 +258,7 @@ def normalize(answer: ConditionsAnswer) -> dict[str, Any]:
                     "obligation_model": (
                         _enum(item.obligation_model, _OBLIGATION_MODELS) if kind == "CUSTOMER_OBLIGATION" else None
                     ),
+                    "result": _clean(item.result, 300) if kind == "SUPPLIER_OBLIGATION" else None,
                     "lot_number": lot,
                     "document": _clean(item.document),
                     "page": _clean(item.page, 50),

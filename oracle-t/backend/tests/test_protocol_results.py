@@ -69,7 +69,8 @@ def _prot(document=FINAL, **kw) -> ProtocolAnswer:
     base = dict(
         document=document, kind="RESULTS" if final else "FIRST_PARTS", is_final="yes" if final else "no",
         protocol_date="21.12.2026", protocol_number="", lot="1",
-        procedure_outcome="HELD" if final else "IN_PROGRESS", failed_reason="", quote="Признать победителем",
+        procedure_outcome="HELD" if final else "IN_PROGRESS", failed_reason="", amends="no", amended_document="",
+        quote="Признать победителем",
     )
     return ProtocolAnswer(**{**base, **kw})
 
@@ -90,8 +91,9 @@ def _our_part(document=FINAL, **kw) -> ParticipantAnswer:
     return _part(document, **{**base, **kw})
 
 
-def _answer(protocols=None, participants=None) -> ProtocolsAnswer:
+def _answer(protocols=None, participants=None, rounds=None) -> ProtocolsAnswer:
     return ProtocolsAnswer(
+        rounds=rounds or [],
         protocols=protocols if protocols is not None else [_prot(FIRST), _prot()],
         participants=participants if participants is not None else [_part(FIRST), _part(), _our_part(FIRST), _our_part()],
     )

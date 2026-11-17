@@ -63,7 +63,7 @@ from app.models.tender_card import TenderCard
 from app.models.tender_document import TenderDocument
 from app.models.tender_position import TenderPosition
 from app.models.user import User
-from app.services import tender_positions, tender_twins
+from app.services import qualification_service, tender_positions, tender_twins
 from app.services.audit import log_action
 from app.services.tender_key_facts import KeyFact, is_generic_norm, key_facts, priority, split_requirement
 
@@ -701,6 +701,7 @@ def _contract_condition_rows(db: Session, tender: Tender, sections: dict[str, li
             "payer": item.get("payer"),
             "allowed_forms": item.get("allowed_forms"),
             "obligation_model": _OBLIGATION_LABELS.get(item.get("obligation_model") or ""),
+            "result_form": item.get("result"),
             "lot_number": lot,
         }
         evidence = [
@@ -708,7 +709,14 @@ def _contract_condition_rows(db: Session, tender: Tender, sections: dict[str, li
         ]
         # Санкции — всегда на проверку (п. 24 перечня); любое условие без цитаты — тоже.
         review = kind == "PENALTY" or not item.get("quote")
-        section, type_ = ("preparation", "checklist") if kind == "APPLICATION_SECURITY" else ("contract", "contract_condition")
+        section, type_ = (
+            ("preparation", "checklist") if kind == "APPLICATION_SECURITY"
+            # п. 28: «действие → событие → срок → результат» — строка обязательства.
+            else ("contract", "obligation") if kind == "SUPPLIER_OBLIGATION"
+            else ("contract", "contract_condition")
+        )
+        if kind == "SUPPLIER_OBLIGATION":
+            data["action"] = data.pop("condition")
         sections[section].append(
             _row(
                 key,
@@ -852,6 +860,7 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
     # передаются, если только прибор по ним не проходит. Требования к участнику — квалификация
     # в «Подготовке заявки».
     requirement_rows: list[tuple[tuple[int, int, str], tuple[int, int, int], int, dict[str, Any]]] = []
+    company: dict[str, Any] | None = None
     for index, requirement in enumerate(requirements):
         cell = cells.get(requirement.id)
         entry, model = cell if cell else (None, None)
@@ -862,6 +871,12 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
         criticality = _CRITICALITY.get(requirement.criticality)
         key = _key("req", requirement.kind, requirement.position, requirement.normalized_text or requirement.text)
         if requirement.kind == RequirementKind.PARTICIPANT.value:
+            # Вид, порог, период, подтверждение, срок и сверка с «Моей компанией» — кодом по
+            # тексту требования (раздел 113, пп. 9–13). «Соответствует» — только по данным
+            # компании; всё прочее остаётся на проверку.
+            if company is None:
+                company = qualification_service.company_facts(db)
+            assessed = qualification_service.assess(requirement.text, company)
             sections["preparation"].append(
                 _row(
                     key,
@@ -871,11 +886,11 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
                         "requirement": _clip(requirement.text),
                         "criticality": criticality,
                         "blocking": "Да" if requirement.criticality == "critical" else None,
-                        "result": "Нужно проверить подтверждающие документы",
+                        **assessed.data(),
                     },
                     evidence=evidence,
                     updated_at=requirement.created_at,
-                    status=STATUS_REVIEW,
+                    status=STATUS_EXTRACTED if assessed.status in ("meets", "declaration") and evidence else STATUS_REVIEW,
                 )
             )
             continue
@@ -1097,8 +1112,12 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
                 )
             )
 
-    # ФАС: ТЗ под товарный знак конкурента без эквивалента — признак ограничения конкуренции.
-    _brand_lock_signal(lock, sections)
+    # ФАС: ТЗ под товарный знак конкурента без эквивалента — признак ограничения конкуренции,
+    # с уверенностью, сравнением и проектом обоснования жалобы; плюс лоты, история заказчика,
+    # запросы разъяснений, раунды цен и выводы по итогам (раздел 113, `bitrix_extra_rows`).
+    from app.services import bitrix_extra_rows
+
+    bitrix_extra_rows.extra_rows(db, tender, requirements, documents, cells, lock, sections)
 
     # Порядок строк внутри раздела — как собраны; общий предел портала — 5000 строк.
     total = 0
