@@ -372,3 +372,18 @@ def test_positions_change_scoped_to_lot():
         _snap(positions={"1. Счётчик": "10", "1. Счётчик (лот 2)": "7"}),
     )
     assert change["scope"] == "LOT" and change["lot_number"] == "2"
+
+
+def test_procedure_result_row_carries_confidence_and_revision(db_session):
+    tender = _tender(db_session)
+    db_session.add(TenderProtocolResults(tender_id=tender.id, payload={"participants": [], "lots": [{
+        "lot_number": "1", "final": True, "winner": "ООО «Ромашка»", "winner_inn": RIVAL, "quote": "Итоги",
+        "revision_of": "Итоговый", "superseded_documents": ["Итоговый.pdf"],
+        "confidence": {"winner": 0.9, "lot": 0.9, "version": 0.7, "basis": "есть изменённые редакции протокола"},
+    }]}))
+    db_session.flush()
+    sections = {name: [] for name in bitrix_ai_service.SECTIONS}
+    bitrix_ai_service.protocol_rows(db_session, tender, sections)
+    (row,) = sections["participants_prices"]
+    assert row["confidence"] == 0.7 and row["data"]["confidence_version"] == 0.7
+    assert row["data"]["superseded_documents"] == "Итоговый.pdf"

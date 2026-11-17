@@ -784,8 +784,21 @@ def protocol_rows(db: Session, tender: Tender, sections: dict[str, list[dict[str
                     "our_rejection_reason": _clip(lot.get("our_rejection_reason")),
                     "conflicts": "; ".join(conflicts) or None,
                     "document": lot.get("protocol_document"),
+                    # Редакции протокола (п. 84) и уверенность по полям правилом (п. 86, раздел 113).
+                    "revision_of": lot.get("revision_of"),
+                    "superseded_documents": "; ".join(lot.get("superseded_documents") or []) or None,
+                    "confidence_winner": (lot.get("confidence") or {}).get("winner"),
+                    "confidence_price": (lot.get("confidence") or {}).get("price"),
+                    "confidence_result": (lot.get("confidence") or {}).get("result"),
+                    "confidence_lot": (lot.get("confidence") or {}).get("lot"),
+                    "confidence_version": (lot.get("confidence") or {}).get("version"),
+                    "confidence_basis": (lot.get("confidence") or {}).get("basis"),
                 },
                 evidence=_evidence(lot.get("protocol_document"), lot.get("quote")),
+                confidence=min(
+                    (v for k, v in (lot.get("confidence") or {}).items() if k != "basis" and isinstance(v, (int, float))),
+                    default=None,
+                ),
                 status=STATUS_REVIEW if review else STATUS_EXTRACTED,
             )
         )
