@@ -226,6 +226,33 @@ class WinPercentageOut(BaseModel):
     calculated_at: datetime
 
 
+class ComplianceGroupResultOut(BaseModel):
+    """Итог одного производителя по одной позиции закупки (17.11.2026)."""
+
+    manufacturer_id: uuid.UUID
+    percentage: Decimal
+    verdict: str
+    requirements_total: int
+    requirements_scored: int
+
+
+class ComplianceGroupOut(BaseModel):
+    """Позиция закупки в матрице: свои требования и свой итог по каждому производителю.
+
+    17.11.2026: в закупке из нескольких изделий (однофазный Split, трёхфазный Split, щитовые…)
+    одна общая таблица смешивала требования разных приборов, а итог был один на лот. Теперь
+    матрица разбита по позициям спецификации; `key = "general"` — требования ко всем
+    позициям сразу."""
+
+    key: str
+    label: str
+    position_no: str | None = None
+    quantity_text: str | None = None
+    unit: str | None = None
+    requirement_ids: list[uuid.UUID]
+    results: list[ComplianceGroupResultOut]
+
+
 class ComplianceMatrixOut(BaseModel):
     """Матрица целиком — в том виде, в каком её рисует карточка тендера (раздел 5.6 ТЗ):
     строки-требования, колонки-производители, проценты снизу."""
@@ -233,6 +260,8 @@ class ComplianceMatrixOut(BaseModel):
     requirements: list[RequirementOut]
     entries: list[ComplianceEntryOut]
     win_percentages: list[WinPercentageOut]
+    # Разбивка по позициям закупки; пусто, если позиция одна или требования не привязаны.
+    groups: list[ComplianceGroupOut] = Field(default_factory=list)
 
 
 class RelevanceUpdate(BaseModel):

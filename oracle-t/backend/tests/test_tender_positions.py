@@ -232,3 +232,38 @@ def test_requirement_rows_grouped_by_position(db_session):
     # Не сведённая подпись — как есть, без ссылки на строку позиции.
     assert rows[5]["position"] == "Поставка высоковольтных приборов учёта"
     assert "position_key" not in rows[5]
+
+
+def test_compliance_matrix_split_by_positions(db_session):
+    """17.11.2026: матрица разбита по позициям — у каждой свой итог производителя."""
+
+    from app.models.analysis import ComplianceMatrixEntry, Requirement
+    from app.models.manufacturer import Manufacturer
+    from app.services.analysis_service import get_compliance_matrix
+
+    tender = _tender(db_session, None)
+    _spec(db_session, tender, ("1", "Счётчик однофазный Split"), ("2", "Счётчик трёхфазный Split"))
+    maker = Manufacturer(legal_name="ООО Тест", brand_name="Тест")
+    db_session.add(maker)
+    db_session.flush()
+    for text, position, status in [
+        ("Номинальное напряжение 230 В", "1. Счётчик однофазный Split", "meets"),
+        ("Номинальное напряжение 400 В", "2. Счётчик трёхфазный Split", "not_meets"),
+        ("Межповерочный интервал 16 лет", None, "meets"),
+    ]:
+        req = Requirement(tender_id=tender.id, text=text, position=position, criticality="critical", kind="product")
+        db_session.add(req)
+        db_session.flush()
+        db_session.add(
+            ComplianceMatrixEntry(
+                tender_id=tender.id, requirement_id=req.id, manufacturer_id=maker.id, status=status,
+                source="rule", confidence=Decimal("0.9"),
+            )
+        )
+    db_session.flush()
+
+    matrix = get_compliance_matrix(db_session, tender)
+    by_label = {group.label: group for group in matrix.groups}
+    assert [group.key for group in matrix.groups][0] == "general"
+    assert by_label["Счётчик однофазный Split"].results[0].verdict == "passes"
+    assert by_label["Счётчик трёхфазный Split"].results[0].verdict == "fails"

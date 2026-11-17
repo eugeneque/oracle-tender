@@ -1,7 +1,7 @@
 import { Fragment, useMemo, useState } from "react";
 import { AlertTriangle, BookOpen, ChevronDown, ChevronRight } from "lucide-react";
 
-import type { ComplianceEntry, ComplianceMatrix } from "../../api/types";
+import type { ComplianceEntry, ComplianceGroup, ComplianceMatrix, Requirement } from "../../api/types";
 import { ComplianceVerdictReview } from "./ComplianceVerdictReview";
 import { ParameterChip, PositionChip } from "./TenderRequirementsTab";
 import {
@@ -201,6 +201,56 @@ function MethodologyHint() {
   );
 }
 
+/** Заголовок секции-позиции: название, количество и итог каждого производителя по этой
+ * позиции (17.11.2026). Строка закреплена слева так же, как столбец требований. */
+function GroupHeaderRow({
+  group,
+  manufacturers,
+  onlyOne,
+}: {
+  group: ComplianceGroup;
+  manufacturers: { id: string; name: string; isMirtek: boolean }[];
+  onlyOne: boolean;
+}) {
+  const results = new Map(group.results.map((item) => [item.manufacturer_id, item]));
+  const quantity = group.quantity_text ? `${group.quantity_text}${group.unit ? ` ${group.unit}` : ""}` : null;
+  return (
+    <tr className={onlyOne ? "" : "bg-white/[0.03]"}>
+      <td className="sticky left-0 z-10 min-w-[320px] max-w-[440px] border-b border-r border-white/[0.08] bg-zinc-800 px-4 py-2.5 align-top">
+        <div className="text-[13px] font-medium leading-snug text-zinc-100">
+          {group.key === "general"
+            ? "Общие требования ко всем позициям"
+            : `${group.position_no ? `Поз. ${group.position_no}. ` : ""}${group.label}`}
+        </div>
+        <div className="mt-0.5 text-[11px] text-zinc-500">
+          {quantity ? `${quantity} · ` : ""}
+          {group.requirement_ids.length} требований
+        </div>
+      </td>
+      {manufacturers.map((manufacturer) => {
+        const result = results.get(manufacturer.id);
+        const percent = result ? percentValue(result.percentage) : null;
+        return (
+          <td
+            key={manufacturer.id}
+            className="border-b border-white/[0.08] bg-zinc-800/60 px-2 py-2.5 text-center align-middle"
+            title={result ? `${manufacturer.name}: ${VERDICT_LABELS[result.verdict]}` : undefined}
+          >
+            {result && percent !== null && (
+              <>
+                <span className={`block text-xs font-semibold tabular-nums ${percentTextClass(percent)}`}>{percent}%</span>
+                <span className={`mt-0.5 inline-block rounded px-1 text-[10px] ${VERDICT_CLASSES[result.verdict]}`}>
+                  {VERDICT_LABELS[result.verdict]}
+                </span>
+              </>
+            )}
+          </td>
+        );
+      })}
+    </tr>
+  );
+}
+
 export function TenderComplianceTab({
   tenderId,
   matrix,
@@ -217,6 +267,18 @@ export function TenderComplianceTab({
   requirementsCount: number | null;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Выбранная позиция закупки: null — все, секциями одна под другой (17.11.2026).
+  const [groupKey, setGroupKey] = useState<string | null>(null);
+
+  const groups = matrix.groups ?? [];
+  const visibleGroups = useMemo(
+    () => (groupKey ? groups.filter((group) => group.key === groupKey) : groups),
+    [groups, groupKey],
+  );
+  const requirementById = useMemo(
+    () => new Map(matrix.requirements.map((item) => [item.id, item])),
+    [matrix],
+  );
 
   const manufacturers = useMemo(() => {
     const seen = new Map<string, { id: string; name: string; isMirtek: boolean; percent: number | null }>();
@@ -281,6 +343,18 @@ export function TenderComplianceTab({
     );
   }
 
+  // Секции таблицы: без разбивки — одна без заголовка; иначе по позициям.
+  const sections: { key: string; group: ComplianceGroup | null; requirements: Requirement[] }[] =
+    groups.length === 0
+      ? [{ key: "all", group: null, requirements: matrix.requirements }]
+      : visibleGroups.map((group) => ({
+          key: group.key,
+          group,
+          requirements: group.requirement_ids
+            .map((id) => requirementById.get(id))
+            .filter((item): item is Requirement => !!item),
+        }));
+
   const reviewCount = matrix.entries.filter((entry) => entry.needs_human_review).length;
 
   return (
@@ -294,6 +368,41 @@ export function TenderComplianceTab({
       </div>
 
       <MethodologyHint />
+
+      {groups.length > 0 && (
+        <div className="mb-3">
+          <div className="mb-1.5 text-xs font-medium text-zinc-400">
+            Закупка из {groups.filter((group) => group.key !== "general").length} позиций — итог по
+            каждой считается отдельно
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              onClick={() => setGroupKey(null)}
+              className={`rounded-lg border px-2.5 py-1 text-xs ${
+                groupKey === null
+                  ? "border-indigo-500/40 bg-indigo-500/15 text-indigo-200"
+                  : "border-white/[0.08] text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              Все позиции
+            </button>
+            {groups.map((group) => (
+              <button
+                key={group.key}
+                onClick={() => setGroupKey(group.key)}
+                title={group.label}
+                className={`max-w-[260px] truncate rounded-lg border px-2.5 py-1 text-xs ${
+                  groupKey === group.key
+                    ? "border-indigo-500/40 bg-indigo-500/15 text-indigo-200"
+                    : "border-white/[0.08] text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                {group.key === "general" ? "Общие" : `${group.position_no ? `Поз. ${group.position_no} · ` : ""}${group.label}`}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {reviewCount > 0 && (
         <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-xs text-amber-300">
@@ -344,7 +453,16 @@ export function TenderComplianceTab({
             </tr>
           </thead>
           <tbody>
-            {matrix.requirements.map((requirement) => {
+            {sections.map((section) => (
+              <Fragment key={section.key}>
+                {section.group && (
+                  <GroupHeaderRow
+                    group={section.group}
+                    manufacturers={manufacturers}
+                    onlyOne={groupKey !== null}
+                  />
+                )}
+                {section.requirements.map((requirement) => {
               const row = byRequirement.get(requirement.id);
               const isExpanded = expanded === requirement.id;
               return (
@@ -443,6 +561,8 @@ export function TenderComplianceTab({
                 </Fragment>
               );
             })}
+              </Fragment>
+            ))}
           </tbody>
         </table>
       </div>

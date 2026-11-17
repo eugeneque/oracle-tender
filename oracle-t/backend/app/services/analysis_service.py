@@ -28,6 +28,8 @@ from app.models.tender import Tender
 from app.models.user import User
 from app.schemas.tender import (
     ComplianceEntryOut,
+    ComplianceGroupOut,
+    ComplianceGroupResultOut,
     ComplianceMatrixOut,
     RequirementOut,
     WinPercentageOut,
@@ -130,7 +132,102 @@ def get_compliance_matrix(db: Session, tender: Tender) -> ComplianceMatrixOut:
         requirements=[RequirementOut.model_validate(requirement) for requirement in requirements],
         entries=entries,
         win_percentages=percentages,
+        groups=_position_groups(db, tender, requirements, entries),
     )
+
+
+def _position_groups(
+    db: Session,
+    tender: Tender,
+    requirements: list[Requirement],
+    entries: list[ComplianceEntryOut],
+) -> list[ComplianceGroupOut]:
+    """Матрица по позициям закупки (17.11.2026).
+
+    Требование относится к строке спецификации по подписи `Requirement.position`
+    (`tender_positions.match_position`); не сведённая подпись — своя группа по ключу
+    `position_key`; без подписи — «Общие требования». Итог производителя по группе — той же
+    формулой, что и по всему лоту (`calculate_percentage`, `decide_verdict`), но только по
+    требованиям группы: «проходит позицию 3» и «не проходит позицию 5» — разные ответы.
+    Групп меньше двух — разбивать нечего, возвращаем пусто."""
+
+    from app.services.compliance_service import (
+        RequirementVerdict,
+        calculate_percentage,
+        decide_verdict,
+    )
+    from app.services.lot_position import position_key
+    from app.services.tender_positions import list_positions, match_position
+
+    positions = list_positions(db, tender)
+    buckets: dict[str, list[Requirement]] = {}
+    labels: dict[str, tuple[str, str | None, str | None, str | None]] = {}
+    order: list[str] = []
+    for requirement in requirements:
+        matched = match_position(requirement.position, positions) if positions else None
+        if matched is not None:
+            key = f"pos:{matched.id}"
+            labels.setdefault(key, (matched.name, matched.position_no, matched.quantity_text or (
+                f"{matched.quantity:f}".rstrip("0").rstrip(".") if matched.quantity is not None else None
+            ), matched.unit))
+        elif position_key(requirement.position):
+            key = f"label:{position_key(requirement.position)}"
+            labels.setdefault(key, (" ".join((requirement.position or "").split()), None, None, None))
+        else:
+            key = "general"
+        buckets.setdefault(key, []).append(requirement)
+    specific = [key for key in buckets if key != "general"]
+    if len(specific) < 2:
+        return []
+
+    spec_order = {f"pos:{item.id}": index for index, item in enumerate(positions)}
+    specific.sort(key=lambda key: (spec_order.get(key, len(spec_order)), key))
+    order = (["general"] if "general" in buckets else []) + specific
+
+    by_cell = {(entry.requirement_id, entry.manufacturer_id): entry for entry in entries}
+    manufacturer_ids = sorted({entry.manufacturer_id for entry in entries}, key=str)
+
+    groups: list[ComplianceGroupOut] = []
+    for key in order:
+        items = buckets[key]
+        results: list[ComplianceGroupResultOut] = []
+        for manufacturer_id in manufacturer_ids:
+            verdicts = {}
+            for index, requirement in enumerate(items, start=1):
+                entry = by_cell.get((requirement.id, manufacturer_id))
+                if entry is None:
+                    continue
+                verdicts[index] = RequirementVerdict(
+                    number=index,
+                    status=entry.status,
+                    source=entry.source or "",
+                    explanation="",
+                    confidence=float(entry.confidence or 0),
+                )
+            percentage, scored = calculate_percentage(items, verdicts)
+            verdict, _reason = decide_verdict(items, verdicts)
+            results.append(
+                ComplianceGroupResultOut(
+                    manufacturer_id=manufacturer_id,
+                    percentage=percentage,
+                    verdict=verdict,
+                    requirements_total=len(items),
+                    requirements_scored=scored,
+                )
+            )
+        label, number, quantity, unit = labels.get(key, ("Общие требования ко всем позициям", None, None, None))
+        groups.append(
+            ComplianceGroupOut(
+                key=key,
+                label=label,
+                position_no=number,
+                quantity_text=quantity,
+                unit=unit,
+                requirement_ids=[item.id for item in items],
+                results=results,
+            )
+        )
+    return groups
 
 
 def attach_analysis_fields(

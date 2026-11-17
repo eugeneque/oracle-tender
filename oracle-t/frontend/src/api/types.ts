@@ -1072,10 +1072,33 @@ export interface WinPercentageRow {
 
 export type WinVerdictCode = "passes" | "caveats" | "fails" | "unknown";
 
+/** Итог производителя по одной позиции закупки (17.11.2026). */
+export interface ComplianceGroupResult {
+  manufacturer_id: string;
+  percentage: string;
+  verdict: WinVerdictCode;
+  requirements_total: number;
+  requirements_scored: number;
+}
+
+/** Позиция закупки в матрице: свои требования и свой итог по каждому производителю.
+ *  `key === "general"` — требования ко всем позициям сразу. */
+export interface ComplianceGroup {
+  key: string;
+  label: string;
+  position_no: string | null;
+  quantity_text: string | null;
+  unit: string | null;
+  requirement_ids: string[];
+  results: ComplianceGroupResult[];
+}
+
 export interface ComplianceMatrix {
   requirements: Requirement[];
   entries: ComplianceEntry[];
   win_percentages: WinPercentageRow[];
+  /** Разбивка по позициям; пусто, если позиция одна. */
+  groups?: ComplianceGroup[];
 }
 
 /**
