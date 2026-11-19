@@ -1,5 +1,6 @@
 import {
   ArrowRight,
+  BookOpen,
   ChevronRight,
   History,
   LogOut,
@@ -331,6 +332,18 @@ export function AccountMenu({
               </div>
 
               {divider}
+
+              {/* Сова Wiki (19.11.2026): гайды, разбор проблем и описание API. Над «Выйти» и
+                  с акцентной подложкой, чтобы её находили без подсказки. */}
+              <Link
+                to="/wiki"
+                onClick={() => setIsOpen(false)}
+                className="group/item mb-0.5 flex h-10 items-center gap-3 rounded-xl bg-indigo-500/10 px-3 text-sm font-medium text-indigo-300 ring-1 ring-inset ring-indigo-400/20 transition-[color,background-color,transform] duration-200 hover:bg-indigo-500/15 hover:text-indigo-200 active:scale-[0.98]"
+              >
+                <BookOpen size={17} className="shrink-0" />
+                <span className="flex-1">Сова Wiki</span>
+                <ArrowRight size={15} className="shrink-0 opacity-60 transition-transform duration-200 group-hover/item:translate-x-0.5" />
+              </Link>
 
               <button
                 onClick={handleLogout}

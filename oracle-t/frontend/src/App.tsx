@@ -19,12 +19,17 @@ import { SystemUpdatePage } from "./pages/SystemUpdate";
 import { TenderFullPage } from "./pages/TenderFull";
 import { TendersPage } from "./pages/Tenders";
 import { UsersPage } from "./pages/Users";
+import { WikiArticlePage, WikiPage } from "./pages/Wiki";
 
 export default function App() {
   return (
     <AuthProvider>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        {/* Сова Wiki (19.11.2026) — база знаний со своей шапкой, вне каркаса с боковой панелью;
+            открыта любой роли, но только вошедшему. */}
+        <Route path="/wiki" element={<ProtectedRoute><WikiPage /></ProtectedRoute>} />
+        <Route path="/wiki/:slug" element={<ProtectedRoute><WikiArticlePage /></ProtectedRoute>} />
         {/* Каркас с меню — общий для всех страниц и не пересоздаётся при переходах. */}
         <Route
           element={
