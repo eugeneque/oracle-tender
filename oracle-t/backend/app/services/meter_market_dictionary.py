@@ -28,6 +28,7 @@ from app.models.meter_market import (
     TypeReviewStatus,
 )
 from app.models.user import User, UserRole
+from app.services import meter_market_rules as rules
 from app.services.meter_market_normalize import (
     ModificationMatcher,
     clean_text,
@@ -406,9 +407,21 @@ def remap_auto(db: Session, type_id: int | None = None, *, recheck: bool = False
         where += " AND type_id = :t"
         params["t"] = type_id
     updates = []
+    ruled_updates = []
+    numbers = dict(db.execute(text("SELECT id, mit_number FROM meter_market_types")).all())
     for variant_id, variant_type, key, raw, current in db.execute(
         text(f"SELECT id, type_id, norm_key, raw, modification_id FROM meter_market_variants WHERE {where}"), params
     ).all():
+        # Правила аналитика (i-prom, 19.11.2026) главнее шаблонов; привязка — как ручная.
+        ruled = next(
+            (by_name[(variant_type, modification_key(n))] for n in rules.rule_candidates(numbers.get(variant_type), raw)
+             if (variant_type, modification_key(n)) in by_name),
+            None,
+        )
+        if ruled is not None:
+            if ruled != current:
+                ruled_updates.append({"m": ruled, "v": variant_id})
+            continue
         if current is None:
             mod_id = known.get((variant_type, key)) or matcher.match(variant_type, key, raw)
         elif (variant_type, key) in manual_keys:
@@ -423,5 +436,9 @@ def remap_auto(db: Session, type_id: int | None = None, *, recheck: bool = False
         db.execute(
             text("UPDATE meter_market_variants SET modification_id = :m, mapped_by = 'auto' WHERE id = :v"), updates
         )
+    if ruled_updates:
+        db.execute(
+            text("UPDATE meter_market_variants SET modification_id = :m, mapped_by = 'manual' WHERE id = :v"), ruled_updates
+        )
     db.flush()
-    return len(updates)
+    return len(updates) + len(ruled_updates)

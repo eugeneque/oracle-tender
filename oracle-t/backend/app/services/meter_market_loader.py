@@ -49,6 +49,7 @@ from app.core.config import get_settings
 from app.db.session import engine
 from app.models.log import LogLevel
 from app.services.audit import log_action
+from app.services import meter_market_rules as rules
 from app.services.meter_market_normalize import ModificationMatcher, modification_key
 
 COMPONENT = "meter_market"
@@ -328,6 +329,7 @@ def _walk(fh: IO[bytes], offset: int, archive: IO[bytes]) -> Iterator[tuple[str,
 @dataclass
 class _Caches:
     types: dict[str, int] = field(default_factory=dict)
+    numbers: dict[int, str] = field(default_factory=dict)
     variants: dict[tuple[int, str], int] = field(default_factory=dict)
     auto_map: dict[tuple[int, str], int] = field(default_factory=dict)
     orgs: dict[str, int] = field(default_factory=dict)
@@ -341,6 +343,7 @@ def _load_caches(conn: Connection) -> _Caches:
     caches = _Caches()
     for number, type_id, title in conn.execute(text("SELECT mit_number, id, title FROM meter_market_types")):
         caches.types[number] = type_id
+        caches.numbers[type_id] = number
         if not title:
             caches.untitled.add(number)
     for vid, type_id, raw, key, mod_id in conn.execute(
@@ -387,21 +390,39 @@ def _type_id(conn: Connection, caches: _Caches, row: list[str]) -> int | None:
         {"n": number, "t": title.strip() or None, "no": row[_IDX["mit_notation"]].strip() or None},
     ).scalar_one()
     caches.types[number] = type_id
+    caches.numbers[type_id] = number
     return type_id
 
 
-def _variant_id(conn: Connection, caches: _Caches, type_id: int, raw: str) -> int:
+def _variant_id(conn: Connection, caches: _Caches, type_id: int, raw: str, serial: str | None = None) -> int:
+    number = caches.numbers.get(type_id)
+    # Поверки «Нет модификации» с буквой U в заводском номере — выпуск «Умного учёта» (19.11.2026).
+    raw = rules.split_raw(number, raw, serial) or raw
     variant_id = caches.variants.get((type_id, raw))
     if variant_id is not None:
         return variant_id
     key = modification_key(raw)
-    mod_id = caches.auto_map.get((type_id, key)) or caches.matcher.match(type_id, key, raw)
+    mod_id = None
+    by = "auto"
+    if raw.endswith(rules.SMART_UNIT_SUFFIX):
+        mod_id = caches.auto_map.get((type_id, modification_key(rules.SMART_UNIT_MOD)))
+        by = "manual"
+    else:
+        # Правила аналитика (i-prom) главнее шаблонов и ИИ: ложная привязка хуже честного «не размечено».
+        for name in rules.rule_candidates(number, raw):
+            mod_id = caches.auto_map.get((type_id, modification_key(name)))
+            if mod_id:
+                by = "manual"
+                break
+    if mod_id is None:
+        mod_id = caches.auto_map.get((type_id, key)) or caches.matcher.match(type_id, key, raw)
+        by = "auto"
     variant_id = conn.execute(
         text(
-            "INSERT INTO meter_market_variants (type_id, raw, norm_key, modification_id, mapped_by) "
-            "VALUES (:t, :r, :k, :m, :b) RETURNING id"
+            "INSERT INTO meter_market_variants (type_id, raw, norm_key, modification_id, mapped_by, excluded_reason) "
+            "VALUES (:t, :r, :k, :m, :b, :x) RETURNING id"
         ),
-        {"t": type_id, "r": raw, "k": key, "m": mod_id, "b": "auto" if mod_id else None},
+        {"t": type_id, "r": raw, "k": key, "m": mod_id, "b": by if mod_id else None, "x": rules.gas_reason(raw)},
     ).scalar_one()
     caches.variants[(type_id, raw)] = variant_id
     return variant_id
@@ -509,7 +530,7 @@ def apply_csv(
         annulled = bool(row[_IDX["ver_date_end"]].strip())
         batch[global_id] = (
             global_id,
-            _variant_id(conn, caches, type_id, row[_IDX["mi_modification"]]),
+            _variant_id(conn, caches, type_id, row[_IDX["mi_modification"]], row[_IDX["mi_number"]]),
             _org_id(conn, caches, row[_IDX["org_title"]]),
             row[_IDX["mi_number"]].strip()[:64] or None,
             verified,
@@ -546,6 +567,8 @@ def rebuild_monthly(conn: Connection, months: set[date] | None = None) -> None:
             "INSERT INTO meter_verification_monthly (variant_id, month, count) "
             "SELECT variant_id, date_trunc('month', verification_date)::date, count(*) "
             f"FROM meter_verifications WHERE applicable AND NOT annulled {where} "
+            # Написания с причиной исключения (газовые счётчики, 19.11.2026) в агрегат не идут.
+            "AND variant_id NOT IN (SELECT id FROM meter_market_variants WHERE excluded_reason IS NOT NULL) "
             "GROUP BY 1, 2"
         ),
         params,

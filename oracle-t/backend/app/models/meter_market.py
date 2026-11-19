@@ -238,6 +238,9 @@ class MeterMarketVariant(Base):
         ForeignKey("meter_market_modifications.id", ondelete="SET NULL"), nullable=True, index=True
     )
     mapped_by: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Причина, по которой написание вообще не учитывается (19.11.2026): счётчики газа под номером
+    # описания типа электросчётчика. Поверки остаются в сырой таблице, в агрегат не попадают.
+    excluded_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
