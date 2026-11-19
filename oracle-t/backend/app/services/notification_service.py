@@ -98,6 +98,12 @@ def to_out(db: Session, settings: NotificationSettings) -> NotificationSettingsO
         trigger_tender_changed=settings.trigger_tender_changed,
         ai_score_threshold=settings.ai_score_threshold,
         deadline_days_threshold=settings.deadline_days_threshold,
+        imap_enabled=settings.imap_enabled,
+        imap_host=settings.imap_host,
+        imap_port=settings.imap_port,
+        imap_folder=settings.imap_folder,
+        imap_checked_at=settings.imap_checked_at,
+        imap_last_error=settings.imap_last_error,
         updated_at=settings.updated_at if settings.smtp_host else None,
         updated_by=updated_by_user.full_name if updated_by_user else None,
     )
@@ -146,6 +152,10 @@ def update_settings(
         "trigger_tender_changed",
         "ai_score_threshold",
         "deadline_days_threshold",
+        "imap_enabled",
+        "imap_host",
+        "imap_port",
+        "imap_folder",
     )
     for field in simple_fields:
         if field in fields_set:

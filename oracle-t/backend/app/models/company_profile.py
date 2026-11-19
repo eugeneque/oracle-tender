@@ -95,6 +95,10 @@ class CompanyProfile(Base):
     licenses: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     # [{work_type, customer, volume, year, description}] — вход измерения Task.
     past_projects: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # {staff: [{role, count, qualification}], facilities: [{kind, address, area}],
+    # equipment: [{name, count, note}]} — ресурсы для сверки квалификационных требований
+    # (19.11.2026, раздел 115): персонал, склады и оборудование в заявках требуют чаще лицензий.
+    resources: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     # Реквизиты и бланк нужны вкладке «Заявка» (раздел 5.6 ТЗ). Она делается в последнюю
     # очередь, но поля заводятся сразу: профиль заполняют один раз и вручную, и просить
     # заказчика вернуться к форме второй раз — лишняя работа для него.

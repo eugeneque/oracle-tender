@@ -197,7 +197,36 @@ def build_snapshot(db: Session, tender: Tender) -> dict[str, Any]:
         "card_changes": eis_card_tables.documents_map(card_payload, "changes"),
         "positions": positions,
         "doc_security": _doc_security(db, tender),
+        **_registry_snapshot(db, tender),
     }
+
+
+def _registry_snapshot(db: Session, tender: Tender) -> dict[str, Any]:
+    """Жалобы и договоры из реестров ЕИС (раздел 115): только если реестры уже читались —
+    иначе пустой блок выглядел бы как «жалоб нет», а первое чтение — как новые жалобы."""
+
+    from app.services import eis_registry_service
+
+    data = eis_registry_service.get(db, tender)
+    if data["registry_checked_at"] is None:
+        return {}
+    complaints = {
+        item["number"]: {
+            "status": item.get("status"), "outcome": item.get("outcome"), "prescription": item.get("prescription"),
+            "hearing_at": item.get("hearing_at"), "decision": item.get("decision_number"),
+            "applicant": item.get("applicant"), "control_body": item.get("control_body"), "placed": item.get("placed"),
+        }
+        for item in data["complaints"]
+    }
+    contracts = {}
+    for item in data["contracts"]:
+        versions = item.get("versions") or []
+        last = versions[-1] if versions else item
+        contracts[item["number"]] = {
+            "version": last.get("version") or 1, "price": last.get("price"), "execution_end": last.get("execution_end"),
+            "change_reason": last.get("change_reason"), "change_date": last.get("change_date"), "placed": last.get("placed"),
+        }
+    return {"registry_complaints": complaints, "registry_contracts": contracts}
 
 
 def _doc_security(db: Session, tender: Tender) -> dict[str, str]:
@@ -566,6 +595,54 @@ def _card_changes(old: dict[str, Any], new: dict[str, Any], found: list[dict[str
                     old_ds.get(key), new_ds[key], data={"security_kind": kind},
                     note="По разбору документации (новая редакция); поля карточки ЕИС могли не измениться."))
 
+    # Реестр жалоб ЕИС (пп. 41–47): новая жалоба, назначено рассмотрение, итог, предписание.
+    if "registry_complaints" in old:
+        before_all = old.get("registry_complaints") or {}
+        for number, item in (new.get("registry_complaints") or {}).items():
+            prev = before_all.get(number)
+            common = {"source_document": f"Реестр жалоб ЕИС, жалоба № {number}"}
+            if prev is None:
+                out.append(_change(
+                    "PROCEDURE_STATUS_CHANGED", f"fas:{number}:filed", f"Подана жалоба № {number}", None,
+                    f"{item.get('applicant') or 'Заявитель не указан'} → {item.get('control_body') or 'орган контроля'}",
+                    data={"fas_event": "COMPLAINT", "complaint_number": number}, effective_at=item.get("placed"),
+                    note=f"Статус в реестре: {item.get('status') or 'не указан'}.", **common))
+            if item.get("hearing_at") and item.get("hearing_at") != (prev or {}).get("hearing_at"):
+                out.append(_change(
+                    "PROCEDURE_STATUS_CHANGED", f"fas:{number}:hearing", f"Назначено рассмотрение жалобы № {number}",
+                    (prev or {}).get("hearing_at"), item["hearing_at"],
+                    data={"fas_event": "HEARING", "complaint_number": number}, **common))
+            if item.get("outcome") and item.get("outcome") != (prev or {}).get("outcome"):
+                out.append(_change(
+                    "PROCEDURE_STATUS_CHANGED", f"fas:{number}:decision", f"Решение по жалобе № {number}: {item['outcome']}",
+                    (prev or {}).get("outcome"), item["outcome"],
+                    data={"fas_event": "DECISION", "complaint_number": number, "decision_number": item.get("decision")}, **common))
+            if item.get("prescription") is True and (prev or {}).get("prescription") is not True:
+                out.append(_change(
+                    "PROCEDURE_STATUS_CHANGED", f"fas:{number}:prescription", f"Выдано предписание по жалобе № {number}",
+                    None, "Предписание выдано", data={"fas_event": "PRESCRIPTION", "complaint_number": number}, **common))
+
+    # Реестр договоров ЕИС (пп. 90, 94): новая редакция сведений — что изменилось.
+    if "registry_contracts" in old:
+        before_all = old.get("registry_contracts") or {}
+        for number, item in (new.get("registry_contracts") or {}).items():
+            prev = before_all.get(number)
+            if prev is None or item.get("version") == prev.get("version"):
+                continue
+            diff = [
+                {"key": field, "field": label, "old_value": prev.get(field), "new_value": item.get(field)}
+                for field, label in (("price", "Цена договора"), ("execution_end", "Окончание исполнения"))
+                if prev.get(field) != item.get(field)
+            ]
+            out.append(_change(
+                "CONTRACT_CHANGED", f"registry-contract:{number}",
+                f"Договор № {number}: {item.get('change_reason') or 'новая редакция сведений'}",
+                f"Редакция {prev.get('version')}", f"Редакция {item.get('version')}",
+                source_document=f"Реестр договоров ЕИС, № {number}", source_version=str(item.get("version")),
+                effective_at=item.get("placed"), data={"changes": diff, "change_reason": item.get("change_reason")},
+                note=("Изменились: " + ", ".join(d["field"] for d in diff) + ".") if diff
+                else "Цена и срок исполнения не изменились."))
+
     # Позиции спецификации (пп. 53, 55): состав и количество после нового разбора документации.
     old_pos, new_pos = old.get("positions"), new.get("positions")
     if old_pos and new_pos and old_pos != new_pos:
@@ -660,6 +737,12 @@ def _refresh_protocols(db: Session, tender: Tender) -> None:
     refresh_if_new(db, tender)
 
 
+def _refresh_registries(db: Session, tender: Tender) -> None:
+    from app.services import eis_registry_service
+
+    eis_registry_service.refresh(db, tender)
+
+
 def refresh_tender(db: Session, tender: Tender) -> list[str]:
     """Заново собирает данные закупки. Сбой одного источника не отменяет остальные —
     возвращает тексты ошибок."""
@@ -672,6 +755,8 @@ def refresh_tender(db: Session, tender: Tender) -> list[str]:
         # Новый протокол — сразу разбор: иначе слепок не увидит смену нашего результата до
         # следующего ручного анализа. Модель вызывается только при новом файле протокола.
         ("протоколы", lambda: _refresh_protocols(db, tender)),
+        # Реестры жалоб и договоров ЕИС и история заказчика (раздел 115) — со своим интервалом.
+        ("реестры ЕИС", lambda: _refresh_registries(db, tender)),
     ):
         try:
             step()
@@ -881,6 +966,42 @@ def _bank_guarantee_notes(db: Session, tender: Tender, changes: list[dict[str, A
                     " Изменение касается сроков, обеспечение договора допускается банковской гарантией — "
                     "проверьте, требуется ли продление гарантии."
                 )).strip()
+    _guarantee_coverage_notes(db, tender, changes)
+
+
+def _guarantee_coverage_notes(db: Session, tender: Tender, changes: list[dict[str, Any]]) -> None:
+    """Выданные гарантии (раздел 115): срок подачи или исполнения сдвинулся — покрывает ли
+    срок действия внесённой гарантии новую дату. Ответ точный, а не «проверьте»."""
+
+    from app.services import guarantee_service
+
+    guarantees = guarantee_service.list_for(db, tender)
+    if not guarantees:
+        return
+    for change in changes:
+        if change["event_type"] == "APPLICATION_END_CHANGED" and change.get("new_value"):
+            kind, required, margin = "APPLICATION", change["new_value"], timedelta(0)
+        elif change["event_type"] == "CONTRACT_CHANGED" and any(
+            c.get("key") == "execution_end" for c in (change.get("data") or {}).get("changes") or []
+        ):
+            new_end = next(c["new_value"] for c in change["data"]["changes"] if c.get("key") == "execution_end")
+            kind, required, margin = "CONTRACT", new_end, guarantee_service.CONTRACT_MARGIN
+        else:
+            continue
+        for item in (g for g in guarantees if g.kind == kind):
+            result = guarantee_service.coverage(item, required, margin=margin)
+            if result["covered"] is None:
+                continue
+            change["data"] = {
+                **(change.get("data") or {}),
+                "bank_guarantee_check": kind,
+                "guarantee_extension_required": not result["covered"],
+            }
+            label = f"Гарантия{(' № ' + item.number) if item.number else ''}"
+            change["note"] = ((change.get("note") or "") + " " + (
+                f"{label}: {result['basis']} — требуется продление." if not result["covered"]
+                else f"{label}: {result['basis']} — новый срок покрывает."
+            )).strip()
 
 
 def now_utc() -> datetime:

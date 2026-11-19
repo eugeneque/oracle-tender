@@ -54,6 +54,7 @@ import { TenderRegistryBlock } from "./tender-detail/TenderRegistryBlock";
 import { TenderExtraTab } from "./tender-detail/TenderExtraTab";
 import { TenderHistoryTab } from "./tender-detail/TenderHistoryTab";
 import { TenderEventsJournal, newEventsDot } from "./tender-detail/TenderEventsJournal";
+import { TenderGuaranteesRegistry } from "./tender-detail/TenderGuaranteesRegistry";
 import { TenderOverviewTab } from "./tender-detail/TenderOverviewTab";
 import { PositionsSummary, TenderRequirementsTab } from "./tender-detail/TenderRequirementsTab";
 import { TagChip } from "./tags/TagChip";
@@ -1356,6 +1357,7 @@ export function TenderDetailPanel({
         )}
 
         {activeTab === "events" && <TenderEventsJournal state={monitoring} />}
+        {activeTab === "events" && <TenderGuaranteesRegistry tenderId={tender.id} />}
 
         {(activeTab === "lots" ||
           activeTab === "changes" ||

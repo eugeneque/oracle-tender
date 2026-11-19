@@ -166,13 +166,54 @@ def company_facts(db: Session) -> dict[str, Any]:
     licenses: list[str] = []
     projects = 0
     years = 0
+    staff: list[dict] = []
+    facilities: list[dict] = []
+    equipment: list[dict] = []
+    headcount = 0
+    revenue = None
     for profile in db.scalars(select(CompanyProfile)):
         for item in profile.licenses or []:
             if isinstance(item, dict) and item.get("name"):
                 licenses.append(str(item["name"]))
         projects += len(profile.past_projects or [])
         years = max(years, profile.years_of_experience or 0)
-    return {"licenses": licenses, "projects": projects, "years": years}
+        # Ресурсы (раздел 115) — заполняет тендерный отдел; численность и выручка — из Rusprofile.
+        resources = profile.resources or {}
+        staff += [x for x in resources.get("staff") or [] if isinstance(x, dict)]
+        facilities += [x for x in resources.get("facilities") or [] if isinstance(x, dict)]
+        equipment += [x for x in resources.get("equipment") or [] if isinstance(x, dict)]
+        dossier = profile.rusprofile_data or {}
+        if isinstance(dossier.get("headcount"), (int, str)) and str(dossier["headcount"]).isdigit():
+            headcount = max(headcount, int(dossier["headcount"]))
+        finance = dossier.get("finance") or {}
+        try:
+            amount = float(finance.get("revenue_amount")) if finance.get("revenue_amount") else None
+        except (TypeError, ValueError):
+            amount = None
+        if amount is not None and (revenue is None or amount > revenue[0]):
+            revenue = (amount, finance.get("revenue"), finance.get("year"))
+    return {
+        "licenses": licenses, "projects": projects, "years": years, "staff": staff, "facilities": facilities,
+        "equipment": equipment, "headcount": headcount, "revenue": revenue,
+    }
+
+
+_RUB_RE = re.compile(r"(\d[\d\s]*(?:[.,]\d+)?)\s*(млрд|млн|тыс)?\.?\s*руб", re.I)
+
+
+def _rubles(text: str | None) -> float | None:
+    match = _RUB_RE.search(text or "")
+    if not match:
+        return None
+    value = float(match.group(1).replace(" ", "").replace(",", "."))
+    return value * {"млрд": 1e9, "млн": 1e6, "тыс": 1e3}.get((match.group(2) or "").lower(), 1)
+
+
+def _stems(text: str | None) -> set[str]:
+    return {w[:5] for w in re.findall(r"[а-яёa-z]{5,}", (text or "").lower().replace("ё", "е"))}
+
+
+_GENERIC_STEMS = {"налич", "обору", "техни", "средс", "необх", "испол", "догов", "участ", "закуп", "матер", "ресур"}
 
 
 def _license_match(text: str, licenses: list[str]) -> str | None:
@@ -220,6 +261,56 @@ def assess(text: str, facts: dict[str, Any]) -> Qualification:
             basis = f"В «Моей компании» выполненных договоров: {facts['projects']} — сверить предмет, сумму и период"
         else:
             missing.append("Выполненные договоры не заполнены в «Моей компании»")
+    elif category == "STAFF":
+        need = _number(parsed["threshold"]) if parsed["threshold"] and re.search(r"челов|специалист|сотрудник|работник", parsed["threshold"]) else None
+        words = _stems(text) - _GENERIC_STEMS
+        matched = [x for x in facts.get("staff", []) if _stems(f"{x.get('role')} {x.get('qualification')}") & words]
+        group_needed = bool(re.search(r"групп\w*\s+(?:допуска\s+)?по\s+электробезопасн|аттестац|удостоверени", text, re.I))
+        count = sum(int(x.get("count") or 0) for x in matched)
+        if matched:
+            qualified = not group_needed or any(re.search(r"групп|аттест|удостовер|допуск", x.get("qualification") or "", re.I) for x in matched)
+            if (need is None or count >= need) and qualified:
+                status = STATUS_MEETS
+            else:
+                status = STATUS_MISSING
+                if need is not None and count < need:
+                    missing.append(f"Подходящего персонала {count}, требуется не менее {need}")
+                if not qualified:
+                    missing.append("Квалификация (группа допуска, аттестация) в «Моей компании» не указана")
+            basis = "Персонал в «Моей компании»: " + "; ".join(f"{x.get('role')} — {x.get('count') or '?'}" for x in matched[:5])
+        elif need is not None and facts.get("headcount") and not group_needed:
+            status = STATUS_MEETS if facts["headcount"] >= need else STATUS_MISSING
+            basis = f"Среднесписочная численность (Rusprofile) — {facts['headcount']} (требуется не менее {need})"
+        else:
+            basis = "Персонал этой квалификации в «Моей компании» не указан"
+            missing.append("Указать персонал в разделе «Ресурсы» «Моей компании»")
+    elif category == "WAREHOUSE":
+        found = [x for x in facts.get("facilities", []) if _stems(x.get("kind")) & _stems(text)]
+        if found:
+            status, basis = STATUS_MEETS, "Площади в «Моей компании»: " + "; ".join(
+                f"{x.get('kind')} {x.get('address') or ''} {x.get('area') or ''}".strip() for x in found[:3])
+        else:
+            basis = "Склады и площадки в «Моей компании» не указаны"
+            missing.append("Указать склад или площадку в разделе «Ресурсы»")
+    elif category == "EQUIPMENT":
+        words = _stems(text) - _GENERIC_STEMS
+        found = [x for x in facts.get("equipment", []) if _stems(f"{x.get('name')} {x.get('note')}") & words]
+        if found:
+            status, basis = STATUS_MEETS, "Оборудование в «Моей компании»: " + "; ".join(
+                f"{x.get('name')} — {x.get('count') or '?'}" for x in found[:5])
+        else:
+            basis = "Подходящее оборудование в «Моей компании» не указано"
+            missing.append("Указать оборудование в разделе «Ресурсы»")
+    elif category == "FINANCE":
+        need = _rubles(parsed["threshold"])
+        revenue = facts.get("revenue")
+        if revenue and need is not None:
+            status = STATUS_MEETS if revenue[0] >= need else STATUS_MISSING
+            basis = f"Выручка {revenue[1]} за {revenue[2]} год (Rusprofile), требуется: {parsed['threshold']}"
+        elif revenue:
+            basis = f"Выручка {revenue[1]} за {revenue[2]} год (Rusprofile); порог в требовании — относительно цены или не указан"
+        else:
+            basis = "Финансовые показатели не загружены (Rusprofile)"
     elif category is not None:
         basis = "Сведений этого вида в «Моей компании» нет — подтверждение готовит тендерный отдел"
     return Qualification(

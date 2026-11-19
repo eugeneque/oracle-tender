@@ -26,6 +26,13 @@ class NotificationSettingsOut(BaseModel):
     trigger_tender_changed: bool = True
     ai_score_threshold: int
     deadline_days_threshold: int
+    # Входящая почта площадок (раздел 115): запросы заказчика по нашей заявке.
+    imap_enabled: bool = False
+    imap_host: str | None = None
+    imap_port: int = 993
+    imap_folder: str = "INBOX"
+    imap_checked_at: datetime | None = None
+    imap_last_error: str | None = None
     updated_at: datetime | None
     updated_by: str | None
 
@@ -50,6 +57,10 @@ class NotificationSettingsUpdate(BaseModel):
     trigger_tender_changed: bool | None = None
     ai_score_threshold: int | None = Field(default=None, ge=0, le=100)
     deadline_days_threshold: int | None = Field(default=None, ge=1, le=60)
+    imap_enabled: bool | None = None
+    imap_host: str | None = None
+    imap_port: int | None = Field(default=None, ge=1, le=65535)
+    imap_folder: str | None = Field(default=None, max_length=200)
 
 
 class NotificationOut(BaseModel):

@@ -77,10 +77,11 @@ _JOB_LABELS = {
     "tender_gap_repair": "Достройка матриц соответствия",
     "catalog_lookup_queue": "Подбор задач очереди справочника",
     "tender_monitoring": "Отслеживание изменений по закупкам",
+    "mail_inbox": "Почта площадок: запросы по заявке",
 }
 # Ежеминутный пинг доступности в журнал о пропусках не пишется: следующий придёт через
 # минуту, а запись на каждый пропуск при подвисшем пуле засыпала бы журнал.
-_QUIET_JOBS = {"ping_sources", "tender_monitoring"}
+_QUIET_JOBS = {"ping_sources", "tender_monitoring", "mail_inbox"}
 
 
 def _job_label(job_id: str) -> str:
@@ -492,6 +493,23 @@ def _run_tender_monitoring_job() -> None:
         db.close()
 
 
+def _run_mail_inbox_job() -> None:
+    """Запросы заказчика по нашей заявке из почты площадок (раздел 115). Без настроек IMAP —
+    пустой проход."""
+
+    from app.services import mail_inbox_service
+
+    db = SessionLocal()
+    try:
+        result = mail_inbox_service.check_inbox(db)
+        if result["requests"]:
+            logger.info(f"Почта площадок: писем {result['checked']}, запросов по заявке {result['requests']}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Почта площадок не прочитана: {exc}")
+    finally:
+        db.close()
+
+
 def _parse_times(value: str) -> list[str]:
     """«06:00,20:00» → ["06:00", "20:00"]: у задачи может быть несколько запусков в сутки."""
 
@@ -650,6 +668,12 @@ def start_scheduler() -> BackgroundScheduler | None:
         _run_tender_monitoring_job,
         IntervalTrigger(minutes=30),
         id="tender_monitoring",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_mail_inbox_job,
+        IntervalTrigger(minutes=15),
+        id="mail_inbox",
         replace_existing=True,
     )
 

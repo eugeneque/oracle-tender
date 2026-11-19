@@ -97,6 +97,10 @@ const FORM_KEYS = [
   "admin_recipients",
   "ai_score_threshold",
   "deadline_days_threshold",
+  "imap_enabled",
+  "imap_host",
+  "imap_port",
+  "imap_folder",
   ...TRIGGERS.map(([key]) => key),
 ] as const;
 
@@ -369,6 +373,62 @@ function MailSettings({
           </label>
         </div>
       </Step>
+
+      <div className="mb-6 rounded-xl border border-white/[0.06] p-4">
+        <label className="flex items-center gap-2 text-sm text-zinc-200">
+          <input
+            type="checkbox"
+            checked={Boolean(form.imap_enabled)}
+            onChange={(e) => set("imap_enabled", e.target.checked)}
+          />
+          Читать письма площадок в этом ящике
+        </label>
+        <p className="mt-1 text-xs text-zinc-500">
+          Запросы заказчика о разъяснении или дополнении нашей заявки приходят только на почту участника.
+          Сова находит их по номеру закупки и пишет в журнал событий и Bitrix24. Логин и пароль — те же, что выше.
+        </p>
+        {form.imap_enabled && (
+          <div className="mt-3 grid gap-4 sm:grid-cols-3">
+            <label className="block text-xs text-zinc-400">
+              IMAP-сервер
+              <input
+                type="text"
+                value={form.imap_host ?? ""}
+                onChange={(e) => set("imap_host", e.target.value)}
+                placeholder="imap.yandex.ru"
+                className={settingsInputClass}
+              />
+            </label>
+            <label className="block text-xs text-zinc-400">
+              Порт
+              <input
+                type="number"
+                value={form.imap_port ?? 993}
+                onChange={(e) => set("imap_port", Number(e.target.value))}
+                className={settingsInputClass}
+              />
+            </label>
+            <label className="block text-xs text-zinc-400">
+              Папка
+              <input
+                type="text"
+                value={form.imap_folder ?? "INBOX"}
+                onChange={(e) => set("imap_folder", e.target.value || "INBOX")}
+                className={settingsInputClass}
+              />
+            </label>
+          </div>
+        )}
+        {settings.imap_enabled && (
+          <p className={`mt-2 text-xs ${settings.imap_last_error ? "text-red-400" : "text-zinc-500"}`}>
+            {settings.imap_last_error
+              ? `Ящик не прочитан: ${settings.imap_last_error}`
+              : settings.imap_checked_at
+                ? `Проверено ${new Date(settings.imap_checked_at).toLocaleString("ru-RU")}`
+                : "Ещё не проверялся — проверка раз в 15 минут"}
+          </p>
+        )}
+      </div>
 
       <Step
         number={2}

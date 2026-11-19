@@ -18,6 +18,7 @@ from app.api.endpoints import (
     integrations,
     tender_delivery,
     tender_monitoring,
+    tender_registry,
     logs,
     manufacturers,
     meter_market,
@@ -45,6 +46,7 @@ api_router.include_router(ai_usage.router)
 api_router.include_router(tags.router)
 api_router.include_router(integrations.router)
 api_router.include_router(tender_monitoring.router)
+api_router.include_router(tender_registry.router)
 api_router.include_router(tender_delivery.router)
 api_router.include_router(manufacturers.router, dependencies=[Depends(deny_analyst_catalog)])
 api_router.include_router(dictionaries.router)

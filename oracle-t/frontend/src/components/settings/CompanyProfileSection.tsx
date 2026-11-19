@@ -28,6 +28,7 @@ import { DropdownMenu } from "../DropdownMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { Tooltip } from "../ui/Tooltip";
 import { formatDateTime, plural } from "../../utils/format";
+import { CompanyResourcesTab } from "./CompanyResourcesTab";
 import { SettingsNotice } from "./ui";
 
 /**
@@ -322,7 +323,7 @@ function formatRuDate(value: string | null): string | null {
   return value ? new Date(value).toLocaleDateString("ru-RU") : null;
 }
 
-type DetailTab = "requisites" | "licenses" | "projects" | "dossier";
+type DetailTab = "requisites" | "licenses" | "projects" | "resources" | "dossier";
 
 /**
  * Карточка компании: шапка (имя, ИНН, состояние, действия), под ней в раскрытом виде — ряд
@@ -524,6 +525,7 @@ function CompanyCard({
                     { value: "requisites", label: "Реквизиты" },
                     { value: "licenses", label: <TabLabel text="Допуски" count={profile.licenses.length} /> },
                     { value: "projects", label: <TabLabel text="Проекты" count={profile.past_projects.length} /> },
+                    { value: "resources", label: "Ресурсы" },
                     { value: "dossier", label: "Досье" },
                   ]}
                 />
@@ -532,6 +534,7 @@ function CompanyCard({
             {tab === "requisites" && <Requisites profile={profile} />}
             {tab === "licenses" && <Licenses licenses={profile.licenses} />}
             {tab === "projects" && <Projects projects={profile.past_projects} />}
+            {tab === "resources" && <CompanyResourcesTab profile={profile} canEdit={isAdmin} />}
             {tab === "dossier" && (
               <Dossier dossier={dossier} syncedAt={profile.rusprofile_synced_at} />
             )}

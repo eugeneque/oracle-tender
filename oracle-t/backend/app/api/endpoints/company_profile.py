@@ -45,6 +45,8 @@ def _changes(payload: CompanyProfileUpdate) -> dict:
         changes["licenses"] = [item.model_dump() for item in payload.licenses]
     if changes.get("past_projects") is not None:
         changes["past_projects"] = [item.model_dump() for item in payload.past_projects]
+    if changes.get("resources") is not None:
+        changes["resources"] = payload.resources.model_dump()
     return changes
 
 
@@ -63,6 +65,7 @@ def _out(profile) -> CompanyProfileOut:
         years_of_experience=profile.years_of_experience,
         licenses=profile.licenses or [],
         past_projects=profile.past_projects or [],
+        resources=profile.resources or {},
         bank_requisites=profile.bank_requisites,
         letterhead_file_path=profile.letterhead_file_path,
         rusprofile_card_id=profile.rusprofile_card_id,

@@ -134,6 +134,15 @@ def lot_rows(db: Session, tender: Tender, sections: Sections) -> None:
 # --- п. 7: история заказчика ---------------------------------------------------------------------
 
 
+def _parse_iso(value: str | None) -> datetime | date | None:
+    try:
+        if value and len(value) == 10:
+            return date.fromisoformat(value)
+        return datetime.fromisoformat(value) if value else None
+    except ValueError:
+        return None
+
+
 def _okpd_group(code: str | None) -> str | None:
     match = re.match(r"(\d{2}\.\d{2}(?:\.\d{1,2})?)", code or "")
     return match.group(1) if match else None
@@ -143,9 +152,36 @@ def customer_history_rows(db: Session, tender: Tender, sections: Sections) -> No
     """Закупки этого заказчика по тому же ОКПД2 за год — из того, что собрала СОВА (не полный
     реестр ЕИС): дата, НМЦК, итоговая цена и победитель из протоколов, квалификация."""
 
+    from app.services import eis_registry_service
     from app.services.protocol_results_service import get_results
 
     b = _b()
+    # Раздел 115: история из ЕИС по ИНН заказчика (все его закупки, отбор по ОКПД2 в карточке) —
+    # если реестр уже читался; иначе — закупки, собранные СОВОЙ.
+    registry = eis_registry_service.get(db, tender)
+    if registry["customer_history"]:
+        for item in registry["customer_history"]:
+            sections["preparation"].append(
+                b._row(
+                    b._key("customer-history", item["number"]),
+                    "checklist",
+                    f"История заказчика: {b._clip(item.get('title'), 200)}",
+                    {
+                        "procedure_number": item["number"],
+                        "publish_date": _fmt(_parse_iso(item.get("published"))),
+                        "okpd2": item.get("okpd2"),
+                        "initial_price": item.get("price"),
+                        "final_price": item.get("final_price"),
+                        "winner": item.get("winner"),
+                        "status": item.get("status"),
+                        "url": item.get("url"),
+                        "note": "Реестр ЕИС по ИНН заказчика" + (
+                            ", ОКПД2 сверен по карточке" if item.get("okpd2_matched") else ", ОКПД2 в карточке не указан"
+                        ),
+                    },
+                )
+            )
+        return
     group = _okpd_group(tender.okpd2_code)
     if not tender.customer_name or not group:
         return
@@ -402,6 +438,8 @@ def fas_event_rows(db: Session, tender: Tender, sections: Sections) -> None:
         .order_by(TenderEvent.detected_at)
     ).all()
     for event in events:
+        if (event.data or {}).get("complaint_number"):
+            continue  # из реестра жалоб — строкой `complaint_rows`
         kind = (event.data or {}).get("fas_event") or "COMPLAINT"
         text = event.new_value or ""
         lowered = text.lower()
@@ -808,6 +846,14 @@ def _restriction_row(
         .order_by(TenderEvent.detected_at.desc())
     ).all()
     found = [f"{e.title} ({_fmt(e.effective_at or e.detected_at)})" for e in blocking[:5]]
+    from app.services import eis_registry_service
+
+    registry = eis_registry_service.get(db, tender)
+    for complaint in registry["complaints"]:
+        pending = (complaint.get("status") or "").lower() not in ("рассмотрена", "отозвана", "возвращена")
+        if pending or complaint.get("prescription") is True:
+            found.insert(0, f"Жалоба № {complaint['number']}: {complaint.get('status') or 'статус не указан'}"
+                         + ("; выдано предписание" if complaint.get("prescription") is True else ""))
     if eis_card_tables.is_suspended(stage):
         found.insert(0, f"Этап закупки в ЕИС: {stage}")
     known = payload is not None
@@ -819,12 +865,13 @@ def _restriction_row(
             {
                 "result": (
                     "Есть ограничения — проверить до подписания" if found
-                    else "По карточке и журналу ЕИС ограничений не найдено" if known
+                    else "По карточке, журналу и реестру жалоб ЕИС ограничений не найдено" if known
                     else "Нет данных карточки ЕИС — проверить вручную"
                 ),
                 "details": "\n".join(found) or None,
                 "stage": stage,
-                "note": "Жалобы проверяются по журналу событий ЕИС; реестр жалоб ФАС не опрашивается",
+                "note": "Проверено: этап и журнал закупки ЕИС, реестр жалоб ЕИС"
+                        + (f" ({_fmt(registry['registry_checked_at'])})" if registry["registry_checked_at"] else " (не читался)"),
             },
             status=b.STATUS_REVIEW if found or not known else b.STATUS_EXTRACTED,
         )
@@ -911,6 +958,280 @@ def contract_draft_rows(db: Session, tender: Tender, sections: Sections) -> None
         )
 
 
+# --- пп. 41–47: реестр жалоб ЕИС ---------------------------------------------------------------
+
+
+def complaint_rows(db: Session, tender: Tender, sections: Sections) -> None:
+    """Жалоба из реестра ЕИС: заявитель, орган контроля, дата и место рассмотрения (п. 41),
+    решение и его номер (пп. 42–44), предписание (п. 45), что изменилось в закупке после жалобы
+    (пп. 46–47: события журнала после размещения жалобы)."""
+
+    from app.services import eis_registry_service, tender_twins
+
+    b = _b()
+    registry = eis_registry_service.get(db, tender)
+    ids = [tender.id, *(t.id for t in tender_twins.twins(db, tender))]
+    for complaint in registry["complaints"]:
+        placed = _parse_iso(complaint.get("placed"))
+        after = []
+        if placed is not None:
+            after = db.scalars(
+                select(TenderEvent)
+                .where(
+                    TenderEvent.tender_id.in_(ids),
+                    TenderEvent.event_type.in_((
+                        "APPLICATION_END_CHANGED", "TECHNICAL_REQUIREMENT_CHANGED", "CONTRACT_CHANGED",
+                        "PROCEDURE_CANCELLED", "PROCEDURE_SUSPENDED", "PROCEDURE_RESUMED", "PROCEDURE_STATUS_CHANGED",
+                        "DOCUMENT_REPLACED",
+                    )),
+                    TenderEvent.detected_at >= placed,
+                    ~TenderEvent.field_key.like("fas:%"),
+                )
+                .order_by(TenderEvent.detected_at)
+                .limit(10)
+            ).all()
+        decided = bool(complaint.get("outcome"))
+        sections["fas"].append(
+            b._row(
+                f"complaint-{complaint['number']}",
+                "fas_decision" if decided else "fas_appeal",
+                f"Жалоба № {complaint['number']}",
+                {
+                    "complaint_number": complaint["number"],
+                    "complaint_status": complaint.get("status"),
+                    "applicant": complaint.get("applicant"),
+                    "control_body": complaint.get("control_body"),
+                    "complaint_subject": complaint.get("subject"),
+                    "received": _fmt(_parse_iso(complaint.get("received"))),
+                    "date": _fmt(placed),
+                    "hearing_at": _fmt(_parse_iso(complaint.get("hearing_at"))),
+                    "hearing_place": complaint.get("hearing_place"),
+                    "outcome": complaint.get("outcome"),
+                    "decision_number": complaint.get("decision_number"),
+                    "decision_date": _fmt(_parse_iso(complaint.get("decision_date") or complaint.get("result_placed"))),
+                    "prescription": {True: "Выдано", False: "Не выдано"}.get(complaint.get("prescription")),
+                    "changes_after": "\n".join(f"{e.title} ({_fmt(e.effective_at or e.detected_at)})" for e in after) or None,
+                    "url": complaint.get("url"),
+                },
+                evidence=b._evidence("Реестр жалоб ЕИС", complaint.get("text")),
+                status=b.STATUS_REVIEW,
+            )
+        )
+
+
+# --- пп. 90, 94: реестр договоров ЕИС -----------------------------------------------------------
+
+
+def registry_contract_rows(db: Session, tender: Tender, sections: Sections) -> None:
+    """Заключённый договор из реестра ЕИС, сверенный с итогами и условиями (п. 90), и его
+    изменения по редакциям — допсоглашения с тем, что изменилось (п. 94)."""
+
+    from app.services import eis_registry_service
+    from app.services.contract_conditions_service import get_conditions
+    from app.services.protocol_results_service import get_results, our_inns
+
+    b = _b()
+    contracts = eis_registry_service.get(db, tender)["contracts"]
+    if not contracts:
+        return
+    lots = get_results(db, tender)["lots"]
+    winner_price = next((lot.get("winner_price") for lot in lots if lot.get("final")), None)
+    conditions = get_conditions(db, tender)["conditions"]
+    security = _condition(conditions, "CONTRACT_SECURITY", "1")
+    ours = our_inns(db)
+    for contract in contracts:
+        checks = []
+        if winner_price is not None and contract.get("price") is not None:
+            same = abs(float(contract["price"]) - float(winner_price)) < 1
+            checks.append(f"Цена договора {contract['price']} — {'совпадает с' if same else 'отличается от'} цены победителя по протоколу {winner_price}")
+        if security and contract.get("security") is not None:
+            expected = security.get("amount")
+            if expected is not None:
+                same = abs(float(contract["security"]) - float(expected)) < 1
+                checks.append(f"Обеспечение исполнения {contract['security']} — {'совпадает с' if same else 'отличается от'} условия документации {expected}")
+            else:
+                checks.append(f"Обеспечение исполнения {contract['security']}; в документации — {security.get('value') or security.get('percent')}")
+        if contract.get("supplier_inn"):
+            checks.append("Поставщик — наша компания" if contract["supplier_inn"] in ours else f"Поставщик: {contract.get('supplier')} (ИНН {contract['supplier_inn']})")
+        versions = contract.get("versions") or []
+        sections["contract"].append(
+            b._row(
+                f"registry-contract-{contract['number']}",
+                "document_change",
+                f"Договор № {contract['number']} в реестре ЕИС",
+                {
+                    "contract_number": contract["number"],
+                    "contract_status": contract.get("status"),
+                    "price": contract.get("price"),
+                    "concluded": _fmt(_parse_iso(contract.get("concluded"))),
+                    "execution_start": _fmt(_parse_iso(contract.get("execution_start"))),
+                    "execution_end": _fmt(_parse_iso(contract.get("execution_end"))),
+                    "security": contract.get("security"),
+                    "supplier": contract.get("supplier"),
+                    "supplier_inn": contract.get("supplier_inn"),
+                    "editions_found": len(versions) or None,
+                    "checks": "\n".join(checks) or None,
+                    "url": contract.get("url"),
+                },
+                evidence=b._evidence(f"Реестр договоров ЕИС, № {contract['number']}", contract.get("subject")),
+                status=b.STATUS_REVIEW,
+            )
+        )
+        for previous, version in zip(versions, versions[1:]):
+            changed = [
+                f"{label}: {previous.get(field) or '—'} → {version.get(field) or '—'}"
+                for field, label in (("price", "Цена"), ("execution_end", "Окончание исполнения"), ("subject", "Предмет"), ("security", "Обеспечение"))
+                if previous.get(field) != version.get(field)
+            ]
+            sections["contract"].append(
+                b._row(
+                    f"registry-contract-{contract['number']}-v{version['version']}",
+                    "document_change",
+                    f"Договор № {contract['number']}: редакция {version['version']}"
+                    + (f" — {version['change_reason']}" if version.get("change_reason") else ""),
+                    {
+                        "contract_number": contract["number"],
+                        "edition": version["version"],
+                        "change_reason": version.get("change_reason"),
+                        "change_date": _fmt(_parse_iso(version.get("change_date"))),
+                        "published": _fmt(_parse_iso(version.get("placed"))),
+                        "volume_price_term_changed": version.get("change_terms"),
+                        "changes": "\n".join(changed) or (
+                            "Изменились объём, цены позиций или сроки по позициям — детали в предмете договора ЕИС"
+                            if (version.get("change_terms") or "").lower() == "да"
+                            else "Цена, срок, предмет и обеспечение не изменились"
+                        ),
+                    },
+                    evidence=b._evidence(f"Реестр договоров ЕИС, № {contract['number']}, редакция {version['version']}", None),
+                    status=b.STATUS_REVIEW if changed else b.STATUS_EXTRACTED,
+                )
+            )
+
+
+# --- п. 29: цитата к риску договора --------------------------------------------------------------
+
+
+def risk_evidence(
+    db: Session, tender: Tender, text: str | None, requirements: list[Requirement], documents: dict
+) -> tuple[str | None, str] | None:
+    """Документ и цитата, на которые опирается риск из заключения ИИ: лучшее совпадение основ
+    слов среди условий договора (раздел 95), требований и предложений договора/ТЗ. Меньше трёх
+    общих основ — цитаты нет (не притягиваем)."""
+
+    from app.models.tender_document import DocumentClass, TenderDocument
+    from app.services.contract_conditions_service import get_conditions
+
+    stems = _words(text)
+    if len(stems) < 3:
+        return None
+    best: tuple[int, str | None, str] | None = None
+
+    def consider(document: str | None, quote: str | None) -> None:
+        nonlocal best
+        if not quote:
+            return
+        score = len(stems & _words(quote))
+        if score >= 3 and (best is None or score > best[0]):
+            best = (score, document, quote)
+
+    for item in get_conditions(db, tender)["conditions"]:
+        consider(item.get("document"), item.get("quote") or item.get("value"))
+    for requirement in requirements:
+        consider(documents.get(requirement.source_document_id) if requirement.source_document_id else None, requirement.text)
+    if best is None:
+        for doc in db.scalars(
+            select(TenderDocument).where(
+                TenderDocument.tender_id == tender.id,
+                TenderDocument.document_class.in_((DocumentClass.CONTRACT.value, DocumentClass.TZ_DESCRIPTION.value)),
+                TenderDocument.extracted_text.is_not(None),
+            )
+        ):
+            for sentence in re.split(r"(?<=[.;])\s+|\n", doc.extracted_text or "")[:4000]:
+                if 30 <= len(sentence) <= 600:
+                    consider(doc.file_name, sentence)
+    return (best[1], best[2]) if best else None
+
+
+# --- пп. 2–3: дата аукциона и переторжки -----------------------------------------------------
+
+_TRADE_LABELS = {"auction": ("auction_date", "Дата аукциона"), "rebid": ("rebid_date", "Дата переторжки")}
+_TRADE_KINDS = {
+    "exact": "Назначена",
+    "not_later": "Ожидается не позднее даты",
+    "deferred": "Определяется позже (протокол или площадка)",
+}
+
+
+def trade_date_rows(db: Session, tender: Tender, sections: Sections) -> None:
+    """Дата и время аукциона/переторжки: карточка ЕИС и документация рядом, вид сведения
+    (назначена / не позднее / определяется позже), пояс — только если указан, противоречие —
+    оба значения."""
+
+    from app.services import eis_card_dates, notice_dates
+
+    b = _b()
+    card = eis_card_dates.card_dates(db, tender)
+    found = notice_dates.for_tender(db, tender)
+    for key, (field, title) in _TRADE_LABELS.items():
+        item = found.get(key)
+        card_value = card.get(field)
+        if item is None and card_value is None:
+            continue
+        conflict = None
+        if item is not None and item.day is not None and card_value is not None and item.kind == "exact":
+            if card_value.astimezone(eis_card_dates.MSK).date() != item.day and abs((card_value.date() - item.day).days) > 0:
+                conflict = f"Карточка ЕИС: {_fmt(card_value)}; документация: {item.day.strftime('%d.%m.%Y')} {item.time or ''}".strip()
+        sections["preparation"].append(
+            b._row(
+                f"trade-date-{key}",
+                "checklist",
+                title,
+                {
+                    "date_status": "Назначена (карточка ЕИС)" if card_value is not None and conflict is None
+                    else _TRADE_KINDS.get(item.kind) if item else None,
+                    "card_value": _fmt(card_value),
+                    "document_date": item.day.strftime("%d.%m.%Y") if item and item.day else None,
+                    "document_time": item.time if item else None,
+                    "timezone": None if item is None or item.day is None else (
+                        "указан в документе" if item.tz_known else "в документе не указан (время местное или без пояса)"
+                    ),
+                    "conflict": conflict,
+                },
+                evidence=b._evidence(item.document if item else "Карточка закупки ЕИС", item.quote if item else None),
+                status=b.STATUS_REVIEW if conflict or (item and item.kind != "exact" and card_value is None) else b.STATUS_EXTRACTED,
+            )
+        )
+
+
+# --- п. 32: выданные банковские гарантии --------------------------------------------------------
+
+
+def guarantee_rows(db: Session, tender: Tender, sections: Sections) -> None:
+    from app.services import guarantee_service
+
+    b = _b()
+    for row in guarantee_service.check(db, tender):
+        item = row["guarantee"]
+        covered = row["covered"]
+        section, type_ = ("preparation", "checklist") if item.kind == "APPLICATION" else ("contract", "obligation")
+        sections[section].append(
+            b._row(
+                f"bank-guarantee-{item.id}",
+                type_,
+                f"Банковская гарантия{(' № ' + item.number) if item.number else ''}: {guarantee_service.KINDS[item.kind].lower()}",
+                {
+                    "bank": item.bank,
+                    "amount": b._number(item.amount),
+                    "valid_until": item.valid_until.strftime("%d.%m.%Y"),
+                    "needed_until": row["needed_until"].strftime("%d.%m.%Y") if row["needed_until"] else None,
+                    "result": "Требуется продление" if covered is False else "Срок покрывает" if covered else "Не с чем сравнить",
+                    "basis": row["basis"],
+                },
+                status=b.STATUS_REVIEW if covered is not True else b.STATUS_EXTRACTED,
+            )
+        )
+
+
 def extra_rows(
     db: Session,
     tender: Tender,
@@ -926,12 +1247,16 @@ def extra_rows(
 
     for label, step in (
         ("лоты", lambda: lot_rows(db, tender, sections)),
+        ("даты торгов", lambda: trade_date_rows(db, tender, sections)),
         ("история заказчика", lambda: customer_history_rows(db, tender, sections)),
         ("разъяснения", lambda: clarification_rows(db, tender, requirements, documents, lock, sections)),
         ("итоги", lambda: outcome_rows(db, tender, requirements, cells, sections)),
         ("ФАС", lambda: brand_lock_rows(db, tender, lock, sections)),
         ("журнал ФАС", lambda: fas_event_rows(db, tender, sections)),
         ("проект договора", lambda: contract_draft_rows(db, tender, sections)),
+        ("реестр жалоб", lambda: complaint_rows(db, tender, sections)),
+        ("реестр договоров", lambda: registry_contract_rows(db, tender, sections)),
+        ("банковские гарантии", lambda: guarantee_rows(db, tender, sections)),
     ):
         try:
             step()

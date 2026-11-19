@@ -1390,6 +1390,13 @@ export interface NotificationSettings {
   trigger_tender_changed: boolean;
   ai_score_threshold: number;
   deadline_days_threshold: number;
+  /** Входящая почта площадок по IMAP (раздел 115): запросы заказчика по нашей заявке. */
+  imap_enabled: boolean;
+  imap_host: string | null;
+  imap_port: number;
+  imap_folder: string;
+  imap_checked_at: string | null;
+  imap_last_error: string | null;
   updated_at: string | null;
   updated_by: string | null;
 }
@@ -1758,6 +1765,13 @@ export interface RusprofileDossier {
   data_hidden?: boolean;
 }
 
+/** Ресурсы компании для сверки квалификационных требований (раздел 115). */
+export interface CompanyResources {
+  staff: Array<{ role: string; count?: number | null; qualification?: string | null }>;
+  facilities: Array<{ kind: string; address?: string | null; area?: string | null }>;
+  equipment: Array<{ name: string; count?: number | null; note?: string | null }>;
+}
+
 export interface CompanyProfile {
   id: string;
   /** Есть только у основной компании — она же «наш производитель» в справочнике. */
@@ -1775,6 +1789,7 @@ export interface CompanyProfile {
   years_of_experience: number | null;
   licenses: CompanyLicense[];
   past_projects: CompanyPastProject[];
+  resources?: CompanyResources;
   bank_requisites: Record<string, unknown> | null;
   letterhead_file_path: string | null;
   /** Синхронизация с rusprofile.ru: номер карточки, досье и когда обновлялось. */
@@ -1799,6 +1814,7 @@ export interface CompanyProfileUpdate {
   years_of_experience?: number | null;
   licenses?: CompanyLicense[];
   past_projects?: CompanyPastProject[];
+  resources?: CompanyResources;
   bank_requisites?: Record<string, unknown> | null;
 }
 

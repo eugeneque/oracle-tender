@@ -532,6 +532,36 @@ class PastProjectItem(BaseModel):
     source: str | None = None
 
 
+class StaffItem(BaseModel):
+    """Персонал: роль, численность, квалификация (группа допуска, аттестация) — п. 11 перечня."""
+
+    role: str
+    count: int | None = Field(default=None, ge=0)
+    qualification: str | None = None
+
+
+class FacilityItem(BaseModel):
+    """Склад, производственная площадка, офис: вид, адрес, площадь."""
+
+    kind: str
+    address: str | None = None
+    area: str | None = None
+
+
+class EquipmentItem(BaseModel):
+    name: str
+    count: int | None = Field(default=None, ge=0)
+    note: str | None = None
+
+
+class CompanyResources(BaseModel):
+    """Ресурсы компании для сверки квалификационных требований (19.11.2026, раздел 115)."""
+
+    staff: list[StaffItem] = Field(default_factory=list)
+    facilities: list[FacilityItem] = Field(default_factory=list)
+    equipment: list[EquipmentItem] = Field(default_factory=list)
+
+
 class CompanyProfileOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -553,6 +583,7 @@ class CompanyProfileOut(BaseModel):
     years_of_experience: int | None
     licenses: list[LicenseItem]
     past_projects: list[PastProjectItem]
+    resources: CompanyResources = Field(default_factory=CompanyResources)
     bank_requisites: dict | None
     letterhead_file_path: str | None
     # Синхронизация с rusprofile.ru (18.09.2026): номер карточки, досье целиком и когда
@@ -581,6 +612,7 @@ class CompanyProfileUpdate(BaseModel):
     years_of_experience: int | None = Field(default=None, ge=0, le=200)
     licenses: list[LicenseItem] | None = None
     past_projects: list[PastProjectItem] | None = None
+    resources: CompanyResources | None = None
     bank_requisites: dict | None = None
 
 

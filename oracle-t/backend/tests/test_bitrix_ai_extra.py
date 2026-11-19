@@ -283,7 +283,7 @@ def test_win_confirmation_and_signing_deadline(db_session):
     signing = next(r for r in sections["contract"] if r["key"] == "signing-deadline")
     assert signing["data"]["deadline"] == "30.11.2026"  # 10.11 + 20 календарных дней
     restrictions = next(r for r in sections["contract"] if r["key"] == "signing-restrictions")
-    assert restrictions["data"]["result"].startswith("По карточке и журналу ЕИС ограничений не найдено")
+    assert restrictions["data"]["result"].startswith("По карточке, журналу и реестру жалоб ЕИС ограничений не найдено")
 
 
 def test_rejection_gives_appeal_grounds_and_deadline(db_session):

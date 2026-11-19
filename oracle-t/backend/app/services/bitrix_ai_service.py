@@ -405,8 +405,26 @@ def _platform_commission(db: Session, tender: Tender) -> float | int | None:
     return platform_commission(get_conditions(db, tender)["conditions"])
 
 
+def _document_trade_dates(db: Session, tender: Tender, dates: dict[str, Any]) -> dict[str, Any]:
+    """Даты аукциона и переторжки из документации (раздел 115, пп. 2–3) — только если карточки
+    ЕИС нет и в тексте указаны и время, и пояс: иначе поле сделки не заполняется."""
+
+    if dates.get("auction_date") and dates.get("rebid_date"):
+        return {}
+    from app.services import notice_dates
+
+    found = notice_dates.for_tender(db, tender)
+    out = {}
+    for key, field in (("auction", "auction_date"), ("rebid", "rebid_date")):
+        item = found.get(key)
+        if not dates.get(field) and item and item.kind == "exact" and item.moment is not None:
+            out[field] = item.moment
+    return out
+
+
 def build_deal_fields(db: Session, tender: Tender) -> dict[str, Any]:
     dates = card_dates(db, tender)
+    dates = {**_document_trade_dates(db, tender, dates), **{k: v for k, v in dates.items() if v}}
     subject = _clip(tender.title, 180) or "Закупка"
     return _compact(
         {
@@ -1044,8 +1062,13 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
         sections["preparation"].append(
             _row(f"strategy-step-{index}", "checklist", f"Шаг {index}", {"action": _clip(step)})
         )
+    from app.services import bitrix_extra_rows
+
     for risk in conclusion.get("risks") or []:
         contract = risk.get("category") in _CONTRACT_RISKS
+        # п. 29 (раздел 115): риск из заключения ИИ — с цитатой документа, на которую он опирается
+        # (условие договора, требование или фрагмент договора); не нашлась — «требует проверки».
+        source = bitrix_extra_rows.risk_evidence(db, tender, risk.get("text"), requirements, documents)
         sections["contract" if contract else "preparation"].append(
             _row(
                 _key("risk", risk.get("category"), risk.get("text")),
@@ -1055,8 +1078,11 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
                     "risk": _clip(risk.get("text")),
                     "criticality": _SEVERITY.get(risk.get("severity") or ""),
                     "measure": _clip(risk.get("mitigation")),
+                    "basis": None if source else "Подтверждающая цитата в документах не найдена",
                 },
+                evidence=_evidence(*source) if source else [],
                 updated_at=score.calculated_at if score else None,
+                status=STATUS_EXTRACTED if source else STATUS_REVIEW,
             )
         )
 

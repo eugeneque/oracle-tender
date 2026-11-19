@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -85,6 +85,17 @@ class NotificationSettings(Base):
         Boolean, nullable=False, default=True
     )
     trigger_tender_changed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # Входящая почта (19.11.2026, раздел 115): ящик с уведомлениями площадок читается по IMAP
+    # тем же логином и паролем, что и SMTP, — запросы заказчика по нашей заявке приходят только
+    # участнику (п. 65 перечня Bitrix24).
+    imap_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    imap_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    imap_port: Mapped[int] = mapped_column(Integer, nullable=False, default=993)
+    imap_folder: Mapped[str] = mapped_column(String(200), nullable=False, default="INBOX")
+    imap_last_uid: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    imap_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    imap_last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Порог итоговой AI-оценки по профилю (раздел 5.5.1 ТЗ), а не процента победителя:
     # с 03.09.2026 в список и в уведомления идёт `overall_score`.
