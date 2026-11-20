@@ -125,6 +125,7 @@ function UnmappedRow({
   onDone: (message: string) => void;
 }) {
   const [mods, setMods] = useState<MarketModification[] | null>(null);
+  const [related, setRelated] = useState<(MarketModification & { type_notation?: string })[]>([]);
   const [target, setTarget] = useState<string>("");
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -132,6 +133,9 @@ function UnmappedRow({
   const openMods = () => {
     if (mods) return;
     api.get<MarketModification[]>(`/meter-market/types/${item.type_id}/modifications`).then(setMods).catch((err) => fail(err, "Не удалось загрузить модификации"));
+    // Поверитель мог указать номер СИ соседнего типа (в поверке МИРТЕК-12-РУ — номер МИРТЕК-232-РУ):
+    // дописываем модификации других типов того же производителя отдельной группой (20.11.2026).
+    api.get<(MarketModification & { type_notation?: string })[]>(`/meter-market/types/${item.type_id}/modifications?related=true`).then(setRelated).catch(() => setRelated([]));
   };
   const map = async () => {
     setBusy(true);
@@ -181,6 +185,15 @@ function UnmappedRow({
                 {m.name} · {[m.phase, m.interface].filter(Boolean).join(", ")}
               </option>
             ))}
+            {related.length > 0 && (
+              <optgroup label="Другие типы производителя" className="bg-zinc-900">
+                {related.map((m) => (
+                  <option key={m.id} value={m.id} className="bg-zinc-900">
+                    {m.name} · {[m.phase, m.interface].filter(Boolean).join(", ")}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
           <button type="button" className={PRIMARY} disabled={!canEdit || !target || busy} onClick={() => void map()}>
             <Check size={13} />

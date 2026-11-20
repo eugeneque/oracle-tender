@@ -97,13 +97,16 @@ def unmapped_queue(db: Session, *, limit: int = 200, type_id: int | None = None)
 
 
 def map_variant(db: Session, variant_id: int, *, modification_id: int | None) -> MeterMarketVariant:
-    """Привязать написание к модификации того же типа (`None` — снять привязку)."""
+    """Привязать написание к модификации (`None` — снять привязку).
+
+    Допустима модификация и другого описания типа (20.11.2026): поверитель вносит в ФГИС номер СИ
+    соседнего типа (в поверке «МИРТЕК-12-РУ-…» стоит 67661-17 МИРТЕК-232-РУ, а модификация — из 61891-15).
+    Написание остаётся у своего типа (загрузка ищет его по (тип, написание)), а отчёт берёт признаки
+    из самой модификации, так что тип поверки на расчёт не влияет."""
 
     variant = _get(db, MeterMarketVariant, variant_id, "Вариант написания")
     if modification_id is not None:
-        modification = _get(db, MeterMarketModification, modification_id, "Модификация")
-        if modification.type_id != variant.type_id:
-            raise HTTPException(status_code=422, detail="Модификация относится к другому описанию типа")
+        _get(db, MeterMarketModification, modification_id, "Модификация")
     variant.modification_id = modification_id
     variant.mapped_by = MappedBy.MANUAL.value if modification_id is not None else None
     db.flush()
@@ -203,6 +206,23 @@ def set_type_smart(db: Session, type_id: int, value: bool | None) -> int:
             mod.smart_890, mod.smart_890_source = value, "manual"
     db.flush()
     return len(rows)
+
+
+def related_modifications(db: Session, type_id: int) -> list[dict[str, Any]]:
+    """Модификации других типов того же производителя — для привязки написания, записанного
+    поверителем под чужим номером СИ (20.11.2026). В `type_notation` — описание типа-владельца."""
+
+    rows = db.execute(
+        text(
+            "SELECT m.*, t.notation AS type_notation, t.mit_number AS type_mit_number "
+            "FROM meter_market_modifications m JOIN meter_market_types t ON t.id = m.type_id "
+            "WHERE m.type_id <> :t AND t.manufacturer_id IS NOT DISTINCT FROM "
+            "(SELECT manufacturer_id FROM meter_market_types WHERE id = :t) "
+            "ORDER BY t.notation, m.name"
+        ),
+        {"t": type_id},
+    ).mappings()
+    return [dict(r) for r in rows]
 
 
 def modifications(db: Session, type_id: int) -> list[dict[str, Any]]:
@@ -401,6 +421,19 @@ def remap_auto(db: Session, type_id: int | None = None, *, recheck: bool = False
         by_name.setdefault((mod_type, modification_key(name)), mod_id)
         known.setdefault((mod_type, modification_key(name)), mod_id)
     matcher = ModificationMatcher(modifications, dict(db.execute(text("SELECT id, notation FROM meter_market_types")).all()))
+    # Запасной путь (20.11.2026): поверитель указал номер СИ соседнего типа («МИРТЕК-12-РУ-D1-…» под
+    # 67661-17 МИРТЕК-232-РУ). Если в своём типе совпадения нет — ищем модификацию с тем же названием
+    # (точно, с точностью до регистра/пробелов) у других типов того же производителя; берём только
+    # однозначное совпадение.
+    type_mf = dict(db.execute(text("SELECT id, manufacturer_id FROM meter_market_types")).all())
+    by_mf_name: dict[tuple[Any, str], set[int]] = {}
+    for mod_id, mod_type, name in modifications:
+        by_mf_name.setdefault((type_mf.get(mod_type), modification_key(name)), set()).add(mod_id)
+
+    def sibling(variant_type: int, key: str) -> int | None:
+        found = by_mf_name.get((type_mf.get(variant_type), key), set())
+        return next(iter(found)) if len(found) == 1 and type_mf.get(variant_type) is not None else None
+
     params: dict[str, Any] = {}
     where = "(modification_id IS NULL OR mapped_by = 'auto')" if recheck else "modification_id IS NULL"
     if type_id is not None:
@@ -423,11 +456,11 @@ def remap_auto(db: Session, type_id: int | None = None, *, recheck: bool = False
                 ruled_updates.append({"m": ruled, "v": variant_id})
             continue
         if current is None:
-            mod_id = known.get((variant_type, key)) or matcher.match(variant_type, key, raw)
+            mod_id = known.get((variant_type, key)) or matcher.match(variant_type, key, raw) or sibling(variant_type, key)
         elif (variant_type, key) in manual_keys:
             continue
         else:
-            mod_id = by_name.get((variant_type, key)) or matcher.match(variant_type, key, raw)
+            mod_id = by_name.get((variant_type, key)) or matcher.match(variant_type, key, raw) or sibling(variant_type, key)
             if mod_id == current:
                 continue
         if mod_id is not None:

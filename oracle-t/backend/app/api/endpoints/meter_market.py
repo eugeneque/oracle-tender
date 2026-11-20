@@ -417,8 +417,11 @@ def post_type_markup(type_id: int, db: Session = Depends(get_db), user: User = D
 
 
 @router.get("/types/{type_id}/modifications")
-def get_modifications(type_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> list[dict[str, Any]]:
-    return dictionary.modifications(db, type_id)
+def get_modifications(
+    type_id: int, related: bool = False, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+) -> list[dict[str, Any]]:
+    # related=true — модификации других типов того же производителя (привязка «чужого» написания)
+    return dictionary.related_modifications(db, type_id) if related else dictionary.modifications(db, type_id)
 
 
 @router.post("/types/{type_id}/modifications")
