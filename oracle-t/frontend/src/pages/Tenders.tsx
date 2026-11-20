@@ -142,6 +142,43 @@ function saveFeed(feed: TenderFeed): void {
   }
 }
 
+// Выбор профилей отбора помнится, пока человек сам его не снимет, но не вечно: через
+// неделю без заходов страница снова открывается на общих профилях. Срок продлевается при
+// каждом сохранении. «Общие по умолчанию» (null) не хранится — это отсутствие выбора.
+const PROFILE_SELECTION_KEY = "oraclet_relevance_profile_selection";
+const PROFILE_SELECTION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function loadProfileSelection(): Partial<TendersFilters> {
+  try {
+    const raw = localStorage.getItem(PROFILE_SELECTION_KEY);
+    if (!raw) return {};
+    const saved = JSON.parse(raw) as { ids?: unknown; mode?: unknown; at?: unknown };
+    if (
+      !Array.isArray(saved.ids) ||
+      typeof saved.at !== "number" ||
+      Date.now() - saved.at > PROFILE_SELECTION_TTL_MS
+    ) {
+      localStorage.removeItem(PROFILE_SELECTION_KEY);
+      return {};
+    }
+    return {
+      relevanceProfileIds: saved.ids.filter((id): id is string => typeof id === "string"),
+      relevanceProfileMode: saved.mode === "all" ? "all" : "any",
+    };
+  } catch {
+    return {};
+  }
+}
+
+function saveProfileSelection(ids: string[] | null, mode: "any" | "all"): void {
+  try {
+    if (ids === null) localStorage.removeItem(PROFILE_SELECTION_KEY);
+    else localStorage.setItem(PROFILE_SELECTION_KEY, JSON.stringify({ ids, mode, at: Date.now() }));
+  } catch {
+    // не сохранили — выбор действует до перезагрузки
+  }
+}
+
 /** Колонки Kanban — этапы внутреннего пайплайна (раздел 5.6 ТЗ, решение 03.09.2026).
  *
  * Раньше доска группировала по `status` — состоянию закупки на площадке. Это отвечало на
@@ -1246,7 +1283,12 @@ export function TendersPage() {
   const [filters, setFilters] = useState<TendersFilters>(() => ({
     ...DEFAULT_FILTERS,
     feed: parseTenderFeed(searchParams.get("feed")) ?? loadFeed(),
+    ...loadProfileSelection(),
   }));
+  // Выбор профилей переживает уход со страницы и F5 (замечание 19.11.2026).
+  useEffect(() => {
+    saveProfileSelection(filters.relevanceProfileIds, filters.relevanceProfileMode);
+  }, [filters.relevanceProfileIds, filters.relevanceProfileMode]);
   const feed = filters.feed;
   // Ссылка «Все →» из меню учётной записи ведёт сразу в раздел «Избранное». Эффектом, а не
   // начальным состоянием: со страницы тендеров та же ссылка не перемонтирует компонент, и
@@ -1396,7 +1438,16 @@ export function TendersPage() {
     void api.get<TenderTag[]>("/tags").then(setTags).catch(() => setTags([]));
     void api
       .get<UserRelevanceProfile[]>("/relevance/profiles")
-      .then(setRelevanceProfiles)
+      .then((list) => {
+        setRelevanceProfiles(list);
+        // Запомненный выбор мог указывать на профиль, удалённый с тех пор: снимаем его,
+        // иначе список ответил бы «профиль не найден».
+        setFilters((prev) =>
+          prev.relevanceProfileIds === null
+            ? prev
+            : { ...prev, relevanceProfileIds: prev.relevanceProfileIds.filter((id) => list.some((item) => item.id === id)) },
+        );
+      })
       .catch(() => setRelevanceProfiles([]));
   }, []);
 

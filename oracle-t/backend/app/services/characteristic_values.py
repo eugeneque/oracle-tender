@@ -88,7 +88,7 @@ _SEGMENT_KEY_SPACE_RE = re.compile(
     r"^\s*(?P<keys>[A-Za-zА-Яа-яЁё]{1,4}\d{1,3}[A-Za-zА-Яа-я]?)\s+(?P<value>\d.+)$"
 )
 _SEGMENT_VALUE_FOR_RE = re.compile(
-    r"^\s*(?P<value>.+?)\s+для\s+(?:корпус\w*|исполнени\w*|модификаци\w*)\s+(?P<keys>.+)$",
+    r"^\s*(?P<value>.+?)\s+для\s+(?:сч[её]тчик\w*\s+(?:в\s+)?)?(?:корпус\w*|исполнени\w*|модификаци\w*)\s+(?P<keys>.+)$",
     re.IGNORECASE,
 )
 # «246×169×57 мм для W31» — ключ корпуса сразу после «для», без слова «корпуса» (так
@@ -159,7 +159,36 @@ def normalise_value(field_name: str, value: str | None) -> str | None:
             text = f"{match.group(1)} А"
     if field_name in NUMERIC_FIELDS and not re.search(r"\d", text):
         return None
+    if field_name == _DIMENSIONS_FIELD:
+        # «длина х ширина х высота, мм, не более» — подпись столбца таблицы, а не значение
+        # (замечание 19.11.2026). Габариты — это три числа, с одним числом уже не размеры.
+        if len(re.findall(r"\d+(?:[.,]\d+)?", text)) < 2:
+            return None
+    if field_name in _DURATION_FIELDS:
+        text = _short_duration(text)
     return text
+
+
+_DIMENSIONS_FIELD = "Габаритные размеры"
+_DURATION_FIELDS = frozenset({"Средняя наработка на отказ", "Срок службы"})
+_DURATION_RE = re.compile(
+    r"^(?:не\s+менее\s+|более\s+|≥\s*)?(?P<num>\d[\d\s]*(?:[.,]\d+)?)\s*(?P<unit>ч(?:ас\w*)?|лет|год\w*|г)\b\.?(?P<rest>.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _short_duration(text: str) -> str:
+    """«350000 ч для счётчиков в корпусах…» → «350000 ч». Характеристики краткие и точные
+    (замечание 19.11.2026): число и единица, без оговорок. Значение, где дальше есть ещё
+    числа (перечень по корпусам), не трогается — его разбирает `resolve_family_value`."""
+
+    match = _DURATION_RE.match(text.strip())
+    if not match or re.search(r"\d", match.group("rest")):
+        return text
+    unit = match.group("unit").lower()
+    unit = "ч" if unit.startswith("ч") else "лет" if unit.startswith(("л", "г")) else unit
+    number = re.sub(r"\s+", "", match.group("num"))
+    return f"{number} {unit}"
 
 
 def is_family_level(value: str | None) -> bool:
@@ -197,7 +226,7 @@ def _split_candidates(value: str) -> list[list[str]]:
         # либо «246×169×57 мм для W31, 291×171×88 мм для W32».
         re.split(
             r",\s*(?=[A-Za-zА-Яа-яЁё]{1,4}\d{1,3}[A-Za-zа-я]?\s+\d"
-            r"|[^,]*\bдля\s+(?:корпус|исполнени|модификаци|[A-Za-zА-Яа-яЁё]{1,4}\d{1,3}[A-Za-zа-я]?\s*(?:,|$)))",
+            r"|[^,]*\bдля\s+(?:сч[её]тчик\w*\s+(?:в\s+)?)?(?:корпус|исполнени|модификаци|[A-Za-zА-Яа-яЁё]{1,4}\d{1,3}[A-Za-zа-я]?\s*(?:,|$)))",
             text,
             flags=re.IGNORECASE,
         ),

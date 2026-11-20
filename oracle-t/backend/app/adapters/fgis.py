@@ -565,7 +565,24 @@ def latest_description_type(raw_specifications: Any) -> DescriptionTypeDoc | Non
 
     if not candidates:
         return None
-    return max(candidates, key=lambda doc: (doc.version_num or 0, doc.order_date or ""))
+    # Сначала дата приказа, потом номер версии (замечание 19.11.2026: у части счётчиков
+    # выбиралось описание типа с начала года, хотя вышли новее). Даты приходят строкой —
+    # «22.06.2026» или ISO, — и сравнивать их как текст нельзя: «27.01.2026» оказывалась
+    # «больше» «23.07.2026». Версия без даты (старые записи) уступает любой датированной.
+    return max(candidates, key=lambda doc: (_order_date_key(doc.order_date), doc.version_num or 0))
+
+
+def _order_date_key(raw: Any) -> tuple[int, int, int]:
+    """Дата приказа как (год, месяц, день); не разобралась — (0, 0, 0)."""
+
+    text = str(raw or "").strip()
+    match = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", text) or None
+    if match:
+        return int(match.group(1)), int(match.group(2)), int(match.group(3))
+    match = re.match(r"(\d{1,2})[./-](\d{1,2})[./-](\d{4})", text)
+    if match:
+        return int(match.group(3)), int(match.group(2)), int(match.group(1))
+    return (0, 0, 0)
 
 
 # Строка легенды, после которой в `j_modification` перечислены исполнения, представленные на
