@@ -306,6 +306,24 @@ def get_unmapped(
     return dictionary.unmapped_queue(db, type_id=type_id)
 
 
+@router.post("/remap")
+def post_remap(db: Session = Depends(get_db), user: User = Depends(require_analytics)) -> dict[str, Any]:
+    """Пересвести неразмеченные написания по всем типам (20.11.2026): после выкладки новых правил
+    разметки или правки справочника, без загрузки Excel. Ручная разметка не трогается."""
+
+    changed = dictionary.remap_auto(db)
+    log_action(
+        db,
+        component="meter_market",
+        action="remap_variants",
+        result="success",
+        details=f"пересведено {changed}",
+        user_id=user.id,
+    )
+    db.commit()
+    return {"remapped": changed}
+
+
 @router.put("/variants/{variant_id}")
 def put_variant(
     variant_id: int,

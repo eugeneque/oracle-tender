@@ -94,12 +94,36 @@ function UnmappedQueue({ canEdit, report, fail }: EditProps) {
     api.get<typeof data>("/meter-market/unmapped").then(setData).catch((err) => fail(err, "Не удалось загрузить очередь"));
   }, [fail]);
   useEffect(load, [load]);
+  const [remapping, setRemapping] = useState(false);
+  const remap = async () => {
+    setRemapping(true);
+    try {
+      const result = await api.post<{ remapped: number }>("/meter-market/remap", {});
+      report(`Пересчёт разметки: привязано автоматически ${result.remapped}`);
+      load();
+    } catch (err) {
+      fail(err, "Не удалось пересчитать разметку");
+    } finally {
+      setRemapping(false);
+    }
+  };
   if (!data) return <div className="py-16 text-center text-sm text-zinc-600">Загружаю очередь…</div>;
   return (
     <Panel
       title={`Неразмеченных написаний: ${fmt(data.variants)} · поверок: ${fmt(data.verifications)}`}
       subtitle="Поверитель записал модификацию так, что Сова не свела её с известной. Привяжите к модификации или заведите новую — то же написание с точностью до регистра, пробелов и латиницы сведётся само."
     >
+      <div className="mb-2 flex justify-end">
+        <button
+          type="button"
+          className={BUTTON}
+          disabled={!canEdit || remapping}
+          title={canEdit ? "Сова ещё раз попробует привязать неразмеченные написания сама" : NO_RIGHT}
+          onClick={() => void remap()}
+        >
+          {remapping ? "Пересчитываю…" : "Пересчитать разметку"}
+        </button>
+      </div>
       {data.items.length === 0 ? (
         <p className="py-8 text-center text-sm text-zinc-500">Всё размечено</p>
       ) : (
