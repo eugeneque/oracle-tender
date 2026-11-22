@@ -155,6 +155,8 @@ def test_payload_shape_matches_portal_contract(db_session, client, admin_user):
     assert fields["tender_types"] == ["IPU"]
     assert fields["direction"] == "ELECTRICITY"
     assert fields["record_type"] == "SINGLE"
+    assert fields["notice_number"] == payload["lookup"]["procedure_number"] and isinstance(fields["notice_number"], str)
+    assert fields["procurement_name"]
     assert fields["result_status"] == "PENDING"
     # Даты — ISO с часовым поясом, по Москве.
     assert fields["application_end"] == "2026-10-30T10:00:00+03:00"

@@ -25,6 +25,13 @@ export const CHANGE_KIND_LABELS: Record<ChangeKind, string> = {
 
 export const CHANGELOG: Release[] = [
   {
+    date: "2026-11-22",
+    title: "Bitrix24: полное наименование и номер извещения",
+    items: [
+      { kind: "improved", text: "В сделку уходят полное наименование закупки (procurement_name) и реестровый номер извещения строкой (notice_number)." },
+    ],
+  },
+  {
     date: "2026-11-20",
     title: "Рынок ПУ: привязка поверок с номером СИ соседнего типа",
     items: [

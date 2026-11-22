@@ -429,6 +429,10 @@ def build_deal_fields(db: Session, tender: Tender) -> dict[str, Any]:
     return _compact(
         {
             "title": f"{procedure_number(tender)} — {subject} — лот 1"[:250],
+            # Bitrix24 (19.11.2026): название сделки формирует портал, ему нужно полное исходное
+            # наименование и реестровый номер строкой (ведущие нули сохраняются — это не число).
+            "procurement_name": _clip(tender.title, 2000),
+            "notice_number": procedure_number(tender) or None,
             "amount": _number(tender.price),
             "currency": tender.currency or "RUB",
             "procedure_url": tender.source_url,
