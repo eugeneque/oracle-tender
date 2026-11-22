@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ApiError, api, downloadFile } from "../../api/client";
 import type { MarketExplain, MarketExplainPosition, MarketSample } from "../../api/types";
 import { fmt } from "./format";
+import { VariantMapper } from "./VariantMapper";
 
 /**
  * Детализация итогового числа «Рынка ПУ» (замечания 09.11.2026).
@@ -54,7 +55,7 @@ export function SmartBadge({ smart }: { smart: MarketExplainPosition["smart"] })
   );
 }
 
-export function ExplainPanel({ scope, onClose }: { scope: ExplainScope; onClose: () => void }) {
+export function ExplainPanel({ scope, onClose, canEdit = false }: { scope: ExplainScope; onClose: () => void; canEdit?: boolean }) {
   const params = useMemo(() => query({ kind: scope.kind, title: scope.title, ...scope.params }), [scope]);
   const [data, setData] = useState<MarketExplain | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -66,6 +67,9 @@ export function ExplainPanel({ scope, onClose }: { scope: ExplainScope; onClose:
   const [comparing, setComparing] = useState(false);
   const [manual, setManual] = useState("");
   const [busy, setBusy] = useState(false);
+  // Переразметка написания (22.11.2026) меняет состав позиций — детализация собирается заново.
+  const [reload, setReload] = useState(0);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -78,7 +82,7 @@ export function ExplainPanel({ scope, onClose }: { scope: ExplainScope; onClose:
     return () => {
       cancelled = true;
     };
-  }, [params]);
+  }, [params, reload]);
 
   const list = useMemo(() => {
     if (!data) return [];
@@ -137,6 +141,7 @@ export function ExplainPanel({ scope, onClose }: { scope: ExplainScope; onClose:
         </header>
 
         <div className="flex-1 overflow-y-auto px-6 py-5">
+          {notice && <p className="mb-3 rounded-lg border border-indigo-400/20 bg-indigo-500/10 px-3 py-2 text-sm text-indigo-200">{notice}. Числа в отчёте обновятся при следующем открытии.</p>}
           {error && <p className="mb-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</p>}
           {!data && !error && <p className="py-16 text-center text-sm text-zinc-600">Собираю позиции…</p>}
           {data && (
@@ -234,6 +239,11 @@ export function ExplainPanel({ scope, onClose }: { scope: ExplainScope; onClose:
                       onToggle={() => setOpen(open === p.key ? null : p.key)}
                       picked={picked.includes(p.key)}
                       onPick={() => togglePick(p.key)}
+                      canEdit={canEdit}
+                      onRemapped={(message) => {
+                        setNotice(message);
+                        setReload((n) => n + 1);
+                      }}
                     />
                   ))}
                 </ul>
@@ -312,6 +322,8 @@ function PositionRow({
   onToggle,
   picked,
   onPick,
+  canEdit,
+  onRemapped,
 }: {
   position: MarketExplainPosition;
   tab: "included" | "excluded";
@@ -320,6 +332,8 @@ function PositionRow({
   onToggle: () => void;
   picked: boolean;
   onPick: () => void;
+  canEdit: boolean;
+  onRemapped: (message: string) => void;
 }) {
   const value = tab === "included" ? p.counted : p.excluded;
   const why = tab === "included" ? p.basis : p.exclusions.map((e) => e.reason).join("; ");
@@ -350,12 +364,24 @@ function PositionRow({
           </div>
         </button>
       </div>
-      {isOpen && <PositionDetails position={p} period={period} />}
+      {isOpen && <PositionDetails position={p} period={period} canEdit={canEdit} onRemapped={onRemapped} />}
     </li>
   );
 }
 
-function PositionDetails({ position: p, period }: { position: MarketExplainPosition; period: string | null }) {
+function PositionDetails({
+  position: p,
+  period,
+  canEdit,
+  onRemapped,
+}: {
+  position: MarketExplainPosition;
+  period: string | null;
+  canEdit: boolean;
+  onRemapped: (message: string) => void;
+}) {
+  const [remapping, setRemapping] = useState(false);
+  const [remapError, setRemapError] = useState<string | null>(null);
   const [samples, setSamples] = useState<MarketSample[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const canSample = p.variant_id !== null || p.modification_id !== null;
@@ -374,6 +400,39 @@ function PositionDetails({ position: p, period }: { position: MarketExplainPosit
   return (
     <div className="ml-7 mt-2 space-y-3 rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs">
       <Facts position={p} />
+      {p.variant_id !== null && (
+        <div>
+          {!remapping ? (
+            <button
+              type="button"
+              disabled={!canEdit}
+              title={canEdit ? undefined : "Справочник правят аналитик и администратор"}
+              onClick={() => setRemapping(true)}
+              className="text-indigo-300 hover:text-indigo-200 disabled:cursor-not-allowed disabled:text-zinc-600"
+            >
+              Переразметить написание…
+            </button>
+          ) : (
+            <div className="space-y-1">
+              <p className="font-medium text-zinc-400">Привязать написание к другой или новой модификации</p>
+              <VariantMapper
+                typeId={p.type_id}
+                variantId={p.variant_id}
+                raw={p.raw ?? ""}
+                currentModificationId={p.modification_id}
+                canEdit={canEdit}
+                fail={(err, fallback) => setRemapError(err instanceof ApiError ? err.message : fallback)}
+                onDone={(message) => {
+                  setRemapError(null);
+                  setRemapping(false);
+                  onRemapped(message);
+                }}
+              />
+              {remapError && <p className="text-red-400">{remapError}</p>}
+            </div>
+          )}
+        </div>
+      )}
       <div>
         <p className="mb-1 font-medium text-zinc-400">Применённые правила</p>
         <ul className="space-y-0.5 text-zinc-400">

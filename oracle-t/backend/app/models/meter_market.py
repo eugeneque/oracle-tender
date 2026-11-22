@@ -241,6 +241,13 @@ class MeterMarketVariant(Base):
     # Причина, по которой написание вообще не учитывается (19.11.2026): счётчики газа под номером
     # описания типа электросчётчика. Поверки остаются в сырой таблице, в агрегат не попадают.
     excluded_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ПП 890 по самому написанию (22.11.2026, раздел 120): у МИРТЕК «соответствует» зависит от протокола
+    # Pn в обозначении, а не от модификации. Главнее решения модификации, кроме её ручного решения;
+    # источник `rule` (правило) или `manual` (аналитик).
+    smart_890: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    smart_890_source: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    smart_890_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    smart_890_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

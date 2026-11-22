@@ -117,8 +117,9 @@ def _position(row: dict[str, Any], names: dict[int, str], limits: list[tuple[int
 _ROW_SQL = (
     "SELECT v.id AS variant_id, v.raw, v.mapped_by, t.id AS type_id, t.mit_number, t.notation, t.title, "
     "t.in_report, m.id AS mod_id, m.name AS mod_name, m.phase, m.design, m.interface, m.in_rpp, m.score, "
-    "m.rpp_included_at, m.rpp_record_number, m.smart_890 AS smart, m.smart_890_source, m.smart_890_note, "
-    "m.smart_890_at, m.manufacturer_override_id AS override_id, (v.modification_id IS NULL) AS unmapped, "
+    f"m.rpp_included_at, m.rpp_record_number, {report.SMART_SQL} AS smart, {report.SMART_SOURCE_SQL} AS smart_890_source, "
+    f"{report.SMART_NOTE_SQL} AS smart_890_note, "
+    f"{report.SMART_AT_SQL} AS smart_890_at, m.manufacturer_override_id AS override_id, (v.modification_id IS NULL) AS unmapped, "
     f"{report._MANUFACTURER_SQL} AS manufacturer_id, extract(year FROM mv.month)::int AS year, "
     "sum(mv.count) AS count "
     "FROM meter_verification_monthly mv "

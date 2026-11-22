@@ -27,9 +27,13 @@ def upgrade() -> None:
     # Данные справочника есть не везде (чистая база, тесты): без таблицы поверок правила не нужны.
     conn = op.get_bind()
     if conn.execute(sa.text("SELECT count(*) FROM meter_market_types")).scalar():
-        from app.services.meter_market_rules import apply_all
+        # Поштучно, а не `apply_all`: позднейшие правила (0112) опираются на колонки, которых здесь ещё нет.
+        from app.services import meter_market_rules as rules
 
-        apply_all(conn)
+        rules.apply_gas_exclusion(conn)
+        rules.apply_smart_unit_split(conn)
+        rules.apply_iprom(conn)
+        rules.apply_mirtek_smart(conn)
 
 
 def downgrade() -> None:

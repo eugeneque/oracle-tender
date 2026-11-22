@@ -5,10 +5,14 @@
 помесячного агрегата, поэтому «все периоды» — это правка справочника и правил привязки, а не
 пересчёт одного квартала. Правила здесь — детерминированные, без ИИ: ИИ ошибался именно на них.
 
-1. **МИРТЕК: первичная поверка — ПП 890 «соответствует».** «Несоответствующие ПУ не производим» —
-   у типов МИРТЕК (61891-15, 65634-16, 67661-17, 67662-17) все модификации помечаются решением
-   аналитика (`smart_890_source = 'manual'`): раньше ИИ ставил «не соответствует» 1 084 + 960 + 170
-   поверкам 3 кв. 2026 (МИРТЕК-232-РУ, МИРТЕК-212-РУ, МИРТЕК-12-РУ без обозначения).
+1. **МИРТЕК: первичная поверка — ПП 890 «соответствует»** — только у трёх базовых строк справочника
+   («МИРТЕК-12-РУ», «МИРТЕК-212-РУ», «МИРТЕК-232-РУ» без обозначения исполнения). «Несоответствующие ПУ не
+   производим» — замечание аналитика 19.11.2026 относилось именно к ним (ИИ ставил «не соответствует»
+   1 084 + 960 + 170 поверкам 3 кв. 2026). Решение — `smart_890_source = 'manual'`. Распространение на
+   все модификации МИРТЕК (раздел 114, допущение 1) аналитик опровергла 20.11.2026: радио-исполнения
+   (RF433/RF2400), W32 с классом A0.5R1 и др. она считает «не соответствует», — поэтому остальные
+   строки решает ИИ или сама аналитик, а уже выставленное ею вручную правило не перезаписывает
+   (раздел 119).
 2. **Счётчики газа под номером описания типа** («ОМЕГА ЭТК GSM G4» у 61891-15, 22 поверки) попали
    туда случайно и не должны учитываться вовсе: у написания `excluded_reason`, агрегат его не
    содержит (`meter_market_loader.rebuild_monthly`), загрузчик ставит метку новым написаниям.
@@ -37,6 +41,8 @@ from app.services.meter_market_normalize import modification_key
 
 MIRTEK = "МИРТЕК"
 SMART_UNIT = "Умный учет"
+# Строки, к которым относится замечание «не производим несоответствующие» (ключи нормализации).
+MIRTEK_BASE_NAMES = ("МИРТЕК-12-РУ", "МИРТЕК-212-РУ", "МИРТЕК-232-РУ")
 MIRTEK_PRIMARY_NOTE = (
     "первичная поверка: МИРТЕК производит только соответствующие ПП РФ 890 ПУ (замечание аналитика 19.11.2026)"
 )
@@ -231,7 +237,10 @@ def apply_gas_exclusion(conn: Connection) -> int:
 
 
 def apply_mirtek_smart(conn: Connection) -> int:
-    """У типов МИРТЕК все модификации — «соответствует ПП 890» решением аналитика."""
+    """Три базовые строки МИРТЕК — «соответствует ПП 890» решением аналитика.
+
+    Не трогает решение, уже выставленное человеком (`manual`) с любым значением: раньше условие
+    «не true или не manual» превращало ручное «не соответствует» обратно в «да» (раздел 119)."""
 
     now = datetime.now(timezone.utc)
     return conn.execute(
@@ -240,10 +249,77 @@ def apply_mirtek_smart(conn: Connection) -> int:
             "smart_890_note = :n, smart_890_at = :at, updated_at = now() "
             "FROM meter_market_types t, meter_market_manufacturers f "
             "WHERE t.id = m.type_id AND f.id = t.manufacturer_id AND f.name = :f "
-            "AND (m.smart_890 IS DISTINCT FROM true OR m.smart_890_source IS DISTINCT FROM 'manual')"
+            "AND m.name = ANY(:names) AND m.smart_890_source IS DISTINCT FROM 'manual'"
         ),
-        {"n": MIRTEK_PRIMARY_NOTE, "at": now, "f": MIRTEK},
+        {"n": MIRTEK_PRIMARY_NOTE, "at": now, "f": MIRTEK, "names": list(MIRTEK_BASE_NAMES)},
     ).rowcount or 0
+
+
+# ── МИРТЕК: протокол Pn в обозначении (22.11.2026, раздел 120) ─────────────────────────────
+
+_ELEMENT_TOKEN = re.compile(r"^(S|SS|ST|TT|T)$")
+_PROTOCOL_TOKEN = re.compile(r"^P\d+$")
+PROTOCOL_NOTE_YES = "в обозначении указан протокол {p} (блок «Поддерживаемые протоколы обмена» описания типа)"
+PROTOCOL_NOTE_NO = (
+    "в обозначении нет протокола Pn — по описанию типа это протокол «МИРТЕК» (замечание аналитика 22.11.2026)"
+)
+
+
+def protocol_verdict(raw: str | None) -> tuple[bool | None, str | None]:
+    """ПП 890 по написанию МИРТЕК: есть протокол `Pn` — «соответствует», полное обозначение без него —
+    «не соответствует», неполное («МИРТЕК-232-РУ», «…-W32-A15R1», «…-A1R1-230-5-60A») — `None`,
+    решает модификация.
+
+    Основание — замечание аналитика (скриншоты 20.11.2026): у всех отмеченных «нет» написаний нет
+    `-P1/-P2`, у остальных есть; в описании типа блок ⑪ «(нет символа) – протокол «МИРТЕК»,
+    Pn – номер модификации поддерживаемых протоколов». «Полное» — дошло до типа измерительных элементов
+    (S, SS, ST, TT, T), дальше идут интерфейс, протокол и функции. Допущение — ждёт подтверждения аналитика."""
+
+    if not raw:
+        return None, None
+    tokens = raw.upper().translate(_CYR_TO_LAT).replace(" ", "").split("-")
+    if not any(_ELEMENT_TOKEN.match(t) for t in tokens):
+        return None, None
+    for token in tokens:
+        if _PROTOCOL_TOKEN.match(token):
+            return True, PROTOCOL_NOTE_YES.format(p=token)
+    return False, PROTOCOL_NOTE_NO
+
+
+def apply_mirtek_protocol(conn: Connection) -> int:
+    """Выставить `meter_market_variants.smart_890` по правилу протокола у написаний типов МИРТЕК.
+    Ручное решение аналитика (`manual`) не трогается; повторный запуск ничего не меняет."""
+
+    rows = conn.execute(
+        text(
+            "SELECT v.id, v.raw, v.smart_890, v.smart_890_source, v.smart_890_note FROM meter_market_variants v "
+            "JOIN meter_market_types t ON t.id = v.type_id JOIN meter_market_manufacturers f ON f.id = t.manufacturer_id "
+            "WHERE f.name = :f AND v.excluded_reason IS NULL AND v.smart_890_source IS DISTINCT FROM 'manual'"
+        ),
+        {"f": MIRTEK},
+    ).all()
+    now = datetime.now(timezone.utc)
+    changed = 0
+    for variant_id, raw, current, source, note in rows:
+        verdict, why = protocol_verdict(raw)
+        if verdict is None:
+            if source == "rule":  # правило перестало применяться — вернуть решение модификации
+                conn.execute(
+                    text("UPDATE meter_market_variants SET smart_890 = NULL, smart_890_source = NULL, "
+                         "smart_890_note = NULL, smart_890_at = NULL WHERE id = :v"),
+                    {"v": variant_id},
+                )
+                changed += 1
+            continue
+        if current is verdict and source == "rule" and note == why:
+            continue
+        conn.execute(
+            text("UPDATE meter_market_variants SET smart_890 = :s, smart_890_source = 'rule', smart_890_note = :n, "
+                 "smart_890_at = :at WHERE id = :v"),
+            {"s": verdict, "n": why, "at": now, "v": variant_id},
+        )
+        changed += 1
+    return changed
 
 
 def apply_smart_unit_split(conn: Connection) -> int:
@@ -411,7 +487,8 @@ def apply_all(conn: Connection) -> dict[str, int]:
     unit = apply_smart_unit_split(conn)
     iprom = apply_iprom(conn)
     mirtek = apply_mirtek_smart(conn)
-    return {"gas_variants": gas, "smart_unit_rows": unit, "mirtek_smart": mirtek, **{f"iprom_{k}": v for k, v in iprom.items()}}
+    protocol = apply_mirtek_protocol(conn)
+    return {"mirtek_protocol": protocol, "gas_variants": gas, "smart_unit_rows": unit, "mirtek_smart": mirtek, **{f"iprom_{k}": v for k, v in iprom.items()}}
 
 
 if __name__ == "__main__":

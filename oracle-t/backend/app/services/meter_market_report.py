@@ -40,6 +40,18 @@ UNMAPPED = NO_DATA
 FIRST_YEAR = 2021
 
 _MANUFACTURER_SQL = "coalesce(m.manufacturer_override_id, t.manufacturer_id)"
+# ПП 890 по написанию (раздел 120): значение, источник, примечание и время берутся либо у написания `v`, либо у
+# модификации `m`. Побеждает ручное решение (написания, затем модификации), иначе — заданное у написания
+# (правило по протоколу Pn), иначе — у модификации.
+_SMART_PICK = (
+    "(CASE WHEN v.smart_890_source = 'manual' THEN 'v' WHEN m.smart_890_source = 'manual' THEN 'm' "
+    "WHEN v.smart_890 IS NOT NULL THEN 'v' ELSE 'm' END)"
+)
+SMART_SQL = f"(CASE WHEN {_SMART_PICK} = 'v' THEN v.smart_890 ELSE m.smart_890 END)"
+SMART_SOURCE_SQL = f"(CASE WHEN {_SMART_PICK} = 'v' THEN v.smart_890_source ELSE m.smart_890_source END)"
+SMART_NOTE_SQL = f"(CASE WHEN {_SMART_PICK} = 'v' THEN v.smart_890_note ELSE m.smart_890_note END)"
+SMART_AT_SQL = f"(CASE WHEN {_SMART_PICK} = 'v' THEN v.smart_890_at ELSE m.smart_890_at END)"
+
 _BASE_FROM = (
     "FROM meter_verification_monthly mv "
     "JOIN meter_market_variants v ON v.id = mv.variant_id "
@@ -257,7 +269,7 @@ def _cells(db: Session, period: Period, extra_group: str = "", extra_select: str
     rows = db.execute(
         text(
             f"SELECT {_MANUFACTURER_SQL} AS manufacturer_id, m.design, m.phase, m.interface, "
-            f"(v.modification_id IS NULL) AS unmapped, m.smart_890 AS smart{extra_select}, sum(mv.count) AS count "
+            f"(v.modification_id IS NULL) AS unmapped, {SMART_SQL} AS smart{extra_select}, sum(mv.count) AS count "
             f"{_BASE_FROM} WHERE {period_sql} "
             f"GROUP BY 1, 2, 3, 4, 5, 6{extra_group}"
         ),
@@ -310,7 +322,11 @@ def smart_verdict(
             return "nodata", SMART_STATUS["nodata"], "проверка по разделу III ПП 890 ещё не выполнялась"
         return "nodata", SMART_STATUS["nodata"], f"ИИ не хватило сведений в описании типа{': ' + note if note else ''}"
     key = "yes" if smart else "no"
-    who = "решение аналитика в справочнике" if source == "manual" else "вывод ИИ по разделу III ПП 890"
+    who = (
+        "решение аналитика в справочнике" if source == "manual"
+        else "правило по обозначению" if source == "rule"
+        else "вывод ИИ по разделу III ПП 890"
+    )
     return key, SMART_STATUS[key], f"{who}{': ' + note if note else ''}"
 
 
@@ -903,8 +919,8 @@ def powerbi_rows(db: Session, period: Period) -> list[list[Any]]:
         text(
             f"SELECT {_MANUFACTURER_SQL} AS manufacturer_id, t.mit_number, "
             "m.design, m.phase, m.interface, "
-            "mv.month, m.in_rpp, m.score, m.smart_890, (v.modification_id IS NULL) AS unmapped, "
-            "m.smart_890_source, m.smart_890_note, m.smart_890_at, "
+            f"mv.month, m.in_rpp, m.score, {SMART_SQL} AS smart_890, (v.modification_id IS NULL) AS unmapped, "
+            f"{SMART_SOURCE_SQL} AS smart_890_source, {SMART_NOTE_SQL} AS smart_890_note, {SMART_AT_SQL} AS smart_890_at, "
             "sum(mv.count) AS count "
             f"{_BASE_FROM} WHERE {period_sql} "
             "GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 "

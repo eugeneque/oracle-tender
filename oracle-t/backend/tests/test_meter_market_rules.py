@@ -223,3 +223,130 @@ def test_loader_applies_rules_to_new_rows(conn):
     _verification(conn, 99, gas, "G1")
     _monthly(conn)
     assert _scalar(conn, "SELECT count(*) FROM meter_verification_monthly WHERE variant_id = :v", v=gas) == 0
+
+
+def test_mirtek_rule_touches_only_base_rows_and_keeps_manual_decision(conn):
+    """Раздел 119: «соответствует» — только у базовых строк; ручное «не соответствует» не перезаписывается."""
+
+    types, _, plain, _ = _seed(conn)
+    sp1 = _scalar(
+        conn,
+        "INSERT INTO meter_market_modifications (type_id, name, phase, design, interface) "
+        "VALUES (:t, 'МИРТЕК-12-РУ SP1', '1ф', 'nd', 'н/д') RETURNING id",
+        t=types["61891-15"],
+    )
+    rules.apply_mirtek_smart(conn)
+    assert _scalar(conn, "SELECT smart_890 FROM meter_market_modifications WHERE id = :i", i=sp1) is None
+    assert _scalar(conn, "SELECT smart_890 FROM meter_market_modifications WHERE id = :i", i=plain) is True
+    # Аналитик передумала: ручное «нет» остаётся после повторного запуска правил.
+    conn.execute(text("UPDATE meter_market_modifications SET smart_890 = false, smart_890_source = 'manual' WHERE id = :i"), {"i": plain})
+    assert rules.apply_mirtek_smart(conn) == 0
+    assert _scalar(conn, "SELECT smart_890 FROM meter_market_modifications WHERE id = :i", i=plain) is False
+
+
+def test_migration_0111_resets_blanket_rule_and_drops_foreign_modifications(conn, monkeypatch):
+    import importlib.util
+    from pathlib import Path
+
+    from alembic import op
+
+    path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "0111_mirtek_smart_rollback.py"
+    spec = importlib.util.spec_from_file_location("migration_0111", path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    types, _, _, _ = _seed(conn)
+    t = types["61891-15"]
+
+    def add(name, smart, at="2026-11-19 08:23:56", note=migration.NOTE, source="manual"):
+        return _scalar(
+            conn,
+            "INSERT INTO meter_market_modifications (type_id, name, smart_890, smart_890_source, smart_890_note, updated_at) "
+            "VALUES (:t, :n, :s, :src, :note, :at) RETURNING id",
+            t=t, n=name, s=smart, src=source, note=note, at=at,
+        )
+
+    base = add("МИРТЕК-232-РУ", True)
+    blanket = add("МИРТЕК-12-РУ SP1", True)
+    touched = add("МИРТЕК-12-РУ W2", False, at="2026-11-20 12:30:00")  # правка аналитика после 0109
+    foreign = add("Ладога 0102", True)
+    variant = _variant(conn, t, "Ладога 0102", foreign, "ai")
+
+    monkeypatch.setattr(op, "get_bind", lambda: conn, raising=False)
+    migration.upgrade()
+
+    row = lambda i: conn.execute(text("SELECT smart_890, smart_890_source FROM meter_market_modifications WHERE id = :i"), {"i": i}).one()
+    assert tuple(row(base)) == (True, "manual")
+    assert tuple(row(blanket)) == (None, None)
+    assert tuple(row(touched)) == (False, "manual")
+    assert _scalar(conn, "SELECT count(*) FROM meter_market_modifications WHERE id = :i", i=foreign) == 0
+    assert _scalar(conn, "SELECT modification_id FROM meter_market_variants WHERE id = :v", v=variant) is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Отмечены аналитиком «не соответствует» — полное обозначение без протокола Pn.
+        ("МИРТЕК-12-РУ-SP1-A1R1-230-5-60A-ST-RF433/1-RF2400/3-HKMOQ1V3", False),
+        ("МИРТЕК-12-РУ-W2-A1-230-5-60A-S-RF433/1-LOQ1V3", False),
+        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF240", False),
+        ("МИРТЕК-32-РУ-W32-A0,5R1-230-5-10A-T-RS485-HLMOQ2V3", False),
+        ("МИРТЕК-32-РУ-SP31-A1R1-230-5-100A-T-RF-4", False),
+        ("W1-A1-230-5-60A-SS-RF433/1-V3", False),
+        # Протокол указан — «соответствует».
+        ("МИРТЕК-32-РУ-SP31-A1R1-230-5-100A-T-RF433/1-RF2400/2-P2-HKMOV3-D", True),
+        ("МИРТЕК-32-РУ-D37-1-A1R1-230-5-100A-T-RS485-MOD-P1-B-D", True),
+        ("МИРТЕК-12-РУ-W9-A1R1-230-5-80A-ST-G/1-P2-HKLMOV3-D", True),
+        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-P2-HKMOQ1V3", True),
+        ("МИРТЕК-12-РУ-SP3-А1R1-230-5-80А-ST-RF433/1-Р2-HKMOQ1V3", True),  # кириллическая «Р»
+        # Обозначение неполное — решает модификация.
+        ("МИРТЕК-232-РУ", None),
+        ("Миртек-32-РУ-W32-A15R1", None),
+        ("МИРТЕК-12-РУ-SP1-AIRI-230-5-60A", None),
+        ("Нет модификации", None),
+        (None, None),
+    ],
+)
+def test_protocol_verdict(raw, expected):
+    assert rules.protocol_verdict(raw)[0] is expected
+
+
+def test_mirtek_protocol_applied_to_variants_and_respects_manual(conn):
+    types, _, plain, _ = _seed(conn)
+    t = types["61891-15"]
+    with_p = _variant(conn, t, "МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-P2-HKMOQ1V3", plain, "ai")
+    without_p = _variant(conn, t, "МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-HKMOQ1V3", plain, "ai")
+    short = _variant(conn, t, "МИРТЕК-232-РУ", plain, "ai")
+    foreign = _variant(conn, types["87373-22"], "X-A1R1-230-5-60A-S-RF433", None)
+    conn.execute(text("UPDATE meter_market_variants SET smart_890 = true, smart_890_source = 'manual' WHERE id = :v"), {"v": without_p})
+
+    assert rules.apply_mirtek_protocol(conn) == 1
+    get = lambda v: tuple(conn.execute(text("SELECT smart_890, smart_890_source FROM meter_market_variants WHERE id = :v"), {"v": v}).one())
+    assert get(with_p) == (True, "rule")
+    assert get(without_p) == (True, "manual")  # ручное решение не перезаписано
+    assert get(short) == (None, None)
+    assert get(foreign) == (None, None)  # не МИРТЕК
+    assert rules.apply_mirtek_protocol(conn) == 0
+
+
+def test_report_takes_smart_from_variant(conn):
+    from app.services import meter_market_report as report
+
+    types, _, plain, _ = _seed(conn)
+    t = types["61891-15"]
+    sp3 = _scalar(
+        conn,
+        "INSERT INTO meter_market_modifications (type_id, name, phase, design, interface, smart_890, smart_890_source) "
+        "VALUES (:t, 'МИРТЕК-12-РУ SP3', '1ф', 'nd', 'RF', null, null) RETURNING id", t=t,
+    )
+    yes = _variant(conn, t, "МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-P2-HKMOQ1V3", sp3, "ai")
+    no = _variant(conn, t, "МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-HKMOQ1V3", sp3, "ai")
+    rules.apply_mirtek_protocol(conn)
+    for gid, v in ((1, yes), (2, no)):
+        _verification(conn, gid, v, f"S{gid}")
+    _monthly(conn)
+    rows = conn.execute(
+        text(f"SELECT v.id, {report.SMART_SQL} AS smart, {report.SMART_SOURCE_SQL} AS src "
+             "FROM meter_market_variants v LEFT JOIN meter_market_modifications m ON m.id = v.modification_id "
+             "WHERE v.id = ANY(:ids) ORDER BY v.id"), {"ids": [yes, no]},
+    ).all()
+    assert [(r.smart, r.src) for r in rows] == [(True, "rule"), (False, "rule")]

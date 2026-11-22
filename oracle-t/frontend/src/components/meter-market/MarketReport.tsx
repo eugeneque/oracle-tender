@@ -210,7 +210,7 @@ export function MarketReport({ status }: { status: MarketStatus }) {
       {screen === "groups" && <GroupsScreen onError={setError} onExplain={setExplain} />}
       {screen === "localization" && <LocalizationScreen status={status} onError={setError} onExplain={setExplain} />}
       {drill && <DrillPanel period={period} start={drill} onClose={() => setDrill(null)} />}
-      {explain && <ExplainPanel scope={explain} onClose={() => setExplain(null)} />}
+      {explain && <ExplainPanel scope={explain} onClose={() => setExplain(null)} canEdit={status.can_edit} />}
     </div>
   );
 }
