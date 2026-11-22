@@ -192,6 +192,26 @@ def update_modification(
     return modification
 
 
+def set_variant_smart(db: Session, variant_id: int, value: bool | None) -> MeterMarketVariant:
+    """Ручное решение «соответствует ПП 890» по написанию (22.11.2026): главнее правила по протоколу Pn
+    и решения модификации. `None` — снять; правило по обозначению (если применимо) вернётся сразу."""
+
+    from datetime import datetime, timezone
+
+    variant = _get(db, MeterMarketVariant, variant_id, "Вариант написания")
+    if value is None:
+        variant.smart_890, variant.smart_890_source, variant.smart_890_note, variant.smart_890_at = None, None, None, None
+        db.flush()
+        rules.apply_mirtek_protocol(db.connection())
+        db.refresh(variant)
+    else:
+        variant.smart_890, variant.smart_890_source = value, "manual"
+        variant.smart_890_note = "решение аналитика по этому написанию"
+        variant.smart_890_at = datetime.now(timezone.utc)
+        db.flush()
+    return variant
+
+
 def set_type_smart(db: Session, type_id: int, value: bool | None) -> int:
     """Ручная отметка «соответствует ПП 890» всем модификациям типа сразу (06.11.2026): у крупных
     типов десятки модификаций, а решение по линейке одно. `None` — снять ручные отметки (ИИ

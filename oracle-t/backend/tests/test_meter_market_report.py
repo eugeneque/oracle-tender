@@ -447,3 +447,27 @@ def test_rpp_record_without_score_or_expired_does_not_hide_valid_one():
     expired = report.rpp_verdict(records, date(2026, 3, 2))
     assert not expired.included and expired.reason == "срок записи РПП истёк 01.03.2026"
     assert report.rpp_verdict(records, date(2023, 1, 1)).reason.startswith("поверка до внесения")
+
+
+def test_manual_smart_by_variant_overrides_modification_and_can_be_cleared(market, db_session):
+    """22.11.2026: ручное решение ПП 890 по написанию — в детализации побеждает решение модификации."""
+
+    from app.services import meter_market_dictionary as dictionary
+    from app.services import meter_market_explain as explain
+
+    db_session.execute(text("UPDATE meter_market_modifications SET smart_890 = true, smart_890_source = 'ai' WHERE id = :m"),
+                       {"m": market["m_din"]})
+    variant_id = market["variants"]["din"]
+    period = report.parse_period("quarter:2026-3", date(2026, 10, 1))
+
+    def position():
+        result = explain.explain_overview(db_session, period, report.Filters())
+        return next(p for p in result["positions"] if p.get("variant_id") == variant_id)
+
+    assert position()["smart"]["key"] == "yes" and position()["variant_smart_source"] is None
+    dictionary.set_variant_smart(db_session, variant_id, False)
+    manual = position()
+    assert manual["smart"]["key"] == "no" and manual["variant_smart_source"] == "manual"
+    assert "решение аналитика" in manual["smart"]["reason"]
+    dictionary.set_variant_smart(db_session, variant_id, None)  # снять — снова решение модификации
+    assert position()["smart"]["key"] == "yes" and position()["variant_smart_source"] is None

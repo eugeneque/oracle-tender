@@ -41,6 +41,12 @@ class TypeIn(BaseModel):
     code_notes: str | None = None
 
 
+class VariantSmartIn(BaseModel):
+    """Ручное решение ПП 890 по написанию; null — снять и вернуть правило/решение модификации."""
+
+    smart_890: bool | None = None
+
+
 class TypeSmartIn(BaseModel):
     """Ручная отметка ПП 890 всем модификациям типа; null — снять ручные отметки."""
 

@@ -382,6 +382,26 @@ function PositionDetails({
 }) {
   const [remapping, setRemapping] = useState(false);
   const [remapError, setRemapError] = useState<string | null>(null);
+  const [smartBusy, setSmartBusy] = useState(false);
+  const manualSmart = p.variant_smart_source === "manual";
+  // Ручное решение по написанию (22.11.2026): главнее правила по протоколу Pn и решения модификации.
+  const setVariantSmart = async (value: boolean | null) => {
+    if (p.variant_id === null) return;
+    setSmartBusy(true);
+    setRemapError(null);
+    try {
+      await api.put(`/meter-market/variants/${p.variant_id}/smart`, { smart_890: value });
+      onRemapped(
+        value === null
+          ? `ПП 890 для «${p.raw}» — ручное решение снято`
+          : `ПП 890 для «${p.raw}» — ${value ? "соответствует" : "не соответствует"} (решение аналитика)`,
+      );
+    } catch (err) {
+      setRemapError(err instanceof ApiError ? err.message : "Не удалось сохранить решение");
+    } finally {
+      setSmartBusy(false);
+    }
+  };
   const [samples, setSamples] = useState<MarketSample[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const canSample = p.variant_id !== null || p.modification_id !== null;
@@ -400,6 +420,23 @@ function PositionDetails({
   return (
     <div className="ml-7 mt-2 space-y-3 rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs">
       <Facts position={p} />
+      {p.variant_id !== null && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-zinc-500">ПП 890 этого написания:</span>
+          <select
+            className="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-xs text-zinc-200"
+            disabled={!canEdit || smartBusy}
+            title={canEdit ? undefined : "Справочник правят аналитик и администратор"}
+            value={manualSmart ? (p.smart.key === "yes" ? "yes" : "no") : ""}
+            onChange={(e) => void setVariantSmart(e.target.value === "" ? null : e.target.value === "yes")}
+          >
+            <option value="" className="bg-zinc-900">по правилу / модификации</option>
+            <option value="yes" className="bg-zinc-900">соответствует</option>
+            <option value="no" className="bg-zinc-900">не соответствует</option>
+          </select>
+          <span className="text-zinc-600">только это написание, главнее правила и решения модификации</span>
+        </div>
+      )}
       {p.variant_id !== null && (
         <div>
           {!remapping ? (

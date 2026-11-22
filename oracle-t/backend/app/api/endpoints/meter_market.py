@@ -25,6 +25,7 @@ from app.schemas.meter_market import (
     ThresholdsIn,
     TypeIn,
     TypeSmartIn,
+    VariantSmartIn,
     VariantMapIn,
 )
 from app.services import meter_market_dictionary as dictionary
@@ -343,6 +344,28 @@ def put_variant(
     )
     db.commit()
     return {"id": variant.id, "modification_id": variant.modification_id, "same_key_mapped": same}
+
+
+@router.put("/variants/{variant_id}/smart")
+def put_variant_smart(
+    variant_id: int,
+    payload: VariantSmartIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_analytics),
+) -> dict[str, Any]:
+    """Ручное решение ПП 890 по одному написанию (главнее правила по протоколу и модификации)."""
+
+    variant = dictionary.set_variant_smart(db, variant_id, payload.smart_890)
+    log_action(
+        db,
+        component="meter_market",
+        action="variant_smart_890",
+        result="success",
+        details=f"«{variant.raw}»: {payload.smart_890}",
+        user_id=user.id,
+    )
+    db.commit()
+    return {"id": variant.id, "smart_890": variant.smart_890, "source": variant.smart_890_source}
 
 
 @router.get("/types")

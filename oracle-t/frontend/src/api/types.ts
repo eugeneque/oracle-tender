@@ -2464,6 +2464,8 @@ export interface MarketExplainPosition {
   key: string;
   variant_id: number | null;
   modification_id: number | null;
+  /** Источник ПП 890 у самого написания: manual — решение аналитика, rule — правило по обозначению. */
+  variant_smart_source: string | null;
   type_id: number;
   mit_number: string;
   notation: string | null;

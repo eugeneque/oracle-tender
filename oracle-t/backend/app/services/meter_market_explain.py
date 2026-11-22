@@ -96,6 +96,7 @@ def _position(row: dict[str, Any], names: dict[int, str], limits: list[tuple[int
         "notation": row.get("notation"),
         "type_title": row.get("title"),
         "modification_id": row.get("mod_id"),
+        "variant_smart_source": row.get("variant_smart_source"),
         "modification": row.get("mod_name"),
         "manufacturer": names.get(row.get("manufacturer_id"), "Производитель не указан"),
         "phase": report.NO_DATA if unmapped else (row.get("phase") or report.NO_DATA),
@@ -121,13 +122,13 @@ _ROW_SQL = (
     f"{report.SMART_NOTE_SQL} AS smart_890_note, "
     f"{report.SMART_AT_SQL} AS smart_890_at, m.manufacturer_override_id AS override_id, (v.modification_id IS NULL) AS unmapped, "
     f"{report._MANUFACTURER_SQL} AS manufacturer_id, extract(year FROM mv.month)::int AS year, "
-    "sum(mv.count) AS count "
+    "v.smart_890_source AS variant_smart_source, sum(mv.count) AS count "
     "FROM meter_verification_monthly mv "
     "JOIN meter_market_variants v ON v.id = mv.variant_id "
     "JOIN meter_market_types t ON t.id = v.type_id "
     "LEFT JOIN meter_market_modifications m ON m.id = v.modification_id "
 )
-_ROW_GROUP = " GROUP BY " + ", ".join(str(i) for i in range(1, 26))
+_ROW_GROUP = " GROUP BY " + ", ".join(str(i) for i in range(1, 27))
 
 
 def _summary(included: int, reasons: dict[tuple[str, bool], int]) -> list[dict[str, Any]]:
