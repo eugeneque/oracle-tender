@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 from loguru import logger
@@ -566,6 +567,19 @@ def _full_review_shared(db: Session, job: BackgroundJob, actor: User | None) -> 
         except Exception as exc:  # noqa: BLE001 - перенос полей вторичен
             db.rollback()
             logger.warning(f"Поля разбора {tender.external_id} не перенесены на двойников: {exc}")
+    # Разбор, поставленный наблюдением за закупкой (раздел 118): итог уходит в Bitrix24 полной выгрузкой.
+    push_id = (job.payload or {}).get("push_bitrix_tender_id")
+    if push_id:
+        from app.services import tender_monitor_service
+
+        try:
+            note = tender_monitor_service.push_after_review(db, uuid.UUID(push_id))
+            if note:
+                message = f"{message}; {note}"
+        except Exception as exc:  # noqa: BLE001 - разбор уже сохранён, выгрузку можно повторить вручную
+            db.rollback()
+            logger.warning(f"Выгрузка в Bitrix24 после разбора {push_id} не удалась: {exc}")
+            message = f"{message}; выгрузка в Bitrix24 не удалась: {exc}"
     return message
 
 

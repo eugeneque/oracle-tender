@@ -392,3 +392,58 @@ def test_api_state_and_guard(client, admin_token, db_session):
     assert client.post(f"/tenders/{tender_id}/monitoring/check", headers=headers).status_code == 409
     assert client.get(f"/tenders/{uuid.uuid4()}/monitoring", headers=headers).status_code == 404
     assert client.get("/monitoring", headers=headers).status_code == 200
+
+
+# --- файл «изменения в ТТ» и пересчёт разбора (раздел 118) ---------------------------------------
+
+
+def test_tz_change_file_is_classified_and_reported_as_tz_edition():
+    from app.services.document_service import classify_document
+
+    name = "ДоЗ_34001_ИЗМ_внесение изменений в ТТ.zip"
+    assert classify_document(name) == "tz_description"
+    assert classify_document("Изменения в ТЗ.docx") == "tz_description"
+    assert classify_document("Уведомление об изменении №1.pdf") == "other"
+    assert classify_document("Ответ на запрос №3.zip") == "other"
+
+    new = _snap(documents={"u/izm": {"name": name, "class": "tz_description"}})
+    (change,) = diff_snapshots(_snap(), new)
+    assert change["event_type"] == "TECHNICAL_REQUIREMENT_CHANGED"
+
+
+def test_new_documents_queue_full_review_and_bitrix_push(db_session, monkeypatch):
+    tender = _tender(db_session)
+    db_session.add(BitrixDealLink(tender_id=tender.id, deal_id=1984))
+    db_session.flush()
+    queued: list[dict] = []
+    monkeypatch.setattr("app.core.jobs.enqueue", lambda db, **kw: queued.append(kw))
+    monkeypatch.setattr(monitor, "analysis_outdated_events", lambda db, t, among=None: list(among or []))
+
+    def event(kind):
+        return TenderEvent(
+            tender_id=tender.id, event_id=f"e-{uuid.uuid4().hex}", event_type=kind, field_key="doc:x",
+            title="t", detected_at=datetime.now(timezone.utc),
+        )
+
+    monitor._schedule_reanalysis(db_session, tender, [event("AMOUNT_CHANGED")])
+    assert queued == []  # не о документах — разбор не трогаем
+    monitor._schedule_reanalysis(db_session, tender, [event("TECHNICAL_REQUIREMENT_CHANGED")])
+    assert len(queued) == 1
+    assert queued[0]["kind"].value == "tender_full_review" and queued[0]["actor"] is None
+    assert queued[0]["payload"]["push_bitrix_tender_id"] == str(tender.id)
+
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "monitor_auto_reanalyze", False)
+    monitor._schedule_reanalysis(db_session, tender, [event("DOCUMENT_ADDED")])
+    assert len(queued) == 1  # выключено настройкой
+
+
+def test_push_after_review_sends_full_snapshot_as_deal_owner(db_session, admin_user, monkeypatch):
+    tender = _tender(db_session)
+    db_session.add(BitrixDealLink(tender_id=tender.id, deal_id=1984, pushed_by_id=admin_user.id))
+    db_session.flush()
+    calls: list[dict] = []
+    monkeypatch.setattr(bitrix_ai_service, "send", lambda db, t, **kw: calls.append(kw) or {})
+    assert "отправлена" in monitor.push_after_review(db_session, tender.id)
+    assert calls[0]["full_snapshot"] is True and calls[0]["actor"].id == admin_user.id

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -225,12 +226,24 @@ _CLASS_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+# Файл с изменениями в техническое задание: «ДоЗ_34001_ИЗМ_внесение изменений в ТТ.zip»,
+# «Изменения в ТЗ.docx». По одному слову «изменени» нельзя — «Уведомление об изменении №1»
+# не ТЗ, — поэтому нужно ещё и слово о требованиях (раздел 118, закупка 32616535832).
+_TZ_CHANGE_RE = re.compile(
+    r"(изменен|\bизм\b|\bизм_|редакци)\w*.*(\bтт\b|\bтз\b|техническ|требован)"
+    r"|(\bтт\b|\bтз\b|техническ|требован).*(изменен|\bизм\b|\bизм_|редакци)",
+    re.IGNORECASE,
+)
+
+
 def classify_document(file_name: str) -> str:
     """Класс документа по имени файла. Порядок перечня — от более специфичного к общему:
     «протокол рассмотрения заявок по проекту контракта» должен стать протоколом, а не
     контрактом."""
 
     name = (file_name or "").lower()
+    if _TZ_CHANGE_RE.search(name):
+        return DocumentClass.TZ_DESCRIPTION.value
     for document_class, markers in _CLASS_MARKERS:
         if any(marker in name for marker in markers):
             return document_class

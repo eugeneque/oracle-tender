@@ -322,7 +322,8 @@ def _document_event(url: str, doc: dict[str, Any], old_docs: dict[str, Any]) -> 
             note=revision_note or "Опубликован ещё один файл договора; различия пунктов не сверялись.",
             **common,
         )
-    if klass == DocumentClass.TZ_DESCRIPTION.value and had_class:
+    # Файл «изменения в ТТ/ТЗ» — новая редакция требований, даже если отдельного ТЗ в слепке не было.
+    if klass == DocumentClass.TZ_DESCRIPTION.value and (had_class or document_service._TZ_CHANGE_RE.search(name)):  # noqa: SLF001
         return _change(
             "TECHNICAL_REQUIREMENT_CHANGED", f"doc:{url}", f"Новая редакция ТЗ: {name}",
             name if revised else None, name,
@@ -1041,7 +1042,90 @@ def check_tender(db: Session, tender: Tender, *, refresh: bool = True) -> list[T
     db.commit()
     if events:
         _notify(db, tender, events)
+        _schedule_reanalysis(db, tender, events)
     return events
+
+
+# События о документах, после которых разбор и выгрузка в Bitrix24 пересчитываются сами
+# (раздел 118): новые требования, проект договора, разъяснения и просто новые файлы документации.
+REANALYSIS_EVENTS = frozenset(
+    {
+        "DOCUMENT_ADDED",
+        "DOCUMENT_REPLACED",
+        "TECHNICAL_REQUIREMENT_CHANGED",
+        "CONTRACT_CHANGED",
+        "CLARIFICATION_PUBLISHED",
+    }
+)
+
+
+def _schedule_reanalysis(db: Session, tender: Tender, events: list[TenderEvent]) -> None:
+    """Новая документация → полный разбор заново, после него — полная выгрузка в Bitrix24.
+
+    Раньше пересчёта не было: Bitrix24 получал событие «новая редакция ТЗ», а требования, документы
+    и матрица в сделке оставались прежними (замечание коллеги по сделке 2062). Ставится только
+    если у закупки уже есть разбор (иначе обновлять нечего — `analysis_outdated_events` пуст) и
+    только для закупок, выгруженных в Bitrix24. Расходует токены ИИ — отключается настройкой
+    `monitor_auto_reanalyze`. Сбой постановки проверку не отменяет."""
+
+    from app.core.config import get_settings
+    from app.core.jobs import enqueue
+    from app.models.job import JobKind
+    from app.services import tender_twins
+
+    if not get_settings().monitor_auto_reanalyze:
+        return
+    if not any(e.event_type in REANALYSIS_EVENTS for e in events):
+        return
+    try:
+        link = db.get(BitrixDealLink, tender.id)
+        if link is None or not link.deal_id:
+            return
+        if not analysis_outdated_events(db, tender, among=[e for e in events if e.event_type in REANALYSIS_EVENTS]):
+            return
+        subject = tender_twins.subject(db, tender)
+        enqueue(
+            db,
+            kind=JobKind.TENDER_FULL_REVIEW,
+            tender=subject,
+            actor=None,
+            payload={"push_bitrix_tender_id": str(tender.id), "reason": "monitor_documents"},
+        )
+        log_action(
+            db,
+            component="monitoring",
+            action=f"reanalysis_queued:{tender.external_id}",
+            result="success",
+            level=LogLevel.INFO,
+            details="Новая документация: повторный полный разбор и выгрузка в Bitrix24.",
+        )
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - пересчёт вторичен, события уже записаны
+        db.rollback()
+        logger.warning(f"Повторный разбор {tender.external_id} не поставлен: {exc}")
+
+
+def push_after_review(db: Session, tender_id: uuid.UUID) -> str | None:
+    """Полная выгрузка в Bitrix24 после повторного разбора (вызывает обработчик задачи).
+    От имени того, кто выгрузил сделку или поставил закупку под наблюдение; без такого
+    пользователя или при выключенной отправке пакетов — ничего не делает."""
+
+    from app.services import bitrix_ai_service
+
+    tender = db.get(Tender, tender_id)
+    if tender is None:
+        return None
+    link = db.get(BitrixDealLink, tender.id)
+    monitor = get_monitor(db, tender.id)
+    actor_id = (link.pushed_by_id if link else None) or (monitor.started_by_id if monitor else None)
+    actor = db.get(User, actor_id) if actor_id else None
+    if actor is None:
+        return "выгрузка в Bitrix24 пропущена: неизвестен пользователь"
+    try:
+        bitrix_ai_service.send(db, tender, actor=actor, full_snapshot=True)
+    except bitrix_ai_service.BitrixAiPushDisabledError:
+        return "выгрузка в Bitrix24 выключена"
+    return "полная выгрузка в Bitrix24 отправлена"
 
 
 def _notify(db: Session, tender: Tender, events: list[TenderEvent]) -> None:

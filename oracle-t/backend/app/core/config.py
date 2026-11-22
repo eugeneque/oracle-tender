@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     tender_gaps_fill_enabled: bool = True
     tender_gaps_fetch_limit: int = 100
 
+    # Новая документация у закупки под наблюдением (раздел 118): повторный полный разбор и полная
+    # выгрузка в Bitrix24. Расходует токены ИИ, поэтому отключается `MONITOR_AUTO_REANALYZE=false`.
+    monitor_auto_reanalyze: bool = True
+
     upper_software_sync_enabled: bool = True
     upper_software_sync_weekday: int = 0
     upper_software_sync_time: str = "10:00"
