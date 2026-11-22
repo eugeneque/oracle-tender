@@ -28,6 +28,7 @@ export const CHANGELOG: Release[] = [
     date: "2026-11-22",
     title: "Bitrix24: полное наименование и номер извещения",
     items: [
+      { kind: "new", text: "Закупка с несколькими лотами уходит в Bitrix24 общей карточкой и отдельной сделкой на каждый лот (record_type=LOT)." },
       { kind: "improved", text: "В сделку уходят полное наименование закупки (procurement_name) и реестровый номер извещения строкой (notice_number)." },
     ],
   },

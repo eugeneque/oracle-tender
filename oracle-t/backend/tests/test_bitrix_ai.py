@@ -521,3 +521,40 @@ def test_twin_record_sends_analysis_of_primary_record(db_session, client, admin_
     assert payload["lookup"]["customer_inn"] == "2460069527"
     state = service.tender_state(db_session, twin)
     assert state["last_request"]["accepted"] and state["deal_id"] == 1984
+
+
+def test_multi_lot_tender_sends_common_card_and_lot_deals(db_session, client, admin_user):
+    """22.11.2026 (Bitrix24): при нескольких лотах — общая карточка (`PROCEDURE`) и отдельная
+    сделка на каждый лот (`LOT`) со своим номером и ценой; один лот остаётся `SINGLE`."""
+
+    tender = _tender(db_session)
+    card = db_session.get(TenderCard, tender.id)
+    assert service.build_payload(db_session, tender)["deal_fields"]["record_type"] == "SINGLE"
+
+    card.payload = {
+        **card.payload,
+        "tables": {
+            "lots": {
+                "headers": ["Номер, наименование лота"],
+                "rows": [
+                    ["1 Счётчики однофазные", "Нет", "Начальная (максимальная) цена договора: 100 000,00 ₽"],
+                    ["2 Счётчики трёхфазные", "Нет", "Начальная (максимальная) цена договора: 200 000,50 ₽"],
+                ],
+            }
+        },
+    }
+    db_session.commit()
+    _configure(db_session, admin_user)
+    receiver = FakeReceiver()
+
+    result = service.send(db_session, tender, actor=admin_user, transport=httpx.MockTransport(receiver))
+
+    assert result["accepted"] is True
+    common, lot1, lot2 = (r["payload"] for r in receiver.requests)
+    assert common["deal_fields"]["record_type"] == "PROCEDURE" and "lot_number" not in common["deal_fields"]
+    assert [lot["deal_fields"]["record_type"] for lot in (lot1, lot2)] == ["LOT", "LOT"]
+    assert lot2["lookup"]["lot_number"] == "2" and lot2["deal_fields"]["amount"] == 200000.5
+    assert lot2["deal_fields"]["lot_name"] == "Счётчики трёхфазные"
+    assert lot2["deal_id"] == 0 and lot2["full_snapshot"] is False
+    # Связь закупки — со сделкой общей карточки, а не лота.
+    assert db_session.get(BitrixDealLink, tender.id).deal_id == 1984

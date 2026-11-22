@@ -349,11 +349,28 @@ def _result_status(db: Session, tender: Tender) -> str:
     return our_result(db, tender) or "PENDING"
 
 
-def build_lookup(db: Session, tender: Tender) -> dict[str, Any]:
+def procedure_lots(db: Session, tender: Tender) -> list[dict[str, Any]]:
+    """Лоты закупки из «Списка лотов» карточки ЕИС (номер, наименование, цена). Пусто, если
+    карточки нет — тогда лот считается единственным. Отдельные сделки лотов (`record_type=LOT`,
+    22.11.2026, пп. 1, 50 перечня Bitrix24) заводятся, только когда лотов больше одного."""
+
+    from app.services import eis_card_tables
+
+    card = db.get(TenderCard, tender_twins.subject(db, tender).id)
+    found = eis_card_tables.lots(card.payload if card else None)
+    by_number = {item["lot_number"]: item for item in found}
+    return [by_number[number] for number in sorted(by_number, key=int)]
+
+
+def is_multi_lot(db: Session, tender: Tender) -> bool:
+    return len(procedure_lots(db, tender)) > 1
+
+
+def build_lookup(db: Session, tender: Tender, lot: dict[str, Any] | None = None) -> dict[str, Any]:
     return _compact(
         {
             "procedure_number": procedure_number(tender),
-            "lot_number": "1",
+            "lot_number": lot["lot_number"] if lot else "1",
             "customer_inn": customer_inn(db, tender),
             "customer_name": _clip(tender.customer_name, 500),
             "procedure_url": tender.source_url,
@@ -422,18 +439,26 @@ def _document_trade_dates(db: Session, tender: Tender, dates: dict[str, Any]) ->
     return out
 
 
-def build_deal_fields(db: Session, tender: Tender) -> dict[str, Any]:
+def build_deal_fields(db: Session, tender: Tender, lot: dict[str, Any] | None = None) -> dict[str, Any]:
     dates = card_dates(db, tender)
     dates = {**_document_trade_dates(db, tender, dates), **{k: v for k, v in dates.items() if v}}
     subject = _clip(tender.title, 180) or "Закупка"
-    return _compact(
+    multi = lot is not None or is_multi_lot(db, tender)
+    if lot is not None:
+        # Сделка лота: сумма — цена лота, не всей закупки.
+        lot_title = f"{procedure_number(tender)} — {lot.get('name') or subject} — лот {lot['lot_number']}"
+    elif multi:
+        lot_title = f"{procedure_number(tender)} — {subject}"
+    else:
+        lot_title = f"{procedure_number(tender)} — {subject} — лот 1"
+    fields = _compact(
         {
-            "title": f"{procedure_number(tender)} — {subject} — лот 1"[:250],
+            "title": lot_title[:250],
             # Bitrix24 (19.11.2026): название сделки формирует портал, ему нужно полное исходное
             # наименование и реестровый номер строкой (ведущие нули сохраняются — это не число).
             "procurement_name": _clip(tender.title, 2000),
             "notice_number": procedure_number(tender) or None,
-            "amount": _number(tender.price),
+            "amount": _number(lot["price"] if lot and lot.get("price") is not None else tender.price),
             "currency": tender.currency or "RUB",
             "procedure_url": tender.source_url,
             "direction": _direction(tender),
@@ -450,12 +475,16 @@ def build_deal_fields(db: Session, tender: Tender) -> dict[str, Any]:
             # Сумма комиссии — только прямо указанная в документах (раздел 95); тариф не
             # пересчитывается, правило госплощадок по памяти не подставляется.
             "platform_commission": _platform_commission(db, tender),
-            # Закупка у нас — одна карточка на процедуру: лоты отдельно не ведутся.
-            "lot_number": "1",
-            "record_type": "SINGLE",
+            # Один лот — одна карточка (`SINGLE`). Несколько лотов — общая карточка закупки
+            # (`PROCEDURE`, без номера лота) и отдельные сделки лотов (`LOT`): 22.11.2026,
+            # «при нескольких будут общая карточка и отдельные сделки лотов» (Bitrix24).
+            "lot_number": lot["lot_number"] if lot else (None if multi else "1"),
+            "lot_name": _clip(lot.get("name"), 500) if lot else None,
+            "record_type": "LOT" if lot else ("PROCEDURE" if multi else "SINGLE"),
             "result_status": _result_status(db, tender),
         }
     )
+    return fields
 
 
 _PRICING_VAT_BASIS = {"included": "INCLUDED", "excluded": "EXCLUDED", "not_applicable": "NOT_TAXABLE"}
@@ -1346,8 +1375,24 @@ def _deal_id(db: Session, tender: Tender) -> int:
     return 0
 
 
+def _lot_sections(sections: dict[str, list[dict[str, Any]]], number: str) -> dict[str, list[dict[str, Any]]]:
+    """Строки сделки лота: только те, что явно относятся к этому лоту (`data.lot_number`)."""
+
+    out = {}
+    for name, rows in sections.items():
+        mine = [row for row in rows if str((row.get("data") or {}).get("lot_number") or "") == number]
+        if mine:
+            out[name] = mine
+    return out
+
+
 def build_payload(
-    db: Session, tender: Tender, *, full_snapshot: bool = False, request_id: str | None = None
+    db: Session,
+    tender: Tender,
+    *,
+    full_snapshot: bool = False,
+    request_id: str | None = None,
+    lot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # Разбор закупки — требования, матрица, документы, условия поставки, заключение ИИ —
     # хранится у основной записи (tender_twins, 29.09.2026), а в Bitrix24 выгружают ту запись,
@@ -1355,9 +1400,11 @@ def build_payload(
     # и у 32616544947 (10.11.2026) в сделку ушли поля и пустая выжимка — без разбора ИИ и без
     # документов. Теперь данные берутся у основной записи; журнал запросов и связь со сделкой —
     # по-прежнему у записи, с которой выгружали.
-    deal_id = _deal_id(db, tender)
+    deal_id = _deal_id(db, tender) if lot is None else 0  # сделку лота ищет портал по lookup
     tender = tender_twins.subject(db, tender)
     sections = build_sections(db, tender)
+    if lot is not None:
+        sections = _lot_sections(sections, lot["lot_number"])
     now = datetime.now(timezone.utc)
     digest = hashlib.sha1(
         json.dumps(sections, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -1369,13 +1416,13 @@ def build_payload(
         # Новая версия анализа на каждую отправку: портал ведёт по ней историю строк.
         "analysis_id": f"sova-{tender.id.hex[:12]}-{now:%Y%m%dT%H%M%SZ}-{digest}-{uuid.uuid4().hex[:6]}",
         "generated_at": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "full_snapshot": bool(full_snapshot),
-        "lookup": build_lookup(db, tender),
-        "deal_fields": build_deal_fields(db, tender),
+        "full_snapshot": bool(full_snapshot) and lot is None,
+        "lookup": build_lookup(db, tender, lot),
+        "deal_fields": build_deal_fields(db, tender, lot),
         "sections": sections,
     }
     # После победы цена — договорная, НМЦК-блок не отправляем (как и `amount` в событиях).
-    if _result_status(db, tender) != "WIN":
+    if lot is None and _result_status(db, tender) != "WIN":
         pricing = build_pricing(tender)
         if pricing:
             payload["pricing"] = pricing
@@ -1496,9 +1543,10 @@ def _describe(status_code: int, answer: Any) -> str:
 
 
 def _finish(
-    db: Session, tender: Tender, record: BitrixAiRequest, actor: User, *, note: str | None = None
+    db: Session, tender: Tender, record: BitrixAiRequest, actor: User, *, note: str | None = None, lot: bool = False
 ) -> dict[str, Any]:
-    if record.accepted and record.deal_id:
+    # Сделка лота не подменяет связь закупки: `bitrix_deal_links` держит сделку общей карточки.
+    if record.accepted and record.deal_id and not lot:
         link = db.get(BitrixDealLink, tender.id) or BitrixDealLink(tender_id=tender.id)
         link.deal_id = record.deal_id
         link.pushed_at = record.sent_at
@@ -1546,6 +1594,27 @@ def send(
             "проверки адреса и секрета."
         )
     payload = build_payload(db, tender, full_snapshot=full_snapshot)
+    result = _send_package(db, tender, settings, payload, actor, transport)
+    # Несколько лотов: после общей карточки — по сделке на каждый лот. Сбой лота не отменяет
+    # принятую карточку; ошибка видна в журнале запросов.
+    if result.get("accepted") and is_multi_lot(db, tender):
+        for lot in procedure_lots(db, tender):
+            lot_payload = build_payload(db, tender, lot=lot)
+            lot_record = _record(tender, lot_payload, actor)
+            db.add(lot_record)
+            _post(settings, lot_record, transport)
+            _finish(db, tender, lot_record, actor, note=f"лот {lot['lot_number']}", lot=True)
+    return result
+
+
+def _send_package(
+    db: Session,
+    tender: Tender,
+    settings: Bitrix24Settings,
+    payload: dict[str, Any],
+    actor: User,
+    transport: httpx.BaseTransport | None,
+) -> dict[str, Any]:
     record = _record(tender, payload, actor)
     db.add(record)
     _post(settings, record, transport)
