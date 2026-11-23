@@ -158,6 +158,19 @@ _ROW_SQL = (
 )
 _ROW_GROUP = " GROUP BY " + ", ".join(str(i) for i in range(1, 32))
 
+# Сведения о написании без агрегата поверок — для детализации «Локализации» по написаниям (24.11.2026).
+_VARIANT_INFO_SQL = (
+    "SELECT v.id AS variant_id, v.raw, v.mapped_by, t.id AS type_id, t.mit_number, t.notation, t.title, "
+    f"t.in_report, m.id AS mod_id, m.name AS mod_name, m.phase, m.design, {report.INTERFACE_SQL} AS interface, m.in_rpp, m.score, "
+    f"m.rpp_included_at, m.rpp_record_number, {report.SMART_SQL} AS smart, {report.SMART_SOURCE_SQL} AS smart_890_source, "
+    f"{report.SMART_NOTE_SQL} AS smart_890_note, {report.SMART_AT_SQL} AS smart_890_at, "
+    f"m.manufacturer_override_id AS override_id, {report._MANUFACTURER_SQL} AS manufacturer_id, "
+    "v.smart_890_source AS variant_smart_source, v.interface_source AS variant_interface_source, "
+    "v.interface_note, v.interface_review, v.interface_suggested, m.interface AS mod_interface "
+    "FROM meter_market_variants v JOIN meter_market_types t ON t.id = v.type_id "
+    "LEFT JOIN meter_market_modifications m ON m.id = v.modification_id WHERE v.id = ANY(:ids)"
+)
+
 
 def _summary(included: int, reasons: dict[tuple[str, bool], int]) -> list[dict[str, Any]]:
     return [
@@ -260,20 +273,25 @@ def explain_localization(
     requirement: int | None = None,
     title: str = "",
 ) -> dict[str, Any]:
-    """Детализация ячейки «Локализации»: производитель × баллы × квартал (любое — «все»)."""
+    """Детализация ячейки «Локализации»: производитель × баллы × квартал (любое — «все»).
+
+    Строка — написание из ФГИС, а не модификация целиком (выбор аналитика 24.11.2026): ПП 890 и интерфейс
+    теперь хранятся у написания (разделы 120, 122), и метка строки должна совпадать с основным отчётом.
+    Неразмеченные написания типа с общей записью РПП — по-прежнему одной строкой на тип."""
 
     names = report._manufacturer_names(db)
     limits = report.thresholds(db)
-    pieces, mods, _ = report.localization_ledger(db, edge, manufacturer_id=manufacturer_id)
+    pieces, mods, _ = report.localization_ledger(db, edge, manufacturer_id=manufacturer_id, by_variant=True)
     positions: dict[str, dict[str, Any]] = {}
     reasons: dict[tuple[str, bool], int] = defaultdict(int)
 
     def position(piece: report.LocPiece) -> dict[str, Any]:
         type_id = piece.unmapped_type_id
-        key = f"u{type_id}" if type_id else f"m{piece.modification_id}"
+        key = f"u{type_id}" if type_id else f"v{piece.variant_id}"
         if key not in positions:
             positions[key] = {"key": key, "modification_id": piece.modification_id, "unmapped_type_id": type_id,
-                              "counted": 0, "exclusions": defaultdict(int), "records": set(), "basis": ""}
+                              "variant_id": piece.variant_id, "counted": 0, "exclusions": defaultdict(int),
+                              "records": set(), "basis": ""}
         return positions[key]
 
     # Неразмеченные написания этих типов учтены бухгалтерией (общая запись РПП исполнений).
@@ -313,45 +331,34 @@ def explain_localization(
         q_end = report._add_months(q_start, 3)
     if score is None:
         manufacturer_sql = f" AND {report._MANUFACTURER_SQL} = :mf" if manufacturer_id is not None else ""
-        for mod_id, type_id, unmapped, count in db.execute(
+        for variant_id, mod_id, type_id, unmapped, count in db.execute(
             text(
-                "SELECT v.modification_id, v.type_id, (v.modification_id IS NULL), sum(mv.count) "
+                "SELECT CASE WHEN v.modification_id IS NULL THEN NULL ELSE v.id END, v.modification_id, v.type_id, "
+                "(v.modification_id IS NULL), sum(mv.count) "
                 f"{report._BASE_FROM} WHERE mv.month >= :s AND mv.month < :e "
                 f"AND ((v.modification_id IS NULL AND NOT v.type_id = ANY(:inherited)) OR NOT m.in_rpp)"
-                f"{manufacturer_sql} GROUP BY 1, 2, 3"
+                f"{manufacturer_sql} GROUP BY 1, 2, 3, 4"
             ),
             {"s": q_start, "e": q_end, "mf": manufacturer_id, "inherited": inherited_types},
         ):
             reason = REASON_UNMAPPED_LOC if unmapped else REASON_NOT_IN_RPP
-            key = f"u{type_id}" if unmapped else f"m{mod_id}"
+            key = f"u{type_id}" if unmapped else f"v{variant_id}"
             item = positions.setdefault(
                 key,
                 {"key": key, "modification_id": mod_id, "unmapped_type_id": type_id if unmapped else None,
-                 "counted": 0, "exclusions": defaultdict(int), "records": set(), "basis": ""},
+                 "variant_id": None if unmapped else variant_id, "counted": 0, "exclusions": defaultdict(int),
+                 "records": set(), "basis": ""},
             )
             item["exclusions"][reason] += int(count)
             reasons[(reason, False)] += int(count)
 
-    # Сведения об исполнениях одним запросом.
-    mod_ids = [p["modification_id"] for p in positions.values() if p.get("modification_id")]
+    # Сведения о написаниях одним запросом.
+    variant_ids = [p["variant_id"] for p in positions.values() if p.get("variant_id")]
     type_ids = [p["unmapped_type_id"] for p in positions.values() if p.get("unmapped_type_id")]
     info: dict[int, dict[str, Any]] = {}
-    if mod_ids:
-        for row in db.execute(
-            text(
-                "SELECT m.id AS mod_id, m.name AS mod_name, m.phase, m.design, m.interface, m.in_rpp, m.score, "
-                "m.rpp_included_at, m.rpp_record_number, m.smart_890 AS smart, m.smart_890_source, "
-                "m.smart_890_note, m.smart_890_at, m.manufacturer_override_id AS override_id, t.id AS type_id, "
-                f"t.mit_number, t.notation, t.title, t.in_report, {report._MANUFACTURER_SQL} AS manufacturer_id, "
-                "(SELECT string_agg(v.raw, ' · ' ORDER BY v.id) FROM meter_market_variants v "
-                " WHERE v.modification_id = m.id) AS raw, "
-                "(SELECT min(v.mapped_by) FROM meter_market_variants v WHERE v.modification_id = m.id) AS mapped_by "
-                "FROM meter_market_modifications m JOIN meter_market_types t ON t.id = m.type_id "
-                "WHERE m.id = ANY(:ids)"
-            ),
-            {"ids": mod_ids},
-        ).mappings():
-            info[row["mod_id"]] = dict(row)
+    if variant_ids:
+        for row in db.execute(text(_VARIANT_INFO_SQL), {"ids": variant_ids}).mappings():
+            info[row["variant_id"]] = dict(row)
     type_info: dict[int, dict[str, Any]] = {}
     if type_ids:
         for row in db.execute(
@@ -369,12 +376,11 @@ def explain_localization(
         if item.get("unmapped_type_id"):
             source = {**type_info[item["unmapped_type_id"]], "mod_id": None}
         else:
-            source = info[item["modification_id"]]
+            source = info[item["variant_id"]]
         records = sorted(item.pop("records"))
         item.update({k: v for k, v in _position(source, names, limits).items()})
         item["raw"] = source.get("raw")
         item["mapped_by"] = source.get("mapped_by")
-        item["variant_id"] = None
         if records:
             item["documents"] = item["documents"][:1] + [{"label": r} for r in records]
         if item.get("unmapped_type_id") and item["counted"]:

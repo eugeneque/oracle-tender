@@ -292,13 +292,13 @@ def test_migration_0111_resets_blanket_rule_and_drops_foreign_modifications(conn
         ("МИРТЕК-32-РУ-W32-A0,5R1-230-5-10A-T-RS485-HLMOQ2V3", False),
         ("МИРТЕК-32-РУ-W32-A1R1-230-10-100A-T-RS485-HKLMOQ2V3", False),
         ("W1-A1-230-5-60A-SS-RF433/1-V3", False),
-        # Протокол Pn — «соответствует».
+        # Есть и Pn, и D — «соответствует».
         ("МИРТЕК-32-РУ-SP31-A1R1-230-5-100A-T-RF433/1-RF2400/2-P2-HKMOV3-D", True),
         ("МИРТЕК-32-РУ-D37-1-A1R1-230-5-100A-T-RS485-MOD-P1-B-D", True),
-        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-P2-HKMOQ1V3", True),
-        ("МИРТЕК-12-РУ-SP3-А1R1-230-5-80А-ST-RF433/1-Р2-HKMOQ1V3", True),  # кириллическая «Р»
-        # Признак D (два направления) без Pn — тоже «соответствует» (ответ 23.11.2026).
-        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-HKMOQ1V3-D", True),
+        ("МИРТЕК-12-РУ-SP3-А1R1-230-5-80А-ST-RF433/1-Р2-HKMOQ1V3-D", True),  # кириллические «А», «Р»
+        # Нужны оба (ответ 24.11.2026): только Pn или только D при блоке функций — «нет».
+        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-P2-HKMOQ1V3", False),
+        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-HKMOQ1V3-D", False),
         # Неполное обозначение — сомнительное считаем соответствующим.
         ("МИРТЕК-12-РУ -D1-A1R1-230-5-80A-ST-G", True),
         ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF240", True),
@@ -317,7 +317,7 @@ def test_protocol_verdict(raw, expected):
 def test_mirtek_protocol_applied_to_variants_and_respects_manual(conn):
     types, _, plain, _ = _seed(conn)
     t = types["61891-15"]
-    with_p = _variant(conn, t, "МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-P2-HKMOQ1V3", plain, "ai")
+    with_p = _variant(conn, t, "МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-P2-HKMOQ1V3-D", plain, "ai")
     without_p = _variant(conn, t, "МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-HKMOQ1V3", plain, "ai")
     short = _variant(conn, t, "МИРТЕК-232-РУ", plain, "ai")
     foreign = _variant(conn, types["87373-22"], "X-A1R1-230-5-60A-S-RF433", None)
@@ -342,7 +342,7 @@ def test_report_takes_smart_from_variant(conn):
         "INSERT INTO meter_market_modifications (type_id, name, phase, design, interface, smart_890, smart_890_source) "
         "VALUES (:t, 'МИРТЕК-12-РУ SP3', '1ф', 'nd', 'RF', null, null) RETURNING id", t=t,
     )
-    yes = _variant(conn, t, "МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-P2-HKMOQ1V3", sp3, "ai")
+    yes = _variant(conn, t, "МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-P2-HKMOQ1V3-D", sp3, "ai")
     no = _variant(conn, t, "МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-HKMOQ1V3", sp3, "ai")
     rules.apply_mirtek_protocol(conn)
     for gid, v in ((1, yes), (2, no)):

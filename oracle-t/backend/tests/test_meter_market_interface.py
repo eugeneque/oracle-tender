@@ -36,6 +36,8 @@ def test_no_interface_code_is_no_data(raw):
     ("raw", "label"),
     [
         (VIOLET, "NB-IoT"),
+        ("НАРТИС И100-W113-A1R1-230-5-60A-ST-G/2-P1-EHKLMOQ1V3-D", "GSM"),  # G/n — GSM, кроме G/5
+        ("НАРТИС-И300-W131-A5SR1-230-5-10A-TN-RS485-G/1-P1-EHKLMOQ1V3-D", "RS, GSM"),
         ("НАРТИС-И100-SP1-2-A1R1-230-5-100A-SS-RF2400/2-RS485-RF2400/1-P1-EHKMOQ1V3-D", "RS, ZigBee, Bluetooth"),
         ("НАРТИС-И100-SP1-A1R1-230-5-100A-ST-RF2400/1-RF433/1-P1-EНKMOQ1V3-D", "RF, ZigBee"),  # кириллическая Н
         ("НАРТИС-И100-SP1-2-A1R1-230-5-100A-ST-RF2400/1-RS485-P1-EHKMOQ1V3-D", "RS, ZigBee"),
@@ -58,7 +60,6 @@ def test_interface_codes_from_analyst_table(raw, label):
 @pytest.mark.parametrize(
     ("raw", "suggested", "why"),
     [
-        ("НАРТИС И100-W113-A1R1-230-5-60A-ST-G/2-P1-EHKLMOQ1V3-D", "GSM", "номера модуля"),  # G/5 — NB-IoT, G/2 — ?
         ("НАРТИС-И100-SP1-A1R1-230-5-100A-SS-2400/1-RF433/1-P1-EHKMOQ1V3-D", "RF", "«2400/1» не расшифрован"),
         ("НАРТИС-И100-SP1-A1R1-230-5-100-SS-RF2400", None, "«RF2400» не расшифрован"),
         ("НАРТИС-И100-SP1-A1R1-230-5-100A-SS-RF433/1-RF2400/2-P1-EHKMOQ1V3-D", "RF, Bluetooth", "сочетание"),
@@ -113,7 +114,7 @@ def nartis(db_session):
         "green": GREEN[0],
         "violet": VIOLET,
         "zigbee": "НАРТИС-И100-W113-2-A1R1-230-5-80A-ST-RF2400/1-RS485-P1-EHKLMOQ1V3-D",
-        "gsm": "НАРТИС-И100-W113-2-A1R1-230-5-80A-ST-G/2-P1-EHKLMOQ1V3-D",
+        "disputed": "НАРТИС-И100-W113-2-A1R1-230-5-80A-ST-RS485-RF2400-P1-EHKLMOQ1V3-D",  # RF2400 без номера модуля
     }
     variants = {}
     for i, (key, raw) in enumerate(raws.items()):
@@ -142,7 +143,7 @@ def test_nartis_table_drives_report_and_review(nartis, db_session):
     rows = dict(db.execute(text("SELECT raw, coalesce(interface, '—') FROM meter_market_variants")).all())
     assert rows[GREEN[0]] == "н/д" and rows[VIOLET] == "NB-IoT"
     assert rows[nartis_raw(nartis, db, "zigbee")] == "RS, ZigBee"
-    assert rows[nartis_raw(nartis, db, "gsm")] == "—"  # на согласовании — отчёт берёт модификацию
+    assert rows[nartis_raw(nartis, db, "disputed")] == "—"  # на согласовании — отчёт берёт модификацию
 
     assert {r["key"]: r["count"] for r in before} == {"RF и RS": 100}
     after = report.overview(db, _period(), report.Filters())["interfaces"]
@@ -155,8 +156,8 @@ def test_nartis_table_drives_report_and_review(nartis, db_session):
     assert any("G/5 — NB-IoT" in r for r in positions[0]["rules"])
 
     queue = dictionary.interface_review_queue(db)
-    assert queue["total"] == 1 and queue["items"][0]["id"] == nartis["variants"]["gsm"]
-    assert queue["items"][0]["suggested"] == "GSM" and queue["items"][0]["modification_interface"] == "RF и RS"
+    assert queue["total"] == 1 and queue["items"][0]["id"] == nartis["variants"]["disputed"]
+    assert queue["items"][0]["suggested"] == "RS" and queue["items"][0]["modification_interface"] == "RF и RS"
     assert report.status(db)["interface_review"] == 1
 
 
@@ -167,23 +168,24 @@ def nartis_raw(nartis, db, key):
 def test_manual_interface_wins_and_can_be_cleared(nartis, db_session):
     db = db_session
     iface.apply_nartis_codes(db.connection())
-    gsm = nartis["variants"]["gsm"]
-    variant = dictionary.set_variant_interface(db, gsm, "GSM")
-    assert (variant.interface, variant.interface_source, variant.interface_review) == ("GSM", "manual", None)
+    disputed = nartis["variants"]["disputed"]
+    variant = dictionary.set_variant_interface(db, disputed, "ZigBee, RS")
+    assert (variant.interface, variant.interface_source, variant.interface_review) == ("RS, ZigBee", "manual", None)
     iface.apply_interface_codes(db.connection())  # правило ручное не трогает
     assert dictionary.interface_review_queue(db)["total"] == 0
-    positions = explain.explain_overview(db, _period(), report.Filters(interface="GSM"))["positions"]
-    assert [p["variant_id"] for p in positions] == [gsm]
+    positions = explain.explain_overview(db, _period(), report.Filters(interface="RS, ZigBee"))["positions"]
+    assert disputed in [p["variant_id"] for p in positions]
+    positions = [p for p in positions if p["variant_id"] == disputed]
     assert positions[0]["variant_interface"]["source"] == "manual"
 
-    variant = dictionary.set_variant_interface(db, gsm, None)  # снять — снова на согласовании
+    variant = dictionary.set_variant_interface(db, disputed, None)  # снять — снова на согласовании
     assert variant.interface is None and variant.interface_review and variant.interface_source == "rule"
 
-    # Исправление в таблице кодов типа («G/2 = GSM») пересчитывает написания сразу.
-    codes = iface.NARTIS_INTERFACE_CODES + "G/2 = GSM  # аналитик\n"
+    # Исправление в таблице кодов типа («RF2400 = ZigBee») пересчитывает написания сразу.
+    codes = iface.NARTIS_INTERFACE_CODES + "RF2400 = ZigBee  # аналитик\n"
     dictionary.update_type(db, nartis["type_id"], {"interface_codes": codes})
     db.refresh(variant)
-    assert variant.interface == "GSM" and variant.interface_review is None
+    assert variant.interface == "RS, ZigBee" and variant.interface_review is None
 
 
 def test_description_mismatch_with_modification_goes_to_review(nartis, db_session):
@@ -212,3 +214,20 @@ def test_http_routes(client, admin_token):
     assert queue.status_code == 200 and "items" in queue.json()
     assert client.put("/meter-market/variants/999999/interface", json={"interface": "RS"}, headers=headers).status_code == 404
     assert client.get("/meter-market/types/999999/interface-codes/draft", headers=headers).status_code == 404
+
+
+def test_nartis_gsm_line_replaces_question_from_0114(nartis, db_session):
+    """Таблица, заведённая 0114 со строкой «G/n = ? GSM», получает «G/n = GSM»; правки аналитика не трогаются."""
+
+    db = db_session
+    old = iface.NARTIS_INTERFACE_CODES.replace(iface.NARTIS_GSM_LINE, iface.NARTIS_GSM_OLD_LINE)
+    gsm = db.execute(
+        text("INSERT INTO meter_market_variants (type_id, raw, norm_key, modification_id) VALUES (:t, :r, :k, :m) RETURNING id"),
+        {"t": nartis["type_id"], "r": "НАРТИС-И100-W111-A1R1-230-5-60A-ST-G/1-P1-EHKLMOQ1V3-D", "k": "g1", "m": nartis["modification_id"]},
+    ).scalar()
+    dictionary.update_type(db, nartis["type_id"], {"interface_codes": old})
+    assert db.execute(text("SELECT interface_review FROM meter_market_variants WHERE id = :v"), {"v": gsm}).scalar()
+    assert iface.apply_nartis_gsm(db.connection()) == 1
+    assert iface.apply_nartis_gsm(db.connection()) == 0
+    row = db.execute(text("SELECT interface, interface_review FROM meter_market_variants WHERE id = :v"), {"v": gsm}).one()
+    assert (row.interface, row.interface_review) == ("GSM", None)

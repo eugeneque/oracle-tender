@@ -471,3 +471,24 @@ def test_manual_smart_by_variant_overrides_modification_and_can_be_cleared(marke
     assert "решение аналитика" in manual["smart"]["reason"]
     dictionary.set_variant_smart(db_session, variant_id, None)  # снять — снова решение модификации
     assert position()["smart"]["key"] == "yes" and position()["variant_smart_source"] is None
+
+
+def test_explain_localization_lists_spellings_with_their_own_smart(market, db_session):
+    """Выбор аналитика 24.11.2026: строки детализации «Локализации» — написания, а не модификация целиком;
+    ПП 890 у строки — как в основном отчёте (по написанию), суммы те же."""
+
+    from app.services import meter_market_dictionary as dictionary
+    from app.services import meter_market_explain as explain
+
+    edge = date(2026, 10, 1)
+    before = explain.explain_localization(db_session, edge, manufacturer_id=market["nartis"])
+    dictionary.set_variant_smart(db_session, market["variants"]["din"], False)
+    result = explain.explain_localization(db_session, edge, manufacturer_id=market["nartis"])
+    assert result["value"] == before["value"] and result["excluded"] == before["excluded"]
+    rows = {p["raw"]: p for p in result["positions"] if p.get("variant_id")}
+    # Обе строки — одна модификация «НАРТИС-100.121RIL», но написания разные и ПП 890 у каждого свой.
+    assert set(rows) >= {"НАРТИС-100.121RIL", "HAPTИC-100.121RIL"}
+    assert rows["НАРТИС-100.121RIL"]["smart"]["key"] == "no"
+    assert rows["НАРТИС-100.121RIL"]["variant_smart_source"] == "manual"
+    assert rows["HAPTИC-100.121RIL"]["smart"]["key"] != "no"
+    assert {p["modification"] for p in rows.values()} == {"НАРТИС-100.121RIL"}

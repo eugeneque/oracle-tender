@@ -363,11 +363,13 @@ _PROTOCOL_TOKEN = re.compile(r"^P\d+$")
 _IFACE_TOKEN = re.compile(r"^(RS232|RS485|CAN|RF\d*(/\d+)?|RFWF.*|RFLT.*|G(/[\d.]+)?|PF/\d+|PO/\d+|E/\d+|MOD(/\d+)?)$")
 # Блок ⑫ «Дополнительные функции»: B, H, In, K, L, M, O, Qn, R, U, Vn, W/n, Y, Z/n — «HKMOQ1V3», «LOQ1V3», «V3».
 _FUNCTIONS_TOKEN = re.compile(r"^[BHIKLMOQRUVWYZ][A-Z0-9/]*$")
-PROTOCOL_NOTE_YES = "в обозначении указан протокол {p} (блок «Поддерживаемые протоколы обмена» описания типа)"
-PROTOCOL_NOTE_D = "в обозначении указан признак D — измерение в двух направлениях (ответ аналитика 23.11.2026)"
+PROTOCOL_NOTE_YES = (
+    "в обозначении есть протокол {p} и признак D (измерение в двух направлениях) — оба признака ПП 890 "
+    "(ответ аналитика 24.11.2026)"
+)
 PROTOCOL_NOTE_NO = (
-    "явное несоответствие: в обозначении есть блок функций, но нет ни протокола Pn, ни признака D — "
-    "протокол «МИРТЕК» (ответ аналитика 23.11.2026)"
+    "явное несоответствие: обозначение дошло до блока функций, но в нём нет {missing} — нужны и протокол Pn, "
+    "и признак D (ответ аналитика 24.11.2026)"
 )
 PROTOCOL_NOTE_UNKNOWN = (
     "обозначение неполное — явного несоответствия нет, считаем «соответствует» (ответ аналитика 23.11.2026)"
@@ -375,27 +377,30 @@ PROTOCOL_NOTE_UNKNOWN = (
 
 
 def protocol_verdict(raw: str | None) -> tuple[bool | None, str | None]:
-    """ПП 890 по написанию МИРТЕК (ответ аналитика 23.11.2026).
+    """ПП 890 по написанию МИРТЕК (ответы аналитика 23–24.11.2026).
 
-    «P и D — признаки соответствия, сомнительное считать соответствующим, отклоняем только явные»:
-    - в обозначении есть протокол `Pn` (P1, P2) или признак `D` (два направления) — «соответствует»;
-    - обозначение дошло до блока функций («HKMOQ1V3», «LOQ1V3», «V3») и нет ни `Pn`, ни `D` — «не соответствует»
-      (явный случай: у отмеченных ею «нет» написаний всегда есть блок функций без `-P`);
-    - обозначение неполное («МИРТЕК-232-РУ», «…-W32-A15R1», «…-ST-G») — «соответствует».
-    Для пустого написания — `None`. Допущение: «P и D — одним из признаков» прочитано как «достаточно любого»."""
+    «P и D — признаки соответствия; нужны оба; сомнительное считаем соответствующим, отклоняем только явные»:
+    - в обозначении есть и протокол `Pn` (P1, P2), и признак `D` (два направления, блок ⑬) — «соответствует»;
+    - обозначение дошло до блока функций («HKMOQ1V3», «LOQ1V3», «V3»), а `Pn` или `D` нет — «не соответствует»
+      (явный случай: `D` стоит после функций, значит, обозначение не обрезано);
+    - обозначение неполное («МИРТЕК-232-РУ», «…-W32-A15R1», «…-ST-G», «…-ST-RF433» — «лень поверителя») —
+      «соответствует».
+    Для пустого написания — `None`."""
 
     if not raw:
         return None, None
     tokens = raw.upper().translate(_CYR_TO_LAT).replace(" ", "").split("-")
     start = next((i for i, t in enumerate(tokens) if _ELEMENT_TOKEN.match(t)), None)
     tail = tokens[start + 1 :] if start is not None else []
-    for token in tail:
-        if _PROTOCOL_TOKEN.match(token):
-            return True, PROTOCOL_NOTE_YES.format(p=token)
-    if "D" in tail:
-        return True, PROTOCOL_NOTE_D
+    protocol = next((t for t in tail if _PROTOCOL_TOKEN.match(t)), None)
+    two_way = "D" in tail
+    if protocol and two_way:
+        return True, PROTOCOL_NOTE_YES.format(p=protocol)
     if any(_FUNCTIONS_TOKEN.match(t) and not _IFACE_TOKEN.match(t) for t in tail):
-        return False, PROTOCOL_NOTE_NO
+        missing = "ни протокола Pn, ни признака D" if not protocol and not two_way else (
+            "признака D" if protocol else "протокола Pn"
+        )
+        return False, PROTOCOL_NOTE_NO.format(missing=missing)
     return True, PROTOCOL_NOTE_UNKNOWN
 
 

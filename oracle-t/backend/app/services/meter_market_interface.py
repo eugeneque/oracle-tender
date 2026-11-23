@@ -348,7 +348,7 @@ RF2400/1 = ZigBee  # аналитик 23.11.2026; описание типа: р�
 RF2400/2 = Bluetooth  # аналитик 23.11.2026; описание типа: радиоинтерфейс 2400 МГц
 RF2400/n = ?  # другой номер модуля 2400 МГц: ZigBee или Bluetooth — по РЭ
 G/5 = NB-IoT  # аналитик 23.11.2026; в описании типа G/n — GSM/GPRS
-G/n = ? GSM  # в описании типа GSM/GPRS, но канал зависит от модуля (G/5 — NB-IoT)
+G/n = GSM  # остальные модули G/n — GSM, как в описании типа (решение 23.11.2026); G/5 — NB-IoT строкой выше
 PL/n = PLC
 E/n = Ethernet
 RFWF = Wi-Fi
@@ -358,8 +358,31 @@ RF433/n + RF2400/2 = ? RF, Bluetooth  # в таблице аналитика «R
 NARTIS_TYPES = ("86199-22", "86200-22")  # НАРТИС-И100, НАРТИС-И300: одна структура обозначения
 NARTIS_CODE_NOTES = (
     "Каналы НАРТИС (аналитик 23.11.2026): RS485 — RS; RF433/n и RF868/n — RF; RF2400/1 — ZigBee; RF2400/2 — Bluetooth; "
-    "G/5 — NB-IoT. Нет кода интерфейса в написании — «н/д»."
+    "G/5 — NB-IoT, остальные G/n — GSM. Нет кода интерфейса в написании — «н/д»."
 )
+
+
+NARTIS_GSM_OLD_LINE = 'G/n = ? GSM  # в описании типа GSM/GPRS, но канал зависит от модуля (G/5 — NB-IoT)\n'
+NARTIS_GSM_LINE = 'G/n = GSM  # остальные модули G/n — GSM, как в описании типа (решение 23.11.2026); G/5 — NB-IoT строкой выше\n'
+
+
+def apply_nartis_gsm(conn: Connection) -> int:
+    """G/n у НАРТИС — GSM (решение 23.11.2026, раздел 122): в таблицах, заведённых миграцией 0114, строка
+    «G/n = ? GSM» заменяется на «G/n = GSM», написания типов пересчитываются. Правки таблицы аналитиком
+    (строка уже другая) не трогаются."""
+
+    rows = conn.execute(
+        text("SELECT id, interface_codes FROM meter_market_types WHERE mit_number = ANY(:m) AND interface_codes LIKE :l"),
+        {"m": list(NARTIS_TYPES), "l": "%" + NARTIS_GSM_OLD_LINE.strip() + "%"},
+    ).all()
+    for type_id, codes in rows:
+        conn.execute(
+            text("UPDATE meter_market_types SET interface_codes = :c WHERE id = :t"),
+            {"c": codes.replace(NARTIS_GSM_OLD_LINE.strip(), NARTIS_GSM_LINE.strip()), "t": type_id},
+        )
+    if rows:
+        apply_interface_codes(conn, [r[0] for r in rows])
+    return len(rows)
 
 
 def apply_nartis_codes(conn: Connection) -> int:
@@ -393,5 +416,5 @@ if __name__ == "__main__":
 
     with engine.begin() as connection:
         if "--nartis" in sys.argv:
-            print({"nartis_types": apply_nartis_codes(connection)})
+            print({"nartis_types": apply_nartis_codes(connection), "nartis_gsm": apply_nartis_gsm(connection)})
         print(apply_interface_codes(connection))

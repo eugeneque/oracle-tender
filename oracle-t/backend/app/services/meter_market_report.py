@@ -599,6 +599,8 @@ class LocPiece:
     verdict: LocVerdict
     # Неразмеченные написания типа, унаследовавшие общую запись РПП его исполнений.
     unmapped_type_id: int | None = None
+    # Написание — только при `localization_ledger(by_variant=True)` (детализация, 24.11.2026).
+    variant_id: int | None = None
 
     @property
     def quarter(self) -> str:
@@ -615,12 +617,16 @@ def localization_quarters(edge: date) -> list[str]:
 
 
 def localization_ledger(
-    db: Session, edge: date, *, manufacturer_id: int | None = None
+    db: Session, edge: date, *, manufacturer_id: int | None = None, by_variant: bool = False
 ) -> tuple[list[LocPiece], dict[int, dict[str, Any]], set[int]]:
     """Все поверки исполнений «в РПП» с 2025 года, разложенные по решениям: учтена (с какими
     баллами и по какой записи) или исключена (почему). Таблица экрана «Локализация» и её
     детализация считаются из одной бухгалтерии — число в ячейке и сумма «учтено» в
     детализации совпадают по построению.
+
+    `by_variant` — части исполнений разложены ещё и по написаниям (детализация «Локализации», выбор
+    аналитика 24.11.2026: строка = написание, чтобы ПП 890 совпадал с основным отчётом). Решение по РПП
+    зависит только от исполнения и даты поверки, поэтому суммы с разбивкой и без неё одинаковы.
 
     Возвращает части, сведения об исполнениях и исполнения без даты внесения."""
 
@@ -660,18 +666,33 @@ def localization_ledger(
         return [], by_id, undated_mods
     inherited = _inherited_type_records(db, records, manufacturer_id)
 
-    # Источники поверок: исполнение (ключ «m») или неразмеченные написания типа (ключ «u»).
-    monthly = [
-        (("m", mod_id), month, count)
-        for mod_id, month, count in db.execute(
+    # Источники поверок: исполнение (ключ «m»), написание исполнения (ключ «v», при `by_variant`)
+    # или неразмеченные написания типа (ключ «u»).
+    variant_mod: dict[int, int] = {}
+    if by_variant:
+        monthly = []
+        for variant_id, mod_id, month, count in db.execute(
             text(
-                "SELECT v.modification_id, mv.month, sum(mv.count) FROM meter_verification_monthly mv "
+                "SELECT v.id, v.modification_id, mv.month, sum(mv.count) FROM meter_verification_monthly mv "
                 "JOIN meter_market_variants v ON v.id = mv.variant_id "
-                "WHERE v.modification_id = ANY(:ids) AND mv.month >= :start AND mv.month < :end GROUP BY 1, 2"
+                "WHERE v.modification_id = ANY(:ids) AND mv.month >= :start AND mv.month < :end GROUP BY 1, 2, 3"
             ),
             {"ids": list(records), "start": start, "end": edge},
-        )
-    ]
+        ):
+            variant_mod[variant_id] = mod_id
+            monthly.append((("v", variant_id), month, count))
+    else:
+        monthly = [
+            (("m", mod_id), month, count)
+            for mod_id, month, count in db.execute(
+                text(
+                    "SELECT v.modification_id, mv.month, sum(mv.count) FROM meter_verification_monthly mv "
+                    "JOIN meter_market_variants v ON v.id = mv.variant_id "
+                    "WHERE v.modification_id = ANY(:ids) AND mv.month >= :start AND mv.month < :end GROUP BY 1, 2"
+                ),
+                {"ids": list(records), "start": start, "end": edge},
+            )
+        ]
     if inherited:
         monthly += [
             (("u", type_id), month, count)
@@ -689,6 +710,9 @@ def localization_ledger(
         kind, key = source
         if kind == "m":
             return LocPiece(key, by_id[key]["manufacturer_id"], month, count, verdict)
+        if kind == "v":
+            mod_id = variant_mod[key]
+            return LocPiece(mod_id, by_id[mod_id]["manufacturer_id"], month, count, verdict, variant_id=key)
         if verdict.included:
             verdict = replace(verdict, reason=REASON_TYPE_INHERITED)
         return LocPiece(None, inherited[key][0], month, count, verdict, unmapped_type_id=key)
@@ -696,7 +720,11 @@ def localization_ledger(
     pieces: list[LocPiece] = []
     for source, month, count in monthly:
         month_end = _add_months(month, 1)
-        source_records = records[source[1]] if source[0] == "m" else inherited[source[1]][1]
+        source_records = (
+            records[source[1]] if source[0] == "m"
+            else records[variant_mod[source[1]]] if source[0] == "v"
+            else inherited[source[1]][1]
+        )
         bounds = {r.issued for r in source_records} | {
             r.valid_to + timedelta(days=1) for r in source_records if r.valid_to
         }
@@ -704,7 +732,7 @@ def localization_ledger(
             pieces.append(piece(source, month, int(count), rpp_verdict(source_records, month)))
             continue
         # Запись сменилась (или истекла) внутри месяца — делим поверки месяца по дням.
-        where = "v.modification_id = :m" if source[0] == "m" else "v.modification_id IS NULL AND v.type_id = :m"
+        where = {"m": "v.modification_id = :m", "v": "v.id = :m"}.get(source[0], "v.modification_id IS NULL AND v.type_id = :m")
         days = db.execute(
             text(
                 "SELECT mv.verification_date, count(*) FROM meter_verifications mv "
