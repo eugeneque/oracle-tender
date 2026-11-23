@@ -36,6 +36,8 @@ def test_no_interface_code_is_no_data(raw):
     ("raw", "label"),
     [
         (VIOLET, "NB-IoT"),
+        ("НАРТИС-И100-SP1-A1R1-230-5-100-SS-RF2400", "ZigBee"),  # без номера модуля — ZigBee
+        ("НАРТИС-И100-W113-2-A1R1-230-5-80A-ST-RS485-RF2400-P1-EHKLMOQ1V3-D", "RS, ZigBee"),
         ("НАРТИС И100-W113-A1R1-230-5-60A-ST-G/2-P1-EHKLMOQ1V3-D", "GSM"),  # G/n — GSM, кроме G/5
         ("НАРТИС-И300-W131-A5SR1-230-5-10A-TN-RS485-G/1-P1-EHKLMOQ1V3-D", "RS, GSM"),
         ("НАРТИС-И100-SP1-2-A1R1-230-5-100A-SS-RF2400/2-RS485-RF2400/1-P1-EHKMOQ1V3-D", "RS, ZigBee, Bluetooth"),
@@ -61,7 +63,6 @@ def test_interface_codes_from_analyst_table(raw, label):
     ("raw", "suggested", "why"),
     [
         ("НАРТИС-И100-SP1-A1R1-230-5-100A-SS-2400/1-RF433/1-P1-EHKMOQ1V3-D", "RF", "«2400/1» не расшифрован"),
-        ("НАРТИС-И100-SP1-A1R1-230-5-100-SS-RF2400", None, "«RF2400» не расшифрован"),
         ("НАРТИС-И100-SP1-A1R1-230-5-100A-SS-RF433/1-RF2400/2-P1-EHKMOQ1V3-D", "RF, Bluetooth", "сочетание"),
         ("НАРТИС-И300 W131 G1 rs485", "RS", "«G1»"),
     ],
@@ -114,7 +115,7 @@ def nartis(db_session):
         "green": GREEN[0],
         "violet": VIOLET,
         "zigbee": "НАРТИС-И100-W113-2-A1R1-230-5-80A-ST-RF2400/1-RS485-P1-EHKLMOQ1V3-D",
-        "disputed": "НАРТИС-И100-W113-2-A1R1-230-5-80A-ST-RS485-RF2400-P1-EHKLMOQ1V3-D",  # RF2400 без номера модуля
+        "disputed": "НАРТИС-И100-W113-2-A1R1-230-5-80A-ST-RS485-2400/1-P1-EHKLMOQ1V3-D",  # «2400/1» без RF
     }
     variants = {}
     for i, (key, raw) in enumerate(raws.items()):
@@ -181,8 +182,8 @@ def test_manual_interface_wins_and_can_be_cleared(nartis, db_session):
     variant = dictionary.set_variant_interface(db, disputed, None)  # снять — снова на согласовании
     assert variant.interface is None and variant.interface_review and variant.interface_source == "rule"
 
-    # Исправление в таблице кодов типа («RF2400 = ZigBee») пересчитывает написания сразу.
-    codes = iface.NARTIS_INTERFACE_CODES + "RF2400 = ZigBee  # аналитик\n"
+    # Исправление в таблице кодов типа («2400/1 = ZigBee») пересчитывает написания сразу.
+    codes = iface.NARTIS_INTERFACE_CODES + "2400/1 = ZigBee  # аналитик\n"
     dictionary.update_type(db, nartis["type_id"], {"interface_codes": codes})
     db.refresh(variant)
     assert variant.interface == "RS, ZigBee" and variant.interface_review is None
@@ -231,3 +232,22 @@ def test_nartis_gsm_line_replaces_question_from_0114(nartis, db_session):
     assert iface.apply_nartis_gsm(db.connection()) == 0
     row = db.execute(text("SELECT interface, interface_review FROM meter_market_variants WHERE id = :v"), {"v": gsm}).one()
     assert (row.interface, row.interface_review) == ("GSM", None)
+
+
+def test_nartis_rf2400_line_added_once(nartis, db_session):
+    """«RF2400» без номера — ZigBee: строка дописывается в таблицу 0114 один раз, решение аналитика не перекрывается."""
+
+    db = db_session
+    old = iface.NARTIS_INTERFACE_CODES.replace(iface.NARTIS_RF2400_LINE, "")
+    rf = db.execute(
+        text("INSERT INTO meter_market_variants (type_id, raw, norm_key) VALUES (:t, :r, 'rf') RETURNING id"),
+        {"t": nartis["type_id"], "r": "НАРТИС-И100-SP1-A1R1-230-5-100-SS-RF2400"},
+    ).scalar()
+    dictionary.update_type(db, nartis["type_id"], {"interface_codes": old})
+    assert db.execute(text("SELECT interface_review FROM meter_market_variants WHERE id = :v"), {"v": rf}).scalar()
+    assert iface.apply_nartis_rf2400(db.connection()) == 1
+    assert iface.apply_nartis_rf2400(db.connection()) == 0
+    row = db.execute(text("SELECT interface, interface_review FROM meter_market_variants WHERE id = :v"), {"v": rf}).one()
+    assert (row.interface, row.interface_review) == ("ZigBee", None)
+    dictionary.update_type(db, nartis["type_id"], {"interface_codes": old + "RF2400 = Bluetooth  # аналитик\n"})
+    assert iface.apply_nartis_rf2400(db.connection()) == 0

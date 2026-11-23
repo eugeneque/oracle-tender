@@ -346,6 +346,7 @@ RF433/n = RF  # аналитик 23.11.2026; описание типа: ради
 RF868/n = RF  # аналитик 23.11.2026; описание типа: радиоинтерфейс 868 МГц
 RF2400/1 = ZigBee  # аналитик 23.11.2026; описание типа: радиоинтерфейс 2400 МГц
 RF2400/2 = Bluetooth  # аналитик 23.11.2026; описание типа: радиоинтерфейс 2400 МГц
+RF2400 = ZigBee  # без номера модуля — ZigBee (решение 23.11.2026)
 RF2400/n = ?  # другой номер модуля 2400 МГц: ZigBee или Bluetooth — по РЭ
 G/5 = NB-IoT  # аналитик 23.11.2026; в описании типа G/n — GSM/GPRS
 G/n = GSM  # остальные модули G/n — GSM, как в описании типа (решение 23.11.2026); G/5 — NB-IoT строкой выше
@@ -357,7 +358,7 @@ RF433/n + RF2400/2 = ? RF, Bluetooth  # в таблице аналитика «R
 """
 NARTIS_TYPES = ("86199-22", "86200-22")  # НАРТИС-И100, НАРТИС-И300: одна структура обозначения
 NARTIS_CODE_NOTES = (
-    "Каналы НАРТИС (аналитик 23.11.2026): RS485 — RS; RF433/n и RF868/n — RF; RF2400/1 — ZigBee; RF2400/2 — Bluetooth; "
+    "Каналы НАРТИС (аналитик 23.11.2026): RS485 — RS; RF433/n и RF868/n — RF; RF2400/1 и RF2400 без номера — ZigBee; RF2400/2 — Bluetooth; "
     "G/5 — NB-IoT, остальные G/n — GSM. Нет кода интерфейса в написании — «н/д»."
 )
 
@@ -383,6 +384,29 @@ def apply_nartis_gsm(conn: Connection) -> int:
     if rows:
         apply_interface_codes(conn, [r[0] for r in rows])
     return len(rows)
+
+
+NARTIS_RF2400_LINE = 'RF2400 = ZigBee  # без номера модуля — ZigBee (решение 23.11.2026)\n'
+
+
+def apply_nartis_rf2400(conn: Connection) -> int:
+    """«RF2400» без номера модуля у НАРТИС — ZigBee (решение 23.11.2026, раздел 122): строка дописывается в таблицы,
+    где кода «RF2400» ещё нет (аналитик мог решить иначе — тогда не трогаем); написания типов пересчитываются."""
+
+    rows = conn.execute(
+        text("SELECT id, interface_codes FROM meter_market_types WHERE mit_number = ANY(:m) AND interface_codes IS NOT NULL"),
+        {"m": list(NARTIS_TYPES)},
+    ).all()
+    changed = [type_id for type_id, codes in rows if "RF2400" not in parse_table(codes).exact]
+    for type_id, codes in rows:
+        if type_id in changed:
+            conn.execute(
+                text("UPDATE meter_market_types SET interface_codes = :c WHERE id = :t"),
+                {"c": codes.rstrip("\n") + "\n" + NARTIS_RF2400_LINE, "t": type_id},
+            )
+    if changed:
+        apply_interface_codes(conn, changed)
+    return len(changed)
 
 
 def apply_nartis_codes(conn: Connection) -> int:
@@ -416,5 +440,5 @@ if __name__ == "__main__":
 
     with engine.begin() as connection:
         if "--nartis" in sys.argv:
-            print({"nartis_types": apply_nartis_codes(connection), "nartis_gsm": apply_nartis_gsm(connection)})
+            print({"nartis_types": apply_nartis_codes(connection), "nartis_gsm": apply_nartis_gsm(connection), "nartis_rf2400": apply_nartis_rf2400(connection)})
         print(apply_interface_codes(connection))
