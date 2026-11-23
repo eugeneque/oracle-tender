@@ -447,3 +447,39 @@ def test_push_after_review_sends_full_snapshot_as_deal_owner(db_session, admin_u
     monkeypatch.setattr(bitrix_ai_service, "send", lambda db, t, **kw: calls.append(kw) or {})
     assert "отправлена" in monitor.push_after_review(db_session, tender.id)
     assert calls[0]["full_snapshot"] is True and calls[0]["actor"].id == admin_user.id
+
+
+def test_lot_events_go_to_lot_deal_package(db_session, client, admin_user):
+    """23.11.2026: событие одного лота многолотовой закупки — отдельным пакетом на сделку лота
+    (deal_id 0 + lookup.lot_number); событие процедуры — на общую карточку."""
+
+    from app.models.tender_card import TenderCard
+    from app.models.tender_event import TenderEvent
+
+    tender = _tender(db_session)
+    _ready(db_session, admin_user, tender)
+    card = db_session.get(TenderCard, tender.id) or TenderCard(tender_id=tender.id, payload={})
+    card.payload = {
+        **(card.payload or {}),
+        "tables": {"lots": {"headers": ["Номер, наименование лота"], "rows": [
+            ["1 Лот один", "Нет", "Цена: 1 ₽"], ["2 Лот два", "Нет", "Цена: 2 ₽"]]}},
+    }
+    db_session.merge(card)
+    db_session.add(TenderEvent(
+        tender_id=tender.id, event_id="sova-evt-lot2", event_type="TECHNICAL_REQUIREMENT_CHANGED",
+        field_key="positions", title="Изменилось количество в лоте 2", scope="LOT", lot_number="2",
+        detected_at=datetime(2026, 11, 23, 7, 0, tzinfo=timezone.utc), delivery="pending",
+    ))
+    db_session.flush()
+    receiver = _Receiver()
+
+    result = tender_event_service.send_pending(db_session, tender, transport=httpx.MockTransport(receiver))
+
+    assert result["status"] == "sent"
+    lot_bodies = [b for b in receiver.bodies if b["lookup"].get("lot_number") == "2"]
+    (lot_body,) = lot_bodies
+    assert lot_body["deal_id"] == 0 and lot_body["deal_fields"] == {}
+    assert [e["event_id"] for e in lot_body["events"]] == ["sova-evt-lot2"]
+    common = [b for b in receiver.bodies if b is not lot_body]
+    assert common and all("lot_number" not in b["lookup"] and b["deal_id"] == 1984 for b in common)
+    assert all(e["event_id"] != "sova-evt-lot2" for b in common for e in b["events"])

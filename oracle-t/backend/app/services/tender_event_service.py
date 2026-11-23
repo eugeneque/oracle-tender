@@ -166,18 +166,25 @@ def event_sections(db: Session, tender: Tender, events: list[TenderEvent]) -> di
 
 
 def build_events_payload(
-    db: Session, tender: Tender, events: list[TenderEvent], *, request_id: str | None = None
+    db: Session,
+    tender: Tender,
+    events: list[TenderEvent],
+    *,
+    request_id: str | None = None,
+    lot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    fields = event_deal_fields(db, tender, events)
+    # Пакет событий лота (23.11.2026): сделку лота портал ищет по `lookup` (deal_id = 0), поля
+    # сделки не трогаем — даты и сумма относятся к процедуре, а не к лоту.
+    fields = {} if lot is not None else event_deal_fields(db, tender, events)
     payload = {
         "schema_version": bitrix.SCHEMA_VERSION,
         "request_id": request_id or f"sova-{uuid.uuid4()}",
-        "deal_id": bitrix._deal_id(db, tender),  # noqa: SLF001
+        "deal_id": 0 if lot is not None else bitrix._deal_id(db, tender),  # noqa: SLF001
         "analysis_id": f"sova-evt-{tender.id.hex[:12]}-{now:%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}",
         "generated_at": _z(now),
         "full_snapshot": False,
-        "lookup": bitrix.build_lookup(db, tender),
+        "lookup": bitrix.build_lookup(db, tender, lot),
         "deal_fields": fields,
         # Для журнала без изменений анализа — пустые разделы; документы — только по событиям о
         # них, участники и итог — по событиям о протоколе и результате.
@@ -241,7 +248,39 @@ def send_pending(
 
     for event in events:  # задержанные с согласованным теперь типом возвращаются в очередь
         event.delivery = EventDelivery.PENDING.value
-    payload = build_events_payload(db, tender, events)
+    # События отдельных лотов многолотовой закупки — своими пакетами на сделки лотов; события
+    # процедуры и закупки с одним лотом — на общую карточку.
+    lots = {item["lot_number"]: item for item in bitrix.procedure_lots(db, tender)} if len(bitrix.procedure_lots(db, tender)) > 1 else {}
+    groups: list[tuple[dict[str, Any] | None, list[TenderEvent]]] = []
+    common = [e for e in events if not (e.scope == "LOT" and e.lot_number in lots)]
+    if common:
+        groups.append((None, common))
+    for number, lot in lots.items():
+        mine = [e for e in events if e.scope == "LOT" and e.lot_number == number]
+        if mine:
+            groups.append((lot, mine))
+    results = [_send_group(db, tender, group, lot, settings, actor_id, transport) for lot, group in groups]
+    failed = [r for r in results if r["status"] != "sent"]
+    sent = sum(r["sent"] for r in results)
+    return {
+        "status": "sent" if not failed else "error",
+        "sent": sent,
+        "detail": "; ".join(r["detail"] for r in failed if r.get("detail")) or None,
+        "request_id": results[0].get("request_id") if results else None,
+        "http_status": (failed or results)[0].get("http_status") if results else None,
+    }
+
+
+def _send_group(
+    db: Session,
+    tender: Tender,
+    events: list[TenderEvent],
+    lot: dict[str, Any] | None,
+    settings: Any,
+    actor_id: uuid.UUID | None,
+    transport: httpx.BaseTransport | None,
+) -> dict[str, Any]:
+    payload = build_events_payload(db, tender, events, lot=lot)
     body = bitrix.serialize(payload)
     if len(body) > bitrix.MAX_BODY_BYTES:
         return {"status": "error", "sent": 0, "detail": "Пакет событий больше предела портала 5 МБ."}
@@ -266,7 +305,7 @@ def send_pending(
             event.request_id = record.request_id
             event.sent_at = now
             event.error = None
-        if record.deal_id:
+        if record.deal_id and lot is None:  # связь закупки — со сделкой общей карточки
             link = db.get(BitrixDealLink, tender.id) or BitrixDealLink(tender_id=tender.id)
             link.deal_id = record.deal_id
             link.pushed_at = record.sent_at
