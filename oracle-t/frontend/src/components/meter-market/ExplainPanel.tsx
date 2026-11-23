@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ApiError, api, downloadFile } from "../../api/client";
 import type { MarketExplain, MarketExplainPosition, MarketSample } from "../../api/types";
 import { fmt } from "./format";
+import { InterfaceChoice } from "./InterfaceReview";
 import { VariantMapper } from "./VariantMapper";
 
 /**
@@ -435,6 +436,29 @@ function PositionDetails({
             <option value="no" className="bg-zinc-900">не соответствует</option>
           </select>
           <span className="text-zinc-600">только это написание, главнее правила и решения модификации</span>
+        </div>
+      )}
+      {p.variant_id !== null && (
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-zinc-500">Интерфейс этого написания:</span>
+            <InterfaceChoice
+              key={`${p.variant_id}-${p.interface}`}
+              variantId={p.variant_id}
+              raw={p.raw ?? ""}
+              initial={p.variant_interface?.review ? p.variant_interface.suggested : p.interface}
+              manual={p.variant_interface?.source === "manual"}
+              canEdit={canEdit}
+              fail={(err, fallback) => setRemapError(err instanceof ApiError ? err.message : fallback)}
+              onDone={(message) => {
+                setRemapError(null);
+                onRemapped(message);
+              }}
+            />
+          </div>
+          {p.variant_interface?.review && (
+            <p className="text-amber-300/90">На согласовании: {p.variant_interface.review}. До решения — интерфейс модификации.</p>
+          )}
         </div>
       )}
       {p.variant_id !== null && (

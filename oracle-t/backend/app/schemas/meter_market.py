@@ -39,6 +39,13 @@ class TypeIn(BaseModel):
     mpi_years: int | None = None
     notation: str | None = None
     code_notes: str | None = None
+    interface_codes: str | None = None
+
+
+class VariantInterfaceIn(BaseModel):
+    """Интерфейс написания от аналитика («RS, ZigBee», «н/д»); null — снять и вернуть таблицу кодов типа."""
+
+    interface: str | None = Field(default=None, max_length=255)
 
 
 class VariantSmartIn(BaseModel):

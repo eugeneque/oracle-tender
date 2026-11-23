@@ -77,6 +77,9 @@ def _position(row: dict[str, Any], names: dict[int, str], limits: list[tuple[int
         else "Производитель — владелец описания типа (правило 1 ТЗ)"
     )
     rules.append(f"ПП 890: {smart_status} — {smart_reason}")
+    interface_rule = _interface_rule(row, unmapped)
+    if interface_rule:
+        rules.append(interface_rule)
     if unmapped:
         rules.append("РПП: нет данных — написание не размечено")
     elif row.get("in_rpp"):
@@ -97,6 +100,13 @@ def _position(row: dict[str, Any], names: dict[int, str], limits: list[tuple[int
         "type_title": row.get("title"),
         "modification_id": row.get("mod_id"),
         "variant_smart_source": row.get("variant_smart_source"),
+        "variant_interface": {
+            "source": row.get("variant_interface_source"),
+            "note": row.get("interface_note"),
+            "review": row.get("interface_review"),
+            "suggested": row.get("interface_suggested"),
+            "modification": row.get("mod_interface"),
+        },
         "modification": row.get("mod_name"),
         "manufacturer": names.get(row.get("manufacturer_id"), "Производитель не указан"),
         "phase": report.NO_DATA if unmapped else (row.get("phase") or report.NO_DATA),
@@ -115,20 +125,38 @@ def _position(row: dict[str, Any], names: dict[int, str], limits: list[tuple[int
     }
 
 
+def _interface_rule(row: dict[str, Any], unmapped: bool) -> str | None:
+    """Откуда взят интерфейс позиции (раздел 122): решение аналитика, код в написании или модификация."""
+
+    if unmapped or "variant_interface_source" not in row:
+        return None
+    if row.get("variant_interface_source") == "manual":
+        return f"Интерфейс: {row.get('interface') or report.NO_DATA} — решение аналитика по этому написанию"
+    if row.get("interface_review"):
+        return (
+            f"Интерфейс: на согласовании ({row['interface_review']}); предложение Совы — "
+            f"{row.get('interface_suggested') or 'нет'}, до решения — интерфейс модификации «{row.get('mod_interface') or report.NO_DATA}»"
+        )
+    if row.get("variant_interface_source") == "rule":
+        return f"Интерфейс: {row.get('interface')} — {row.get('interface_note')}"
+    return "Интерфейс — из модификации справочника (у типа нет таблицы кодов интерфейсов)"
+
+
 _ROW_SQL = (
     "SELECT v.id AS variant_id, v.raw, v.mapped_by, t.id AS type_id, t.mit_number, t.notation, t.title, "
-    "t.in_report, m.id AS mod_id, m.name AS mod_name, m.phase, m.design, m.interface, m.in_rpp, m.score, "
+    f"t.in_report, m.id AS mod_id, m.name AS mod_name, m.phase, m.design, {report.INTERFACE_SQL} AS interface, m.in_rpp, m.score, "
     f"m.rpp_included_at, m.rpp_record_number, {report.SMART_SQL} AS smart, {report.SMART_SOURCE_SQL} AS smart_890_source, "
     f"{report.SMART_NOTE_SQL} AS smart_890_note, "
     f"{report.SMART_AT_SQL} AS smart_890_at, m.manufacturer_override_id AS override_id, (v.modification_id IS NULL) AS unmapped, "
     f"{report._MANUFACTURER_SQL} AS manufacturer_id, extract(year FROM mv.month)::int AS year, "
-    "v.smart_890_source AS variant_smart_source, sum(mv.count) AS count "
+    "v.smart_890_source AS variant_smart_source, v.interface_source AS variant_interface_source, "
+    "v.interface_note, v.interface_review, v.interface_suggested, m.interface AS mod_interface, sum(mv.count) AS count "
     "FROM meter_verification_monthly mv "
     "JOIN meter_market_variants v ON v.id = mv.variant_id "
     "JOIN meter_market_types t ON t.id = v.type_id "
     "LEFT JOIN meter_market_modifications m ON m.id = v.modification_id "
 )
-_ROW_GROUP = " GROUP BY " + ", ".join(str(i) for i in range(1, 27))
+_ROW_GROUP = " GROUP BY " + ", ".join(str(i) for i in range(1, 32))
 
 
 def _summary(included: int, reasons: dict[tuple[str, bool], int]) -> list[dict[str, Any]]:

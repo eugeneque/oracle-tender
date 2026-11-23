@@ -25,6 +25,7 @@ from app.schemas.meter_market import (
     ThresholdsIn,
     TypeIn,
     TypeSmartIn,
+    VariantInterfaceIn,
     VariantSmartIn,
     VariantMapIn,
 )
@@ -366,6 +367,48 @@ def put_variant_smart(
     )
     db.commit()
     return {"id": variant.id, "smart_890": variant.smart_890, "source": variant.smart_890_source}
+
+
+@router.put("/variants/{variant_id}/interface")
+def put_variant_interface(
+    variant_id: int,
+    payload: VariantInterfaceIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_analytics),
+) -> dict[str, Any]:
+    """Согласование интерфейса написания: подтвердить/исправить (главнее таблицы кодов и модификации) или снять."""
+
+    variant = dictionary.set_variant_interface(db, variant_id, payload.interface)
+    log_action(
+        db,
+        component="meter_market",
+        action="variant_interface",
+        result="success",
+        details=f"«{variant.raw}»: {payload.interface}",
+        user_id=user.id,
+    )
+    db.commit()
+    return {
+        "id": variant.id,
+        "interface": variant.interface,
+        "source": variant.interface_source,
+        "review": variant.interface_review,
+        "suggested": variant.interface_suggested,
+    }
+
+
+@router.get("/interface-review")
+def get_interface_review(
+    type_id: int | None = None, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    return dictionary.interface_review_queue(db, type_id=type_id)
+
+
+@router.get("/types/{type_id}/interface-codes/draft")
+def get_interface_codes_draft(
+    type_id: int, db: Session = Depends(get_db), _: User = Depends(require_analytics)
+) -> dict[str, Any]:
+    return {"draft": dictionary.interface_codes_draft(db, type_id)}
 
 
 @router.get("/types")

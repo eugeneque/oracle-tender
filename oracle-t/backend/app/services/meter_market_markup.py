@@ -166,6 +166,10 @@ def _user_text(
     lines = [
         f"Тип СИ: {meter_type.mit_number}",
         f"Расшифровка кодов от аналитика (главнее описания типа): {meter_type.code_notes or '—'}",
+        *(  # таблица кодов интерфейсов (раздел 122): та же, по которой интерфейс берётся из написания
+            [f"Коды интерфейсов (КОД = канал; «?» — не определено): {'; '.join(l.split('#')[0].strip() for l in meter_type.interface_codes.splitlines() if '=' in l)}"]
+            if getattr(meter_type, "interface_codes", None) else []
+        ),
         f"Обозначение: {meter_type.notation or '—'}",
         f"Наименование: {meter_type.title or '—'}",
         f"МПИ типа, лет: {meter_type.mpi_years if meter_type.mpi_years is not None else '—'}",

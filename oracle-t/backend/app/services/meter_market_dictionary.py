@@ -28,6 +28,7 @@ from app.models.meter_market import (
     TypeReviewStatus,
 )
 from app.models.user import User, UserRole
+from app.services import meter_market_interface as interface_rules
 from app.services import meter_market_rules as rules
 from app.services.meter_market_normalize import (
     ModificationMatcher,
@@ -212,6 +213,78 @@ def set_variant_smart(db: Session, variant_id: int, value: bool | None) -> Meter
     return variant
 
 
+def set_variant_interface(db: Session, variant_id: int, value: str | None) -> MeterMarketVariant:
+    """Решение аналитика по интерфейсу написания (23.11.2026, раздел 122): подтвердить предложение или
+    исправить. Главнее таблицы кодов и модификации; `None` — снять, правило по таблице вернётся сразу."""
+
+    from datetime import datetime, timezone
+
+    variant = _get(db, MeterMarketVariant, variant_id, "Вариант написания")
+    if value is None:
+        variant.interface = variant.interface_source = variant.interface_note = None
+        variant.interface_review = variant.interface_suggested = variant.interface_at = None
+        db.flush()
+        interface_rules.apply_interface_codes(db.connection(), [variant.type_id])
+        db.refresh(variant)
+        return variant
+    label = interface_rules.join_label(interface_rules.split_label(value))  # пусто или «н/д» → «н/д»
+    variant.interface, variant.interface_source = label[:255], "manual"
+    variant.interface_note = "решение аналитика по этому написанию"
+    variant.interface_review = None
+    variant.interface_at = datetime.now(timezone.utc)
+    db.flush()
+    return variant
+
+
+def interface_review_queue(db: Session, *, type_id: int | None = None, limit: int = 300) -> dict[str, Any]:
+    """Написания с интерфейсом на согласовании (раздел 122): код не расшифрован, канал зависит от номера
+    модуля, сочетание кодов под вопросом или расшифровка по описанию типа расходится с модификацией.
+    Самые массовые — сверху."""
+
+    params: dict[str, Any] = {"l": limit}
+    where = ""
+    if type_id is not None:
+        where, params["t"] = "AND v.type_id = :t", type_id
+    base = (
+        "FROM meter_market_variants v JOIN meter_market_types t ON t.id = v.type_id "
+        "LEFT JOIN meter_market_manufacturers mf ON mf.id = t.manufacturer_id "
+        "LEFT JOIN meter_market_modifications m ON m.id = v.modification_id "
+        f"WHERE v.interface_review IS NOT NULL AND v.excluded_reason IS NULL {where} "
+    )
+    rows = db.execute(
+        text(
+            "SELECT v.id, v.raw, v.type_id, t.mit_number, t.notation, mf.name AS manufacturer, t.in_report, "
+            "m.id AS modification_id, m.name AS modification, m.interface AS modification_interface, "
+            "v.interface_suggested AS suggested, v.interface_review AS review, v.interface_note AS note, "
+            "(SELECT coalesce(sum(mv.count), 0) FROM meter_verification_monthly mv WHERE mv.variant_id = v.id) AS count "
+            f"{base} ORDER BY count DESC, v.raw LIMIT :l"
+        ),
+        params,
+    ).mappings().all()
+    total = db.execute(text(f"SELECT count(*) {base}"), params).scalar()
+    return {"items": [dict(r) for r in rows], "total": total}
+
+
+def interface_codes_draft(db: Session, type_id: int) -> str:
+    """Черновик таблицы кодов из «Описания типа» ГРСИ (блоки «Основной / Дополнительные интерфейсы»)."""
+
+    si_type = _get(db, MeterMarketType, type_id, "Описание типа")
+    description = db.execute(
+        text("SELECT description_type_text FROM si_types WHERE si_code = :c AND description_type_text IS NOT NULL "
+             "ORDER BY length(description_type_text) DESC LIMIT 1"),
+        {"c": si_type.mit_number},
+    ).scalar()
+    if not description:
+        raise HTTPException(status_code=404, detail="Текста описания типа в каталоге нет — таблицу кодов заполните вручную")
+    draft = interface_rules.codes_from_description(description)
+    if not draft:
+        raise HTTPException(
+            status_code=422,
+            detail="В описании типа не нашлось блоков «Основной / Дополнительные интерфейсы» с кодами — заполните вручную",
+        )
+    return draft
+
+
 def set_type_smart(db: Session, type_id: int, value: bool | None) -> int:
     """Ручная отметка «соответствует ПП 890» всем модификациям типа сразу (06.11.2026): у крупных
     типов десятки модификаций, а решение по линейке одно. `None` — снять ручные отметки (ИИ
@@ -287,7 +360,8 @@ def types(db: Session, *, review_status: str | None = None, search: str | None =
     rows = db.execute(
         text(
             "SELECT t.id, t.mit_number, t.title, t.notation, t.manufacturer_id, mf.name AS manufacturer, "
-            "t.cert_valid_to, t.mpi_years, t.in_report, t.review_status, t.code_notes, t.created_at, "
+            "t.cert_valid_to, t.mpi_years, t.in_report, t.review_status, t.code_notes, t.interface_codes, t.created_at, "
+            "(SELECT count(*) FROM meter_market_variants v WHERE v.type_id = t.id AND v.interface_review IS NOT NULL) AS interface_review, "
             "(SELECT count(*) FROM meter_market_modifications m WHERE m.type_id = t.id) AS modifications, "
             "(SELECT count(*) FROM meter_market_variants v WHERE v.type_id = t.id AND v.modification_id IS NULL) AS unmapped, "
             "(SELECT coalesce(sum(mv.count), 0) FROM meter_market_variants v JOIN meter_verification_monthly mv "
@@ -314,6 +388,10 @@ def update_type(db: Session, type_id: int, values: dict[str, Any]) -> MeterMarke
             setattr(si_type, key, values[key])
     if "code_notes" in values:
         si_type.code_notes = (values["code_notes"] or "").strip() or None
+    if "interface_codes" in values:
+        si_type.interface_codes = (values["interface_codes"] or "").strip() or None
+        db.flush()
+        interface_rules.apply_interface_codes(db.connection(), [si_type.id])
     db.flush()
     return si_type
 

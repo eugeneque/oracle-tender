@@ -50,6 +50,7 @@ from app.db.session import engine
 from app.models.log import LogLevel
 from app.services.audit import log_action
 from app.services import meter_market_rules as rules
+from app.services import meter_market_interface as interface_rules
 from app.services.meter_market_normalize import ModificationMatcher, modification_key
 
 COMPONENT = "meter_market"
@@ -684,6 +685,7 @@ def apply_package_file(
         rules.apply_mirtek_exclusions(conn)  # чужие приборы и старые описания типа МИРТЕК (раздел 121)
         rules.apply_mirtek_typos(conn)
         rules.apply_mirtek_protocol(conn)  # ПП 890 новых написаний МИРТЕК по протоколу Pn (раздел 120)
+        interface_rules.apply_interface_codes(conn)  # интерфейс новых написаний по таблице кодов типа (раздел 122)
         totals = conn.execute(
             text("SELECT rows_total, rows_kept, rows_annulled FROM meter_market_loads WHERE id = :i"), {"i": load_id}
         ).one()

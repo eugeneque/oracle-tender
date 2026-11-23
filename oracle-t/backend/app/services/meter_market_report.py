@@ -51,6 +51,9 @@ SMART_SQL = f"(CASE WHEN {_SMART_PICK} = 'v' THEN v.smart_890 ELSE m.smart_890 E
 SMART_SOURCE_SQL = f"(CASE WHEN {_SMART_PICK} = 'v' THEN v.smart_890_source ELSE m.smart_890_source END)"
 SMART_NOTE_SQL = f"(CASE WHEN {_SMART_PICK} = 'v' THEN v.smart_890_note ELSE m.smart_890_note END)"
 SMART_AT_SQL = f"(CASE WHEN {_SMART_PICK} = 'v' THEN v.smart_890_at ELSE m.smart_890_at END)"
+# Интерфейс по коду в написании (раздел 122): у написания (правило по таблице кодов типа или решение аналитика),
+# иначе — у модификации. На согласовании `v.interface` пуст, поэтому до решения остаётся модификация.
+INTERFACE_SQL = "coalesce(v.interface, m.interface)"
 
 _BASE_FROM = (
     "FROM meter_verification_monthly mv "
@@ -240,6 +243,9 @@ def status(db: Session) -> dict[str, Any]:
         # аналитика 06.11.2026: «выбрать октябрь не получается»).
         "loaded_month": date(loaded.year, loaded.month, 1) if (loaded := _last_loaded(db)) else None,
         "new_types": db.execute(text("SELECT count(*) FROM meter_market_types WHERE review_status = 'new'")).scalar(),
+        "interface_review": db.execute(
+            text("SELECT count(*) FROM meter_market_variants WHERE interface_review IS NOT NULL AND excluded_reason IS NULL")
+        ).scalar(),
         "unmapped_variants": db.execute(
             text(
                 "SELECT count(*) FROM meter_market_variants v JOIN meter_market_types t ON t.id = v.type_id "
@@ -268,7 +274,7 @@ def _cells(db: Session, period: Period, extra_group: str = "", extra_select: str
     period_sql, period_params = period.where()
     rows = db.execute(
         text(
-            f"SELECT {_MANUFACTURER_SQL} AS manufacturer_id, m.design, m.phase, m.interface, "
+            f"SELECT {_MANUFACTURER_SQL} AS manufacturer_id, m.design, m.phase, {INTERFACE_SQL} AS interface, "
             f"(v.modification_id IS NULL) AS unmapped, {SMART_SQL} AS smart{extra_select}, sum(mv.count) AS count "
             f"{_BASE_FROM} WHERE {period_sql} "
             f"GROUP BY 1, 2, 3, 4, 5, 6{extra_group}"
@@ -918,7 +924,7 @@ def powerbi_rows(db: Session, period: Period) -> list[list[Any]]:
     rows = db.execute(
         text(
             f"SELECT {_MANUFACTURER_SQL} AS manufacturer_id, t.mit_number, "
-            "m.design, m.phase, m.interface, "
+            f"m.design, m.phase, {INTERFACE_SQL} AS interface, "
             f"mv.month, m.in_rpp, m.score, {SMART_SQL} AS smart_890, (v.modification_id IS NULL) AS unmapped, "
             f"{SMART_SOURCE_SQL} AS smart_890_source, {SMART_NOTE_SQL} AS smart_890_note, {SMART_AT_SQL} AS smart_890_at, "
             "sum(mv.count) AS count "

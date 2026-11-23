@@ -2418,6 +2418,8 @@ export interface MarketStatus {
   loaded_month: string | null;
   new_types: number;
   unmapped_variants: number;
+  /** Написаний с интерфейсом на согласовании (раздел 122). */
+  interface_review: number;
   thresholds: { year: number; min_score: number }[];
   can_edit: boolean;
 }
@@ -2466,6 +2468,14 @@ export interface MarketExplainPosition {
   modification_id: number | null;
   /** Источник ПП 890 у самого написания: manual — решение аналитика, rule — правило по обозначению. */
   variant_smart_source: string | null;
+  /** Интерфейс самого написания (раздел 122): источник manual/rule, примечание, согласование. */
+  variant_interface?: {
+    source: string | null;
+    note: string | null;
+    review: string | null;
+    suggested: string | null;
+    modification: string | null;
+  };
   type_id: number;
   mit_number: string;
   notation: string | null;
@@ -2511,6 +2521,24 @@ export interface MarketUnmappedItem {
   mi_numbers: string[];
 }
 
+/** Написание с интерфейсом на согласовании (раздел 122). */
+export interface MarketInterfaceReviewItem {
+  id: number;
+  raw: string;
+  type_id: number;
+  mit_number: string;
+  notation: string | null;
+  manufacturer: string | null;
+  in_report: boolean;
+  modification_id: number | null;
+  modification: string | null;
+  modification_interface: string | null;
+  suggested: string | null;
+  review: string;
+  note: string | null;
+  count: number;
+}
+
 export interface MarketType {
   id: number;
   mit_number: string;
@@ -2523,6 +2551,9 @@ export interface MarketType {
   in_report: boolean;
   review_status: "new" | "included" | "excluded";
   code_notes: string | null;
+  /** Таблица кодов интерфейсов: «RF2400/1 = ZigBee», «G/n = ? GSM» (раздел 122). */
+  interface_codes: string | null;
+  interface_review: number;
   created_at: string;
   modifications: number;
   unmapped: number;

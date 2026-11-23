@@ -172,6 +172,9 @@ class MeterMarketType(Base):
     # Расшифровка кодов обозначения от аналитика — то, чего нет в «Описании типа», но есть в
     # руководстве по эксплуатации («G3 — NB-IoT»). ИИ-разметка ставит её выше описания (раздел 108).
     code_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Таблица кодов интерфейсов типа (23.11.2026, раздел 122): «RF2400/1 = ZigBee», «G/n = ? GSM» — по ней
+    # интерфейс берётся из кода в написании (`meter_market_interface`), а не из модификации.
+    interface_codes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -248,6 +251,14 @@ class MeterMarketVariant(Base):
     smart_890_source: Mapped[str | None] = mapped_column(String(10), nullable=True)
     smart_890_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     smart_890_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Интерфейс по коду в написании (23.11.2026, раздел 122): главнее интерфейса модификации. Пусто при
+    # `interface_review` — написание на согласовании, отчёт берёт модификацию, предложение — в `interface_suggested`.
+    interface: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    interface_source: Mapped[str | None] = mapped_column(String(10), nullable=True)  # rule | manual
+    interface_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    interface_suggested: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    interface_review: Mapped[str | None] = mapped_column(Text, nullable=True)
+    interface_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

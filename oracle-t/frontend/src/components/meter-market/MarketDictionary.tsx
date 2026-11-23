@@ -13,6 +13,7 @@ import type {
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { Panel } from "./common";
 import { BUTTON, DESIGNS, INPUT, ModificationForm, NO_RIGHT, PRIMARY } from "./ModificationForm";
+import { InterfaceCodes, InterfaceReviewQueue } from "./InterfaceReview";
 import { VariantMapper } from "./VariantMapper";
 import { fmt } from "./format";
 
@@ -23,7 +24,7 @@ import { fmt } from "./format";
  * правки всё видно, но кнопки неактивны с подсказкой.
  */
 
-type Tab = "unmapped" | "new" | "types" | "groups" | "thresholds" | "import";
+type Tab = "unmapped" | "review" | "new" | "types" | "groups" | "thresholds" | "import";
 
 
 export function MarketDictionary({ status, onChanged }: { status: MarketStatus; onChanged: () => void }) {
@@ -48,6 +49,7 @@ export function MarketDictionary({ status, onChanged }: { status: MarketStatus; 
         ariaLabel="Раздел справочника"
         segments={[
           { value: "unmapped", label: `Разметить${status.unmapped_variants ? ` · ${fmt(status.unmapped_variants)}` : ""}` },
+          { value: "review", label: `На согласование${status.interface_review ? ` · ${fmt(status.interface_review)}` : ""}` },
           { value: "new", label: `Новые типы${status.new_types ? ` · ${status.new_types}` : ""}` },
           { value: "types", label: "Типы и модификации" },
           { value: "groups", label: "Группы компаний" },
@@ -61,6 +63,7 @@ export function MarketDictionary({ status, onChanged }: { status: MarketStatus; 
         <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-4 py-2.5 text-sm text-emerald-400">{notice}</div>
       )}
       {tab === "unmapped" && <UnmappedQueue {...props} />}
+      {tab === "review" && <InterfaceReviewQueue {...props} />}
       {tab === "new" && <TypesList {...props} reviewStatus="new" />}
       {tab === "types" && <TypesList {...props} />}
       {tab === "groups" && <Groups {...props} />}
@@ -226,6 +229,7 @@ function TypesList({ canEdit, report, fail, reviewStatus }: EditProps & { review
                   <span className="block truncate text-xs text-zinc-600">
                     {[type.title, type.manufacturer ?? "производитель не указан", `${fmt(type.count)} поверок`].filter(Boolean).join(" · ")}
                     {type.unmapped > 0 && <span className="text-amber-400"> · неразмечено {type.unmapped}</span>}
+                    {type.interface_review > 0 && <span className="text-amber-400"> · интерфейс на согласовании {type.interface_review}</span>}
                   </span>
                 </button>
                 <div className="flex items-center gap-2">
@@ -257,6 +261,7 @@ function TypesList({ canEdit, report, fail, reviewStatus }: EditProps & { review
                 </div>
               </div>
               {openId === type.id && <CodeNotes type={type} canEdit={canEdit} report={report} fail={fail} onSaved={load} />}
+              {openId === type.id && <InterfaceCodes type={type} canEdit={canEdit} report={report} fail={fail} onSaved={load} />}
               {openId === type.id && <Modifications typeId={type.id} canEdit={canEdit} report={report} fail={fail} />}
             </div>
           ))}
