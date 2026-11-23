@@ -59,6 +59,30 @@ def gas_reason(raw: str | None) -> str | None:
     return GAS_REASON if raw and _GAS_KEY.search(modification_key(raw)) else None
 
 
+# ── Чужие приборы и старые описания типа у МИРТЕК (ответ аналитика 23.11.2026) ──────────────
+
+_FOREIGN_RAW = re.compile(r"^(мод\.?\s*)?(ладога|меркурий)\b", re.IGNORECASE)
+_OLD_TYPE_RAW = re.compile(r"^миртек-?(301\b|3-ру(?!\d))", re.IGNORECASE)
+FOREIGN_REASON = "не счётчик производителя типа (чужой прибор): не учитывается (ответ аналитика 23.11.2026)"
+OLD_TYPE_REASON = "старое описание типа МИРТЕК-3-РУ / МИРТЕК-301, срок действия истёк: не учитывается (ответ аналитика 23.11.2026)"
+# Опечатки поверителей: верное написание — МИРТЕК-232-РУ (67661-17). «323-РУ» — только под этим типом.
+_TYPO_KEYS = {modification_key("МИРТЕК-2232-РУ"): None, modification_key("МИРТЕК-323-РУ"): "67661-17"}
+TYPO_TARGET = "МИРТЕК-232-РУ"
+
+
+def mirtek_exclusion_reason(raw: str | None) -> str | None:
+    """Причина не учитывать написание типа МИРТЕК: чужой прибор («Ладога 0102», «Меркурий 234 …») или старое описание."""
+
+    if not raw:
+        return None
+    text_ = raw.strip().casefold()
+    if _FOREIGN_RAW.search(text_):
+        return FOREIGN_REASON
+    if _OLD_TYPE_RAW.search(text_.replace(" ", "")):
+        return OLD_TYPE_REASON
+    return None
+
+
 # ── «Умный учет»: буква U в заводском номере ────────────────────────────────────────────────
 
 SMART_UNIT_TYPE = "61891-15"
@@ -172,7 +196,12 @@ def rule_candidates(mit_number: str | None, raw: str | None) -> tuple[str, ...]:
     """Имена модификаций справочника, куда правило отправляет написание (для загрузчика и `remap_auto`)."""
 
     spec = decode_iprom(mit_number, raw)
-    return spec.candidates if spec else ()
+    if spec:
+        return spec.candidates
+    key = modification_key(raw)
+    if key in _TYPO_KEYS and _TYPO_KEYS[key] in (None, mit_number):
+        return (TYPO_TARGET,)
+    return ()
 
 
 # ── Применение к справочнику (миграция и командная строка) ─────────────────────────────────
@@ -236,6 +265,77 @@ def apply_gas_exclusion(conn: Connection) -> int:
     return len(ids)
 
 
+def apply_mirtek_exclusions(conn: Connection) -> int:
+    """Чужие приборы и старые описания типа у МИРТЕК: метка `excluded_reason`, убрать из агрегата,
+    пустые модификации-пустышки («МИРТЕК-301», «МИРТЕК-3-РУ», «Ладога 0102» …) удалить."""
+
+    found = [
+        (vid, reason, mod_id)
+        for vid, raw, mod_id in conn.execute(
+            text(
+                "SELECT v.id, v.raw, v.modification_id FROM meter_market_variants v "
+                "JOIN meter_market_types t ON t.id = v.type_id JOIN meter_market_manufacturers f ON f.id = t.manufacturer_id "
+                "WHERE f.name = :f AND v.excluded_reason IS NULL"
+            ),
+            {"f": MIRTEK},
+        )
+        if (reason := mirtek_exclusion_reason(raw))
+    ]
+    for vid, reason, _ in found:
+        conn.execute(text("UPDATE meter_market_variants SET excluded_reason = :r WHERE id = :v"), {"r": reason, "v": vid})
+    ids = [vid for vid, _, _ in found]
+    if ids:
+        conn.execute(text("DELETE FROM meter_verification_monthly WHERE variant_id = ANY(:v)"), {"v": ids})
+        # Привязка исключённого написания ни на что не влияет, а модификация-пустышка должна освободиться.
+        conn.execute(text("UPDATE meter_market_variants SET modification_id = NULL, mapped_by = NULL WHERE id = ANY(:v)"), {"v": ids})
+    _drop_empty_modifications(conn, [m for _, _, m in found if m])
+    return len(ids)
+
+
+def _drop_empty_modifications(conn: Connection, ids: list[int]) -> None:
+    """Удалить модификации без написаний (после отвязки чужих приборов и опечаток)."""
+
+    if ids:
+        conn.execute(
+            text(
+                "DELETE FROM meter_market_modifications m WHERE m.id = ANY(:i) AND NOT EXISTS "
+                "(SELECT 1 FROM meter_market_variants v WHERE v.modification_id = m.id)"
+            ),
+            {"i": ids},
+        )
+
+
+def apply_mirtek_typos(conn: Connection) -> int:
+    """«МИРТЕК-2232-РУ» и «МИРТЕК-323-РУ» (под 67661-17) — опечатки, это МИРТЕК-232-РУ: написания
+    переходят к модификации «МИРТЕК-232-РУ» своего типа (`manual` — ИИ не пересматривает)."""
+
+    moved = 0
+    dropped: list[int] = []
+    for vid, raw, type_id, number, mod_id in conn.execute(
+        text(
+            "SELECT v.id, v.raw, v.type_id, t.mit_number, v.modification_id FROM meter_market_variants v "
+            "JOIN meter_market_types t ON t.id = v.type_id JOIN meter_market_manufacturers f ON f.id = t.manufacturer_id "
+            "WHERE f.name = :f AND v.excluded_reason IS NULL"
+        ),
+        {"f": MIRTEK},
+    ).all():
+        key = modification_key(raw)
+        if key not in _TYPO_KEYS or _TYPO_KEYS[key] not in (None, number):
+            continue
+        target = _mod_by_key(conn, type_id).get(modification_key(TYPO_TARGET))
+        if target is None or target["id"] == mod_id:
+            continue
+        conn.execute(
+            text("UPDATE meter_market_variants SET modification_id = :m, mapped_by = 'manual' WHERE id = :v"),
+            {"m": target["id"], "v": vid},
+        )
+        if mod_id:
+            dropped.append(mod_id)
+        moved += 1
+    _drop_empty_modifications(conn, dropped)
+    return moved
+
+
 def apply_mirtek_smart(conn: Connection) -> int:
     """Три базовые строки МИРТЕК — «соответствует ПП 890» решением аналитика.
 
@@ -259,31 +359,44 @@ def apply_mirtek_smart(conn: Connection) -> int:
 
 _ELEMENT_TOKEN = re.compile(r"^(S|SS|ST|TT|T)$")
 _PROTOCOL_TOKEN = re.compile(r"^P\d+$")
+# Интерфейсы блоков ⑨/⑩ описания типа: RS485, RF433/1, G/5, PF/1, MOD, CAN … — не функции.
+_IFACE_TOKEN = re.compile(r"^(RS232|RS485|CAN|RF\d*(/\d+)?|RFWF.*|RFLT.*|G(/[\d.]+)?|PF/\d+|PO/\d+|E/\d+|MOD(/\d+)?)$")
+# Блок ⑫ «Дополнительные функции»: B, H, In, K, L, M, O, Qn, R, U, Vn, W/n, Y, Z/n — «HKMOQ1V3», «LOQ1V3», «V3».
+_FUNCTIONS_TOKEN = re.compile(r"^[BHIKLMOQRUVWYZ][A-Z0-9/]*$")
 PROTOCOL_NOTE_YES = "в обозначении указан протокол {p} (блок «Поддерживаемые протоколы обмена» описания типа)"
+PROTOCOL_NOTE_D = "в обозначении указан признак D — измерение в двух направлениях (ответ аналитика 23.11.2026)"
 PROTOCOL_NOTE_NO = (
-    "в обозначении нет протокола Pn — по описанию типа это протокол «МИРТЕК» (замечание аналитика 22.11.2026)"
+    "явное несоответствие: в обозначении есть блок функций, но нет ни протокола Pn, ни признака D — "
+    "протокол «МИРТЕК» (ответ аналитика 23.11.2026)"
+)
+PROTOCOL_NOTE_UNKNOWN = (
+    "обозначение неполное — явного несоответствия нет, считаем «соответствует» (ответ аналитика 23.11.2026)"
 )
 
 
 def protocol_verdict(raw: str | None) -> tuple[bool | None, str | None]:
-    """ПП 890 по написанию МИРТЕК: есть протокол `Pn` — «соответствует», полное обозначение без него —
-    «не соответствует», неполное («МИРТЕК-232-РУ», «…-W32-A15R1», «…-A1R1-230-5-60A») — `None`,
-    решает модификация.
+    """ПП 890 по написанию МИРТЕК (ответ аналитика 23.11.2026).
 
-    Основание — замечание аналитика (скриншоты 20.11.2026): у всех отмеченных «нет» написаний нет
-    `-P1/-P2`, у остальных есть; в описании типа блок ⑪ «(нет символа) – протокол «МИРТЕК»,
-    Pn – номер модификации поддерживаемых протоколов». «Полное» — дошло до типа измерительных элементов
-    (S, SS, ST, TT, T), дальше идут интерфейс, протокол и функции. Допущение — ждёт подтверждения аналитика."""
+    «P и D — признаки соответствия, сомнительное считать соответствующим, отклоняем только явные»:
+    - в обозначении есть протокол `Pn` (P1, P2) или признак `D` (два направления) — «соответствует»;
+    - обозначение дошло до блока функций («HKMOQ1V3», «LOQ1V3», «V3») и нет ни `Pn`, ни `D` — «не соответствует»
+      (явный случай: у отмеченных ею «нет» написаний всегда есть блок функций без `-P`);
+    - обозначение неполное («МИРТЕК-232-РУ», «…-W32-A15R1», «…-ST-G») — «соответствует».
+    Для пустого написания — `None`. Допущение: «P и D — одним из признаков» прочитано как «достаточно любого»."""
 
     if not raw:
         return None, None
     tokens = raw.upper().translate(_CYR_TO_LAT).replace(" ", "").split("-")
-    if not any(_ELEMENT_TOKEN.match(t) for t in tokens):
-        return None, None
-    for token in tokens:
+    start = next((i for i, t in enumerate(tokens) if _ELEMENT_TOKEN.match(t)), None)
+    tail = tokens[start + 1 :] if start is not None else []
+    for token in tail:
         if _PROTOCOL_TOKEN.match(token):
             return True, PROTOCOL_NOTE_YES.format(p=token)
-    return False, PROTOCOL_NOTE_NO
+    if "D" in tail:
+        return True, PROTOCOL_NOTE_D
+    if any(_FUNCTIONS_TOKEN.match(t) and not _IFACE_TOKEN.match(t) for t in tail):
+        return False, PROTOCOL_NOTE_NO
+    return True, PROTOCOL_NOTE_UNKNOWN
 
 
 def apply_mirtek_protocol(conn: Connection) -> int:
@@ -487,8 +600,10 @@ def apply_all(conn: Connection) -> dict[str, int]:
     unit = apply_smart_unit_split(conn)
     iprom = apply_iprom(conn)
     mirtek = apply_mirtek_smart(conn)
+    excluded = apply_mirtek_exclusions(conn)
+    typos = apply_mirtek_typos(conn)
     protocol = apply_mirtek_protocol(conn)
-    return {"mirtek_protocol": protocol, "gas_variants": gas, "smart_unit_rows": unit, "mirtek_smart": mirtek, **{f"iprom_{k}": v for k, v in iprom.items()}}
+    return {"mirtek_excluded": excluded, "mirtek_typos": typos, "mirtek_protocol": protocol, "gas_variants": gas, "smart_unit_rows": unit, "mirtek_smart": mirtek, **{f"iprom_{k}": v for k, v in iprom.items()}}
 
 
 if __name__ == "__main__":

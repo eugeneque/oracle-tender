@@ -285,24 +285,28 @@ def test_migration_0111_resets_blanket_rule_and_drops_foreign_modifications(conn
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        # Отмечены аналитиком «не соответствует» — полное обозначение без протокола Pn.
+        # Явное «нет» (скриншоты аналитика): есть блок функций, нет ни Pn, ни D.
         ("МИРТЕК-12-РУ-SP1-A1R1-230-5-60A-ST-RF433/1-RF2400/3-HKMOQ1V3", False),
         ("МИРТЕК-12-РУ-W2-A1-230-5-60A-S-RF433/1-LOQ1V3", False),
-        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF240", False),
+        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-HKMOQ1V3", False),
         ("МИРТЕК-32-РУ-W32-A0,5R1-230-5-10A-T-RS485-HLMOQ2V3", False),
-        ("МИРТЕК-32-РУ-SP31-A1R1-230-5-100A-T-RF-4", False),
+        ("МИРТЕК-32-РУ-W32-A1R1-230-10-100A-T-RS485-HKLMOQ2V3", False),
         ("W1-A1-230-5-60A-SS-RF433/1-V3", False),
-        # Протокол указан — «соответствует».
+        # Протокол Pn — «соответствует».
         ("МИРТЕК-32-РУ-SP31-A1R1-230-5-100A-T-RF433/1-RF2400/2-P2-HKMOV3-D", True),
         ("МИРТЕК-32-РУ-D37-1-A1R1-230-5-100A-T-RS485-MOD-P1-B-D", True),
-        ("МИРТЕК-12-РУ-W9-A1R1-230-5-80A-ST-G/1-P2-HKLMOV3-D", True),
         ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-P2-HKMOQ1V3", True),
         ("МИРТЕК-12-РУ-SP3-А1R1-230-5-80А-ST-RF433/1-Р2-HKMOQ1V3", True),  # кириллическая «Р»
-        # Обозначение неполное — решает модификация.
-        ("МИРТЕК-232-РУ", None),
-        ("Миртек-32-РУ-W32-A15R1", None),
-        ("МИРТЕК-12-РУ-SP1-AIRI-230-5-60A", None),
-        ("Нет модификации", None),
+        # Признак D (два направления) без Pn — тоже «соответствует» (ответ 23.11.2026).
+        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-HKMOQ1V3-D", True),
+        # Неполное обозначение — сомнительное считаем соответствующим.
+        ("МИРТЕК-12-РУ -D1-A1R1-230-5-80A-ST-G", True),
+        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF240", True),
+        ("МИРТЕК-32-РУ-SP31-A1R1-230-5-100A-T-RF-4", True),
+        ("МИРТЕК-232-РУ", True),
+        ("Миртек-32-РУ-W32-A15R1", True),
+        ("МИРТЕК-12-РУ-SP1-AIRI-230-5-60A", True),
+        ("Нет модификации", True),
         (None, None),
     ],
 )
@@ -319,11 +323,11 @@ def test_mirtek_protocol_applied_to_variants_and_respects_manual(conn):
     foreign = _variant(conn, types["87373-22"], "X-A1R1-230-5-60A-S-RF433", None)
     conn.execute(text("UPDATE meter_market_variants SET smart_890 = true, smart_890_source = 'manual' WHERE id = :v"), {"v": without_p})
 
-    assert rules.apply_mirtek_protocol(conn) == 1
+    assert rules.apply_mirtek_protocol(conn) == 2  # с Pn и «МИРТЕК-232-РУ» (неполное — сомнительное = «соответствует»)
     get = lambda v: tuple(conn.execute(text("SELECT smart_890, smart_890_source FROM meter_market_variants WHERE id = :v"), {"v": v}).one())
     assert get(with_p) == (True, "rule")
     assert get(without_p) == (True, "manual")  # ручное решение не перезаписано
-    assert get(short) == (None, None)
+    assert get(short) == (True, "rule")
     assert get(foreign) == (None, None)  # не МИРТЕК
     assert rules.apply_mirtek_protocol(conn) == 0
 
@@ -350,3 +354,49 @@ def test_report_takes_smart_from_variant(conn):
              "WHERE v.id = ANY(:ids) ORDER BY v.id"), {"ids": [yes, no]},
     ).all()
     assert [(r.smart, r.src) for r in rows] == [(True, "rule"), (False, "rule")]
+
+
+def test_mirtek_foreign_old_types_and_typos(conn):
+    """Ответ аналитика 23.11.2026: чужие приборы и старые описания типа не учитываются, опечатки — МИРТЕК-232-РУ."""
+
+    mir = _scalar(conn, "INSERT INTO meter_market_manufacturers (name) VALUES ('МИРТЕК') RETURNING id")
+    other = _scalar(conn, "INSERT INTO meter_market_manufacturers (name) VALUES ('Инкотекс') RETURNING id")
+    t232 = _scalar(conn, "INSERT INTO meter_market_types (mit_number, title, manufacturer_id, in_report) "
+                         "VALUES ('67661-17', 'Счетчики', :m, true) RETURNING id", m=mir)
+    t_old = _scalar(conn, "INSERT INTO meter_market_types (mit_number, title, manufacturer_id, in_report) "
+                          "VALUES ('65634-16', 'Счетчики', :m, true) RETURNING id", m=mir)
+    t_other = _scalar(conn, "INSERT INTO meter_market_types (mit_number, title, manufacturer_id, in_report) "
+                            "VALUES ('11111-11', 'Счетчики', :m, true) RETURNING id", m=other)
+
+    def mod(type_id, name):
+        return _scalar(conn, "INSERT INTO meter_market_modifications (type_id, name) VALUES (:t, :n) RETURNING id", t=type_id, n=name)
+
+    right = mod(t232, "МИРТЕК-232-РУ")
+    typo_2232, typo_323, old = mod(t232, "МИРТЕК-2232-РУ"), mod(t232, "МИРТЕК-323-РУ"), mod(t_old, "МИРТЕК-301")
+    ladoga = mod(t_old, "Ладога 0102")
+    v_2232 = _variant(conn, t232, "МИРТЕК-2232-РУ", typo_2232, "ai")
+    v_323 = _variant(conn, t232, "МИРТЕК-323-РУ", typo_323, "ai")
+    v_old = _variant(conn, t_old, "Миртек-301", old, "ai")
+    v_old2 = _variant(conn, t_old, "МИРТЕК-3-РУ-W32", None)
+    v_ok32 = _variant(conn, t_old, "МИРТЕК-32-РУ-W32", None)  # «3-РУ» внутри «32-РУ» не путать
+    v_ladoga = _variant(conn, t_old, "Ладога 0102", ladoga, "ai")
+    v_foreign_ok = _variant(conn, t_other, "Меркурий 234", None)  # у другого производителя — настоящий счётчик
+    for gid, v in enumerate((v_old, v_ladoga, v_foreign_ok), start=1):
+        _verification(conn, gid, v, f"S{gid}")
+    _monthly(conn)
+
+    assert rules.apply_mirtek_exclusions(conn) == 3
+    reason = lambda v: _scalar(conn, "SELECT excluded_reason FROM meter_market_variants WHERE id = :v", v=v)
+    assert reason(v_old) == reason(v_old2) == rules.OLD_TYPE_REASON and reason(v_ladoga) == rules.FOREIGN_REASON
+    assert reason(v_ok32) is None and reason(v_foreign_ok) is None
+    assert _scalar(conn, "SELECT count(*) FROM meter_verification_monthly WHERE variant_id = ANY(:v)", v=[v_old, v_ladoga]) == 0
+    assert _scalar(conn, "SELECT count(*) FROM meter_market_modifications WHERE id = ANY(:i)", i=[old, ladoga]) == 0
+
+    assert rules.apply_mirtek_typos(conn) == 2
+    mod_of = lambda v: _scalar(conn, "SELECT modification_id FROM meter_market_variants WHERE id = :v", v=v)
+    assert mod_of(v_2232) == mod_of(v_323) == right
+    assert _scalar(conn, "SELECT count(*) FROM meter_market_modifications WHERE id = ANY(:i)", i=[typo_2232, typo_323]) == 0
+    assert rules.apply_mirtek_exclusions(conn) == 0 and rules.apply_mirtek_typos(conn) == 0
+    # Загрузчик сразу ведёт новое написание-опечатку к верной строке.
+    assert rules.rule_candidates("67661-17", "МИРТЕК-323-РУ") == ("МИРТЕК-232-РУ",)
+    assert rules.rule_candidates("65634-16", "МИРТЕК-323-РУ") == ()

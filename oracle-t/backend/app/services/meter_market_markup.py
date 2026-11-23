@@ -56,6 +56,7 @@ from sqlalchemy.orm import Session
 from app.models.meter_market import DESIGN_LABELS, MappedBy, MeterMarketModification, MeterMarketType
 from app.services.ai_client import run_structured
 from app.services.ai_provider_service import AiNotConfiguredError, AiQuotaExceededError
+from app.services import meter_market_rules as rules
 from app.services.meter_market_dictionary import remap_auto
 from app.services.meter_market_normalize import modification_key, normalize_interface
 
@@ -203,6 +204,17 @@ def _interface(value: str) -> str:
     return normalize_interface(value) or "н/д"
 
 
+def _foreign_modification(db: Session, meter_type: MeterMarketType, name: str) -> bool:
+    """Модель назвала модификацией типа МИРТЕК прибор без «МИРТЕК» в названии («Ладога 0102», «Меркурий 234»,
+    газовый «ОМЕГА ЭТК»): ответ аналитика 23.11.2026 — не счётчики производителя не заводить и не учитывать.
+    Написание остаётся в «Разметить» (известные чужие приборы метит `rules.apply_mirtek_exclusions`)."""
+
+    owner = db.execute(
+        sql_text("SELECT name FROM meter_market_manufacturers WHERE id = :i"), {"i": meter_type.manufacturer_id}
+    ).scalar()
+    return owner == rules.MIRTEK and "миртек" not in name.casefold() and "mirtek" not in name.casefold()
+
+
 def _known(value: str | None) -> bool:
     return bool(value) and value not in ("н/д", "nd")
 
@@ -268,6 +280,9 @@ def apply_answer(
         elif item.name.strip():
             name = re.sub(r"\s+", " ", item.name).strip()[:500]
             target = by_key.get(modification_key(name))
+            if target is None and _foreign_modification(db, meter_type, name):
+                stats["skipped"] += 1
+                continue
             if target is not None and _correct_existing(meter_type, target, item, now):
                 stats["corrected"] += 1
             if target is None:
