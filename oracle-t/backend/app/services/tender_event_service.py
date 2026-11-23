@@ -138,13 +138,26 @@ def event_document_rows(db: Session, tender: Tender, events: list[TenderEvent]) 
     docs = db.scalars(
         select(TenderDocument).where(TenderDocument.tender_id == tender.id, TenderDocument.source_url.in_(urls))
     )
-    return [bitrix.document_row(tender, doc) for doc in docs]
+    published = {e.field_key[4:]: e.effective_at for e in events if e.field_key.startswith("doc:")}
+    return [bitrix.document_row(tender, doc, published.get(doc.source_url)) for doc in docs]
 
 
 def event_sections(db: Session, tender: Tender, events: list[TenderEvent]) -> dict[str, Any]:
     sections: dict[str, Any] = {}
     if rows := event_document_rows(db, tender, events):
         sections["documents"] = rows
+    # Изменение позиций/ТЗ: вместе с событием уходят актуальные строки позиций, чтобы портал
+    # обновил данные, а не только журнал (23.11.2026). Строки обновляются по постоянному ключу
+    # (номер позиции в спецификации); для события одного лота — только позиции этого лота.
+    changed = [e for e in events if e.event_type == "TECHNICAL_REQUIREMENT_CHANGED" and e.field_key == "positions"]
+    if changed:
+        lots = {e.lot_number for e in changed if e.scope == "LOT"}
+        scope_all = any(e.scope != "LOT" for e in changed)
+        rows = bitrix.position_rows(db, tender)
+        if not scope_all:
+            rows = [r for r in rows if r["data"].get("lot_number") in lots]
+        if rows:
+            sections["technical_specification"] = rows
     if any(e.event_type in ("PROTOCOL_PUBLISHED", "RESULT_CHANGED") for e in events):
         result: dict[str, list[dict[str, Any]]] = {"participants_prices": []}
         if bitrix.protocol_rows(db, tender, result):

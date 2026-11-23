@@ -6109,3 +6109,15 @@ Bluetooth, RF433/RF868 — RF, RS485 — RS) пока не оформлена в
 
 Тесты — `test_protocol_verdict`, `test_explain_localization_lists_spellings_with_their_own_smart`.
 
+
+## 117. Bitrix24: документы со статусом разбора, обновление позиций событием, lookup общей карточки (23.11.2026)
+
+- Строка `procurement_document`: `published_at` (дата публикации, если известна из карточки ЕИС),
+  `analysis_status` (`analyzed`/`pending`/`failed`) и `analysis_note` — файл без разбора всё равно виден.
+- Пакет событий `TECHNICAL_REQUIREMENT_CHANGED` по позициям несёт актуальные строки
+  `procurement_position` в `sections.technical_specification` (для события лота — только его лота):
+  портал обновляет данные, а не только журнал.
+- У общей карточки многолотовой закупки `lot_number` убран и из `lookup`.
+- «Карточки нет» = сведений о лотах получить нельзя (нет карточки ЕИС) → один лот `SINGLE`.
+- Открыто: адресация событий отдельных лотов (предложено: `deal_id: 0` + `lookup.lot_number`); сверка текста
+  между редакциями документа в событие не входит.

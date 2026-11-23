@@ -558,3 +558,16 @@ def test_multi_lot_tender_sends_common_card_and_lot_deals(db_session, client, ad
     assert lot2["deal_id"] == 0 and lot2["full_snapshot"] is False
     # Связь закупки — со сделкой общей карточки, а не лота.
     assert db_session.get(BitrixDealLink, tender.id).deal_id == 1984
+
+
+def test_general_card_lookup_has_no_lot_number_and_documents_carry_analysis_status(db_session, client, admin_user):
+    tender = _tender(db_session)
+    card = db_session.get(TenderCard, tender.id)
+    card.payload = {
+        **card.payload,
+        "tables": {"lots": {"headers": ["Номер, наименование лота"], "rows": [
+            ["1 Лот один", "Нет", "Цена: 1 ₽"], ["2 Лот два", "Нет", "Цена: 2 ₽"]]}},
+    }
+    db_session.commit()
+    assert "lot_number" not in service.build_payload(db_session, tender)["lookup"]
+    assert service.build_lookup(db_session, tender, {"lot_number": "2"})["lot_number"] == "2"

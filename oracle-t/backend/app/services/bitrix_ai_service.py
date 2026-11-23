@@ -367,10 +367,11 @@ def is_multi_lot(db: Session, tender: Tender) -> bool:
 
 
 def build_lookup(db: Session, tender: Tender, lot: dict[str, Any] | None = None) -> dict[str, Any]:
+    # У общей карточки многолотовой закупки номера лота нет и в `lookup` (Bitrix24, 23.11.2026).
     return _compact(
         {
             "procedure_number": procedure_number(tender),
-            "lot_number": lot["lot_number"] if lot else "1",
+            "lot_number": lot["lot_number"] if lot else (None if is_multi_lot(db, tender) else "1"),
             "customer_inn": customer_inn(db, tender),
             "customer_name": _clip(tender.customer_name, 500),
             "procedure_url": tender.source_url,
@@ -627,7 +628,10 @@ def _file_size_label(doc: TenderDocument) -> str | None:
     return f"{max(1, round(size / 1024))} КБ"
 
 
-def document_row(tender: Tender, doc: TenderDocument) -> dict[str, Any]:
+_ANALYSIS_STATUS = {"success": "analyzed", "pending": "pending", "error": "failed"}
+
+
+def document_row(tender: Tender, doc: TenderDocument, published_at: datetime | None = None) -> dict[str, Any]:
     """Строка `procurement_document` раздела `documents` (API 1.7.0). Ключ постоянен для одной
     редакции одного документа (по адресу файла): новая редакция — новый адрес, новая строка,
     прежняя не исчезает. `file_url` — только HTTPS; иначе ссылка на файл не передаётся."""
@@ -647,6 +651,12 @@ def document_row(tender: Tender, doc: TenderDocument) -> dict[str, Any]:
             "file_size": _file_size_label(doc),
             "file_url": doc.source_url if https else None,
             "source_url": tender.source_url if (tender.source_url or "").startswith("https://") else None,
+            # Дата публикации на площадке — только если она известна (событие из карточки ЕИС);
+            # время получения Битрикс фиксирует сам. Статус разбора виден даже у файла, который
+            # прочитать нельзя (23.11.2026, замечание Bitrix24: файл должен появиться всегда).
+            "published_at": _iso(published_at),
+            "analysis_status": _ANALYSIS_STATUS.get(doc.parse_status, "pending"),
+            "analysis_note": _clip(doc.parse_error, 500) if doc.parse_status == "error" else None,
         },
         status="published",
         confidence=1.0,
