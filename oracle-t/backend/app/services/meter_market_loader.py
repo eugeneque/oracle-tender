@@ -684,7 +684,11 @@ def apply_package_file(
         rebuild_monthly(conn, months)
         rules.apply_mirtek_exclusions(conn)  # чужие приборы и старые описания типа МИРТЕК (раздел 121)
         rules.apply_mirtek_typos(conn)
+        rules.apply_nartis_corrections(conn)  # точные исполнения НАРТИС и верный ГРСИ (раздел 125)
+        rules.apply_mirtek_body_mods(conn)  # корпуса W2/W3/SP1 МИРТЕК — отдельные модификации (раздел 125)
+        rules.apply_mirtek_stale_blanket_smart(conn)  # след массового «manual» 0109 не перекрывает написание (раздел 125)
         rules.apply_mirtek_protocol(conn)  # ПП 890 новых написаний МИРТЕК по протоколу Pn (раздел 120)
+        interface_rules.apply_mirtek_codes(conn)  # таблица каналов МИРТЕК, если её ещё нет (раздел 125)
         interface_rules.apply_interface_codes(conn)  # интерфейс новых написаний по таблице кодов типа (раздел 122)
         totals = conn.execute(
             text("SELECT rows_total, rows_kept, rows_annulled FROM meter_market_loads WHERE id = :i"), {"i": load_id}

@@ -244,6 +244,33 @@ def test_mirtek_rule_touches_only_base_rows_and_keeps_manual_decision(conn):
     assert _scalar(conn, "SELECT smart_890 FROM meter_market_modifications WHERE id = :i", i=plain) is False
 
 
+def test_stale_blanket_note_removed_only_from_non_base_modifications(conn):
+    types, _, plain, _ = _seed(conn)
+    sp3 = _scalar(
+        conn,
+        "INSERT INTO meter_market_modifications (type_id, name, smart_890, smart_890_source, smart_890_note) "
+        "VALUES (:t, 'МИРТЕК-12-РУ SP3', true, 'manual', :n) RETURNING id",
+        t=types["61891-15"], n=rules.MIRTEK_PRIMARY_NOTE,
+    )
+    manual = _scalar(
+        conn,
+        "INSERT INTO meter_market_modifications (type_id, name, smart_890, smart_890_source, smart_890_note) "
+        "VALUES (:t, 'МИРТЕК-12-РУ W9', false, 'manual', 'решение аналитика') RETURNING id",
+        t=types["61891-15"],
+    )
+    conn.execute(
+        text("UPDATE meter_market_modifications SET smart_890 = true, smart_890_source = 'manual', smart_890_note = :n WHERE id = :i"),
+        {"n": rules.MIRTEK_PRIMARY_NOTE, "i": plain},
+    )
+
+    assert rules.apply_mirtek_stale_blanket_smart(conn) == 1
+    row = lambda i: tuple(conn.execute(text("SELECT smart_890, smart_890_source FROM meter_market_modifications WHERE id = :i"), {"i": i}).one())
+    assert row(sp3) == (None, None)
+    assert row(plain) == (True, "manual")  # базовая строка
+    assert row(manual) == (False, "manual")  # настоящее решение аналитика
+    assert rules.apply_mirtek_stale_blanket_smart(conn) == 0
+
+
 def test_migration_0111_resets_blanket_rule_and_drops_foreign_modifications(conn, monkeypatch):
     import importlib.util
     from pathlib import Path
@@ -296,8 +323,9 @@ def test_migration_0111_resets_blanket_rule_and_drops_foreign_modifications(conn
         ("МИРТЕК-32-РУ-SP31-A1R1-230-5-100A-T-RF433/1-RF2400/2-P2-HKMOV3-D", True),
         ("МИРТЕК-32-РУ-D37-1-A1R1-230-5-100A-T-RS485-MOD-P1-B-D", True),
         ("МИРТЕК-12-РУ-SP3-А1R1-230-5-80А-ST-RF433/1-Р2-HKMOQ1V3-D", True),  # кириллические «А», «Р»
-        # Нужны оба (ответ 24.11.2026): только Pn или только D при блоке функций — «нет».
-        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-P2-HKMOQ1V3", False),
+        # Уточнение 24.11.2026: решает Pn; его отсутствие не компенсируется D, а пропущенный D — ошибка поверителя.
+        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-RF2400/3-P2-HKMOQ1V3", True),
+        ("МИРТЕК-12-РУ-D1-A1R1-230-5-60A-ST-RS485-P2-HKLMOQ2V3", True),
         ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-HKMOQ1V3-D", False),
         # Неполное обозначение — сомнительное считаем соответствующим.
         ("МИРТЕК-12-РУ -D1-A1R1-230-5-80A-ST-G", True),
@@ -400,3 +428,81 @@ def test_mirtek_foreign_old_types_and_typos(conn):
     # Загрузчик сразу ведёт новое написание-опечатку к верной строке.
     assert rules.rule_candidates("67661-17", "МИРТЕК-323-РУ") == ("МИРТЕК-232-РУ",)
     assert rules.rule_candidates("65634-16", "МИРТЕК-323-РУ") == ()
+
+
+# ── Правки 24.11.2026: НАРТИС и корпуса МИРТЕК ─────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("mit", "raw", "expected"),
+    [
+        ("86199-22", "НАРТИС-И100-W113-2-A1R1-230-5-80A-ST-RS485-P1-D", ("86199-22", "НАРТИС-И100-W113-2", "din")),
+        ("86199-22", "НАРТИС-И100-W112-2-A1R1-230-5-80A-ST-RS485-P1-D", ("86199-22", "НАРТИС-И100-W112-2", "cabinet")),
+        ("86200-22", "НАРТИС-И300-W132-2-A5SR1-230-5-10A-TN-RS485-P1-D", ("86200-22", "НАРТИС-И300 W132-2", "cabinet")),
+        ("86200-22", "НАРТИС-И300-W133-2-A5SR1-230-5-10A-TN-RS485-P1-D", ("86200-22", "НАРТИС-И300 W133-2", "din")),
+        ("86199-22", "НАРТИС-Р1-С-1010-230-100-ZB", ("97366-25", "НАРТИС-Р1-С-1010-230-100-ZB", "split")),
+        ("86200-22", "НАРТИС-Р3-М-1010-400-100-ZB", ("97367-25", "НАРТИС-Р3-М-1010-400-100-ZB", "cabinet")),
+        ("86200-22", "НАРТИС-И100-W113-2-A1R1-230-5-80A-ST-RS485-P1-D", ("86199-22", "НАРТИС-И100-W113-2", "din")),
+    ],
+)
+def test_nartis_target_from_analyst_corrections(mit, raw, expected):
+    assert rules.nartis_target(mit, raw) == expected
+
+
+def test_nartis_corrections_remap_move_and_merge(conn):
+    nartis = _scalar(conn, "INSERT INTO meter_market_manufacturers (name) VALUES ('Завод НАРТИС') RETURNING id")
+    types = {}
+    for number, notation in (("86199-22", "НАРТИС-И100"), ("86200-22", "НАРТИС-И300"), ("97366-25", "НАРТИС-Р1"), ("97367-25", "НАРТИС-Р3")):
+        types[number] = _scalar(
+            conn,
+            "INSERT INTO meter_market_types (mit_number, notation, title, manufacturer_id, in_report) "
+            "VALUES (:n, :no, 'Счетчики', :m, true) RETURNING id",
+            n=number, no=notation, m=nartis,
+        )
+    w113 = _scalar(conn, "INSERT INTO meter_market_modifications (type_id, name, design) VALUES (:t, 'НАРТИС-И100-W113', 'din') RETURNING id", t=types["86199-22"])
+    w113_2 = _scalar(
+        conn,
+        "INSERT INTO meter_market_modifications (type_id, name, design, in_rpp, score, rpp_included_at, localization_source) "
+        "VALUES (:t, 'НАРТИС-И100-W113-2', 'din', true, 113, '2023-12-21', 'import') RETURNING id",
+        t=types["86199-22"],
+    )
+    r1_zb = _scalar(conn, "INSERT INTO meter_market_modifications (type_id, name, design) VALUES (:t, 'НАРТИС-Р1-С-1010-230-100-ZB', 'split') RETURNING id", t=types["97366-25"])
+
+    raw_w113 = "НАРТИС-И100-W113-2-A1R1-230-5-80A-ST-RS485-P1-EHKLMOQ1V3-D"
+    wrong_map = _variant(conn, types["86199-22"], raw_w113, w113, "import")
+    wrong_type = _variant(conn, types["86200-22"], raw_w113, None, None)
+    raw_r1 = "НАРТИС-Р1-С-1010-230-100-ZB"
+    source_r1 = _variant(conn, types["86199-22"], raw_r1, None, None)
+    target_r1 = _variant(conn, types["97366-25"], raw_r1, r1_zb, "auto")
+    for gid, variant in enumerate((wrong_map, wrong_type, source_r1, target_r1), start=1):
+        _verification(conn, gid, variant, f"S{gid}")
+    _monthly(conn)
+
+    stats = rules.apply_nartis_corrections(conn)
+    assert stats["types_moved"] == 2 and stats["remapped"] >= 1
+    assert _scalar(conn, "SELECT modification_id FROM meter_market_variants WHERE id = :v", v=wrong_map) == w113_2
+    # Такое же написание уже было под верным типом: дубль из 86200-22 слит в него, поверки не потеряны.
+    assert _scalar(conn, "SELECT count(*) FROM meter_market_variants WHERE raw = :r", r=raw_w113) == 1
+    assert _scalar(conn, "SELECT type_id FROM meter_market_variants WHERE id = :v", v=wrong_map) == types["86199-22"]
+    assert _scalar(conn, "SELECT sum(count) FROM meter_verification_monthly WHERE variant_id = :v", v=wrong_map) == 2
+    assert _scalar(conn, "SELECT count(*) FROM meter_market_variants WHERE raw = :r", r=raw_r1) == 1
+    assert _scalar(conn, "SELECT type_id FROM meter_market_variants WHERE raw = :r", r=raw_r1) == types["97366-25"]
+    assert _scalar(conn, "SELECT modification_id FROM meter_market_variants WHERE raw = :r", r=raw_r1) == r1_zb
+    assert _scalar(conn, "SELECT sum(count) FROM meter_verification_monthly WHERE variant_id = :v", v=target_r1) == 2
+    assert rules.apply_nartis_corrections(conn) == {"types_moved": 0, "remapped": 0, "mods_fixed": 0, "mods_created": 0}
+
+
+def test_mirtek_body_mods_split_from_base_row(conn):
+    types, _, plain, _ = _seed(conn)
+    w2 = _variant(conn, types["61891-15"], "МИРТЕК-12-РУ-W2-A1R1-230-5-60A-S-RS485-KLMOQ1V3", plain, "auto")
+    sp1 = _variant(conn, types["61891-15"], "МИРТЕК-12-РУ-SP1-A1R1-230-5-60A-ST-RF433/1-KMOQ1V3", plain, "auto")
+
+    stats = rules.apply_mirtek_body_mods(conn)
+    assert stats["created"] == 2 and stats["remapped"] == 2
+    w2_mod = _scalar(conn, "SELECT id FROM meter_market_modifications WHERE name = 'МИРТЕК-12-РУ W2'")
+    sp1_mod = _scalar(conn, "SELECT id FROM meter_market_modifications WHERE name = 'МИРТЕК-12-РУ SP1'")
+    assert _scalar(conn, "SELECT modification_id FROM meter_market_variants WHERE id = :v", v=w2) == w2_mod
+    assert _scalar(conn, "SELECT design FROM meter_market_modifications WHERE id = :i", i=w2_mod) == "cabinet"
+    assert _scalar(conn, "SELECT modification_id FROM meter_market_variants WHERE id = :v", v=sp1) == sp1_mod
+    assert _scalar(conn, "SELECT design FROM meter_market_modifications WHERE id = :i", i=sp1_mod) == "split"
+    assert rules.apply_mirtek_body_mods(conn) == {"created": 0, "fixed": 0, "remapped": 0}

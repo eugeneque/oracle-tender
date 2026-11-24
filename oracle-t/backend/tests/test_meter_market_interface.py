@@ -17,6 +17,7 @@ from app.services import meter_market_report as report
 from app.services.meter_market_normalize import modification_key
 
 TABLE = iface.parse_table(iface.NARTIS_INTERFACE_CODES)
+MIRTEK_TABLE = iface.parse_table(iface.MIRTEK_INTERFACE_CODES)
 
 GREEN = (
     "НАРТИС-И100 -W113-2-A1R1-230-5-80A-S",
@@ -77,6 +78,29 @@ def test_combo_needs_exact_set():
 
     decision = iface.decode("НАРТИС-И100-SP1-2-A1R1-230-5-100A-SS-RF433/1-RF2400/2-RS485-P1-EHKMOQ1V3-D", TABLE)
     assert decision.label == "RS, RF, Bluetooth" and decision.review is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "label"),
+    [
+        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-G/5-P2-HKMOQ1V3-D", "RF, NB-IoT"),
+        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-G/1-P2-HKMOQ1V3-D", "RF, GSM"),
+        ("МИРТЕК-12-РУ-SP3-A1R1-230-5-80A-ST-RF433/1-RF2400/3-P2-HKMOQ1V3-D", "RF"),
+        ("МИРТЕК-12-РУ-D17-2-A1R1-230-5-80A-ST-RS485-MOD/2-P1-B-D", "RS, mod"),
+        ("МИРТЕК-12-РУ-D1-A1R1-230-5-60A-ST-RS485-P2-HKLMOQ2V3-D", "RS"),
+        ("МИРТЕК-12-РУ-D1-A1R1-230-5-80A-ST-G/5-P2-HKLMOQ2V3-D", "NB-IoT"),
+        ("МИРТЕК-12-РУ-W9-A1R1-230-5-80A-ST-RS485-G/5.1-P2-HKLMOV3-D", "RS, NB-IoT"),
+        ("МИРТЕК-12-РУ-SP1-A1R1-230-5-60A-ST-RF433/1-RF24003-P2-HKMOQ1V3", "RF"),  # опечатка без косой
+    ],
+)
+def test_mirtek_interface_codes(raw, label):
+    decision = iface.decode(raw, MIRTEK_TABLE)
+    assert decision.label == label and decision.review is None, decision
+
+
+def test_mirtek_without_interface_code_is_no_data():
+    decision = iface.decode("МИРТЕК-12-РУ-W2-A1R1-230-5-60A-S-KLMOQ1V3", MIRTEK_TABLE)
+    assert decision.label == iface.NO_INTERFACE and decision.review is None
 
 
 def test_draft_from_description_marks_ambiguous_codes():

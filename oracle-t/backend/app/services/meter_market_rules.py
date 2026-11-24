@@ -195,6 +195,12 @@ def decode_iprom(mit_number: str | None, raw: str | None) -> IpromSpec | None:
 def rule_candidates(mit_number: str | None, raw: str | None) -> tuple[str, ...]:
     """Имена модификаций справочника, куда правило отправляет написание (для загрузчика и `remap_auto`)."""
 
+    nartis = nartis_target(mit_number, raw)
+    if nartis and nartis[0] == mit_number:
+        return (nartis[1],)
+    mirtek = mirtek_body_target(mit_number, raw)
+    if mirtek:
+        return (mirtek,)
     spec = decode_iprom(mit_number, raw)
     if spec:
         return spec.candidates
@@ -202,6 +208,149 @@ def rule_candidates(mit_number: str | None, raw: str | None) -> tuple[str, ...]:
     if key in _TYPO_KEYS and _TYPO_KEYS[key] in (None, mit_number):
         return (TYPO_TARGET,)
     return ()
+
+
+# ── НАРТИС: исполнения «-2», верные ГРСИ и исполнение корпуса (24.11.2026) ─────────────────
+
+NARTIS_I100 = "86199-22"
+NARTIS_I300 = "86200-22"
+NARTIS_R1 = "97366-25"
+NARTIS_R3 = "97367-25"
+NARTIS_SOURCE_TYPES = (NARTIS_I100, NARTIS_I300)
+
+
+def _nkey(raw: str | None) -> str:
+    return modification_key(raw)
+
+
+_NARTIS_I100_KEY = _nkey("НАРТИС-И100")
+_NARTIS_I300_KEY = _nkey("НАРТИС-И300")
+_NARTIS_R1_KEY = _nkey("НАРТИС-Р1")
+_NARTIS_R3_KEY = _nkey("НАРТИС-Р3")
+
+
+def _i100_target(key: str) -> tuple[str, str] | None:
+    """(Название модификации, исполнение) написания НАРТИС-И100."""
+
+    ordered = (
+        ("w1122", "НАРТИС-И100-W112-2", "cabinet"),
+        ("w1132", "НАРТИС-И100-W113-2", "din"),
+        ("sp12", "НАРТИС-И100-SP1-2", "split"),
+        ("w111", "НАРТИС-И100-W111", "cabinet"),
+        ("w112", "НАРТИС-И100-W112", "cabinet"),
+        ("w113", "НАРТИС-И100-W113", "din"),
+        ("sp1", "НАРТИС-И100-SP1", "split"),
+    )
+    return next(((name, design) for token, name, design in ordered if token in key), None)
+
+
+def _i300_target(key: str) -> tuple[str, str] | None:
+    ordered = (
+        ("w1322", "НАРТИС-И300 W132-2", "cabinet"),
+        ("w1332", "НАРТИС-И300 W133-2", "din"),
+        ("w131g1rs485", "НАРТИС-И300 W131 G1 rs485", "cabinet"),
+        ("w131g2rs485", "НАРТИС-И300 W131 G2 rs485", "cabinet"),
+        ("w132", "НАРТИС-И300 W132", "cabinet"),
+        ("w133", "НАРТИС-И300 W133", "din"),
+        ("w131", "НАРТИС-И300 W131", "cabinet"),
+    )
+    return next(((name, design) for token, name, design in ordered if token in key), None)
+
+
+def _r1_target(key: str) -> tuple[str, str] | None:
+    if _nkey("НАРТИС-Р1-М") in key:
+        return "НАРТИС-Р1-М-1010-230-100-ZB", "cabinet"
+    if "zb" in key:
+        return "НАРТИС-Р1-С-1010-230-100-ZB", "split"
+    return "НАРТИС-Р1-С-1010-230-100", "split"
+
+
+def _r3_target(key: str) -> tuple[str, str] | None:
+    if _nkey("НАРТИС-Р3-М") in key or _nkey("НАРТИС-Р3-M") in key:
+        return "НАРТИС-Р3-М-1010-400-100-ZB", "cabinet"
+    if "zb" in key:
+        return "НАРТИС-Р3-С-1010-400-100-ZB", "split"
+    return "НАРТИС-Р3-С-1010-400-100", "split"
+
+
+def nartis_target(mit_number: str | None, raw: str | None) -> tuple[str, str, str] | None:
+    """(ГРСИ, модификация, исполнение) написания НАРТИС из замечаний 24.11.2026.
+
+    Работает и для написания, внесённого под чужим номером ГРСИ: тогда первый элемент — верный тип,
+    и миграция переносит сам вариант, а не только привязку."""
+    if not raw:
+        return None
+    key = _nkey(raw)
+    if _NARTIS_R1_KEY in key:
+        found = _r1_target(key)
+        return (NARTIS_R1, *found) if found else None
+    if _NARTIS_R3_KEY in key:
+        found = _r3_target(key)
+        return (NARTIS_R3, *found) if found else None
+    if _NARTIS_I100_KEY in key:
+        found = _i100_target(key)
+        return (NARTIS_I100, *found) if found else None
+    if _NARTIS_I300_KEY in key:
+        found = _i300_target(key)
+        return (NARTIS_I300, *found) if found else None
+    return None
+
+
+# Атрибуты справочника аналитика. Локализация ставится только если её ещё нет; существующие записи РПП не трогаем.
+_NARTIS_MOD_SPECS: dict[str, dict[str, tuple[str, str, str, str | None, bool, float | None, date | None]]] = {
+    NARTIS_I100: {
+        "НАРТИС-И100-W111": ("1ф", "cabinet", "GSM", None, False, None, None),
+        "НАРТИС-И100-W112": ("1ф", "cabinet", "GSM и RS", None, False, None, None),
+        "НАРТИС-И100-W112-2": ("1ф", "cabinet", "GSM и RS", None, True, 113.0, date(2023, 10, 20)),
+        "НАРТИС-И100-W113": ("1ф", "din", "RS", None, False, None, None),
+        "НАРТИС-И100-W113-2": ("1ф", "din", "RF и RS", None, True, 113.0, date(2023, 12, 21)),
+        "НАРТИС-И100-SP1": ("1ф", "split", "RF и RS", None, False, None, None),
+        "НАРТИС-И100-SP1-2": ("1ф", "split", "RS, ZigBee", None, True, 113.0, date(2023, 12, 11)),
+    },
+    NARTIS_I300: {
+        "НАРТИС-И300 W131": ("3ф", "cabinet", "ZigBee", None, False, None, None),
+        "НАРТИС-И300 W131 G1 rs485": ("3ф", "cabinet", "GSM и RS", None, False, None, None),
+        "НАРТИС-И300 W131 G2 rs485": ("3ф", "cabinet", "GSM и RS", None, False, None, None),
+        "НАРТИС-И300 W132": ("3ф", "cabinet", "RS", None, False, None, None),
+        "НАРТИС-И300 W132-2": ("3ф", "cabinet", "RF и RS", None, True, 113.0, date(2023, 12, 11)),
+        "НАРТИС-И300 W133": ("3ф", "din", "RS", None, False, None, None),
+        "НАРТИС-И300 W133-2": ("3ф", "din", "н/д", None, True, 113.0, date(2023, 12, 21)),
+    },
+    NARTIS_R1: {
+        "НАРТИС-Р1-С-1010-230-100": ("1ф", "split", "н/д", None, True, 113.0, date(2025, 12, 26)),
+        "НАРТИС-Р1-С-1010-230-100-ZB": ("1ф", "split", "ZigBee", None, True, 113.0, date(2025, 12, 26)),
+        "НАРТИС-Р1-М-1010-230-100-ZB": ("1ф", "cabinet", "ZigBee", None, False, None, None),
+    },
+    NARTIS_R3: {
+        "НАРТИС-Р3-С-1010-400-100": ("3ф", "split", "н/д", None, True, 113.0, date(2025, 12, 26)),
+        "НАРТИС-Р3-С-1010-400-100-ZB": ("3ф", "split", "RS", None, True, 113.0, date(2025, 12, 26)),
+        "НАРТИС-Р3-М-1010-400-100-ZB": ("3ф", "cabinet", "RS", None, True, 113.0, date(2026, 8, 6)),
+    },
+}
+
+
+# ── МИРТЕК: корпуса W2/W3/SP1 как отдельные модификации (24.11.2026) ───────────────────────
+
+_MIRTEK_BODY_RE = re.compile(r"(?:^|-)(W\d+B?|D\d+|SP\d+)(-\d)?(?=-|$)", re.IGNORECASE)
+_MIRTEK_BODY_MODS = {
+    "W1": ("1ф", "cabinet"), "W2": ("1ф", "cabinet"), "W3": ("1ф", "cabinet"),
+    "W6": ("1ф", "cabinet"), "W6B": ("1ф", "cabinet"), "W9": ("1ф", "cabinet"),
+    "D1": ("1ф", "din"), "D4": ("1ф", "din"), "D5": ("1ф", "din"), "D17": ("1ф", "din"),
+    "D17-1": ("1ф", "din"), "D17-2": ("1ф", "din"),
+    "SP1": ("1ф", "split"), "SP2": ("1ф", "split"), "SP3": ("1ф", "split"),
+    "SP17": ("1ф", "split"), "SP17-1": ("1ф", "split"), "SP17-2": ("1ф", "split"),
+}
+
+
+def mirtek_body_target(mit_number: str | None, raw: str | None) -> str | None:
+    """Каноническая модификация МИРТЕК-12-РУ по коду корпуса: W2/W3/SP1 больше не сводятся в базовую строку."""
+    if mit_number != "61891-15" or not raw:
+        return None
+    match = _MIRTEK_BODY_RE.search(raw.upper().translate(_CYR_TO_LAT).replace(" ", ""))
+    if not match:
+        return None
+    body = (match.group(1) + (match.group(2) or "")).upper()
+    return f"МИРТЕК-12-РУ {body}" if body in _MIRTEK_BODY_MODS else None
 
 
 # ── Применение к справочнику (миграция и командная строка) ─────────────────────────────────
@@ -237,6 +386,200 @@ def _recount(conn: Connection, variant_ids: list[int]) -> None:
         ),
         {"v": variant_ids},
     )
+
+
+def _ensure_nartis_modification(conn: Connection, type_id: int, name: str, spec: tuple, now: datetime) -> bool:
+    """Модификация НАРТИС из правила: завести, исправить исполнение, дозаполнить локализацию, если её не было."""
+
+    phase, design, interface, _unused, localized, score, included_at = spec
+    mod = _mod_by_key(conn, type_id).get(modification_key(name))
+    if mod is None:
+        conn.execute(
+            text(
+                "INSERT INTO meter_market_modifications (type_id, name, phase, design, interface, in_rpp, score, "
+                "rpp_included_at, localization_source, comment) VALUES (:t, :n, :p, :d, :i, :l, :s, :at, :src, :c)"
+            ),
+            {
+                "t": type_id, "n": name, "p": phase, "d": design, "i": interface,
+                "l": localized, "s": score if localized else None,
+                "at": included_at if localized else None, "src": "manual" if localized else None,
+                "c": "Заведено по правке аналитика 24.11.2026 (раздел 125): точное исполнение НАРТИС.",
+            },
+        )
+        return True
+    changes: dict[str, object] = {"phase": phase, "design": design}
+    if interface and not mod["interface"]:
+        changes["interface"] = interface
+    if localized and not mod["in_rpp"]:
+        changes.update(
+            in_rpp=True,
+            score=mod["score"] if mod["score"] is not None else score,
+            rpp_included_at=mod["rpp_included_at"] or included_at,
+            localization_source="manual",
+        )
+    if all(
+        mod[key] == value for key, value in changes.items() if key in {"phase", "design", "interface"}
+    ) and not any(key in changes for key in ("in_rpp", "score", "rpp_included_at", "localization_source")):
+        return False
+    changes["updated_at"] = now
+    sets = ", ".join(f"{key} = :{key}" for key in changes)
+    conn.execute(text(f"UPDATE meter_market_modifications SET {sets} WHERE id = :id"), {**changes, "id": mod["id"]})
+    return True
+
+
+def _merge_manual_variant_fields(conn: Connection, source_id: int, target_id: int) -> None:
+    """Перенести ручные решения дубля-источника в целевой вариант, не перекрывая уже заполненные."""
+
+    conn.execute(
+        text(
+            "UPDATE meter_market_variants AS target SET "
+            "smart_890 = coalesce(target.smart_890, source.smart_890), "
+            "smart_890_source = coalesce(target.smart_890_source, source.smart_890_source), "
+            "smart_890_note = coalesce(target.smart_890_note, source.smart_890_note), "
+            "smart_890_at = coalesce(target.smart_890_at, source.smart_890_at), "
+            "interface = coalesce(target.interface, source.interface), "
+            "interface_source = coalesce(target.interface_source, source.interface_source), "
+            "interface_note = coalesce(target.interface_note, source.interface_note), "
+            "interface_suggested = coalesce(target.interface_suggested, source.interface_suggested), "
+            "interface_review = coalesce(target.interface_review, source.interface_review), "
+            "interface_at = coalesce(target.interface_at, source.interface_at) "
+            "FROM meter_market_variants AS source WHERE target.id = :t AND source.id = :s"
+        ),
+        {"t": target_id, "s": source_id},
+    )
+
+
+def _move_variant_to_type(conn: Connection, variant_id: int, target_type_id: int) -> int:
+    """Перенести написание под верный ГРСИ; если там уже есть такое же `raw`, слить дубль без потери поверок."""
+
+    raw, source_type_id = conn.execute(
+        text("SELECT raw, type_id FROM meter_market_variants WHERE id = :v"), {"v": variant_id}
+    ).one()
+    existing = conn.execute(
+        text("SELECT id FROM meter_market_variants WHERE type_id = :t AND raw = :r"),
+        {"t": target_type_id, "r": raw},
+    ).scalar()
+    if existing is None:
+        conn.execute(
+            text("UPDATE meter_market_variants SET type_id = :t WHERE id = :v"),
+            {"t": target_type_id, "v": variant_id},
+        )
+        return variant_id
+    _merge_manual_variant_fields(conn, variant_id, existing)
+    conn.execute(text("UPDATE meter_verifications SET variant_id = :t WHERE variant_id = :s"), {"t": existing, "s": variant_id})
+    conn.execute(text("DELETE FROM meter_verification_monthly WHERE variant_id = ANY(:v)"), {"v": [variant_id, existing]})
+    conn.execute(text("DELETE FROM meter_market_variants WHERE id = :v"), {"v": variant_id})
+    _recount(conn, [existing])
+    return existing
+
+
+def apply_nartis_corrections(conn: Connection) -> dict[str, int]:
+    """Правки аналитика 24.11.2026 по НАРТИС: точные исполнения «-2», перенос чужих ГРСИ, локализация.
+
+    Повторный запуск ничего не меняет. Правило относится и к прежним привязкам import/manual, потому что
+    аналитик показала именно ошибочные строки; ручные значения ПП 890 и интерфейса у самого написания
+    переносятся вместе с ним и не перезаписываются."""
+
+    now = datetime.now(timezone.utc)
+    type_ids = dict(
+        conn.execute(
+            text("SELECT mit_number, id FROM meter_market_types WHERE mit_number = ANY(:m)"),
+            {"m": [NARTIS_I100, NARTIS_I300, NARTIS_R1, NARTIS_R3]},
+        ).all()
+    )
+    stats = {"types_moved": 0, "remapped": 0, "mods_fixed": 0, "mods_created": 0}
+    mod_ids: dict[str, dict[str, int]] = {}
+    for mit_number, specs in _NARTIS_MOD_SPECS.items():
+        type_id = type_ids.get(mit_number)
+        if type_id is None:
+            continue
+        before = _mod_by_key(conn, type_id)
+        for name, spec in specs.items():
+            existed = modification_key(name) in before
+            if _ensure_nartis_modification(conn, type_id, name, spec, now):
+                stats["mods_fixed" if existed else "mods_created"] += 1
+        mod_ids[mit_number] = {key: row["id"] for key, row in _mod_by_key(conn, type_id).items()}
+
+    for variant_id, raw, current_type in conn.execute(
+        text(
+            "SELECT v.id, v.raw, t.mit_number FROM meter_market_variants v JOIN meter_market_types t ON t.id = v.type_id "
+            "WHERE t.mit_number = ANY(:m) AND v.excluded_reason IS NULL"
+        ),
+        {"m": list(NARTIS_SOURCE_TYPES)},
+    ).all():
+        target = nartis_target(current_type, raw)
+        if not target or target[0] == current_type or target[0] not in type_ids:
+            continue
+        _move_variant_to_type(conn, variant_id, type_ids[target[0]])
+        stats["types_moved"] += 1
+
+    for variant_id, raw, current_mod, current_type in conn.execute(
+        text(
+            "SELECT v.id, v.raw, v.modification_id, t.mit_number FROM meter_market_variants v "
+            "JOIN meter_market_types t ON t.id = v.type_id WHERE t.mit_number = ANY(:m) AND v.excluded_reason IS NULL"
+        ),
+        {"m": list(type_ids)},
+    ).all():
+        target = nartis_target(current_type, raw)
+        if not target or target[0] != current_type:
+            continue
+        mod_id = mod_ids.get(current_type, {}).get(modification_key(target[1]))
+        if mod_id is None or mod_id == current_mod:
+            continue
+        conn.execute(
+            text("UPDATE meter_market_variants SET modification_id = :m, mapped_by = 'manual' WHERE id = :v"),
+            {"m": mod_id, "v": variant_id},
+        )
+        stats["remapped"] += 1
+    return stats
+
+
+def apply_mirtek_body_mods(conn: Connection) -> dict[str, int]:
+    """W2/W3/SP1 и другие корпуса МИРТЕК — отдельные модификации, а не общая строка «МИРТЕК-12-РУ»."""
+
+    type_id = _type_id(conn, "61891-15")
+    if type_id is None:
+        return {"created": 0, "fixed": 0, "remapped": 0}
+    rows = conn.execute(
+        text("SELECT id, raw, modification_id FROM meter_market_variants WHERE type_id = :t AND excluded_reason IS NULL"),
+        {"t": type_id},
+    ).all()
+    targets = {target for _, raw, _ in rows if (target := mirtek_body_target("61891-15", raw))}
+    stats = {"created": 0, "fixed": 0, "remapped": 0}
+    mods = _mod_by_key(conn, type_id)
+    for name in sorted(targets):
+        body = name.rsplit(" ", 1)[-1]
+        phase, design = _MIRTEK_BODY_MODS[body]
+        key = modification_key(name)
+        mod = mods.get(key)
+        if mod is None:
+            mod_id = conn.execute(
+                text("INSERT INTO meter_market_modifications (type_id, name, phase, design) VALUES (:t, :n, :p, :d) RETURNING id"),
+                {"t": type_id, "n": name, "p": phase, "d": design},
+            ).scalar_one()
+            mods[key] = {"id": mod_id, "name": name, "phase": phase, "design": design, "in_rpp": False, "score": None,
+                         "rpp_included_at": None, "interface": None, "smart_890": None, "smart_890_source": None,
+                         "localization_source": None}
+            stats["created"] += 1
+        elif mod["phase"] != phase or mod["design"] != design:
+            conn.execute(
+                text("UPDATE meter_market_modifications SET phase = :p, design = :d, updated_at = now() WHERE id = :i"),
+                {"p": phase, "d": design, "i": mod["id"]},
+            )
+            stats["fixed"] += 1
+    for variant_id, raw, current_mod in rows:
+        target = mirtek_body_target("61891-15", raw)
+        if not target:
+            continue
+        mod_id = mods[modification_key(target)]["id"]
+        if mod_id == current_mod:
+            continue
+        conn.execute(
+            text("UPDATE meter_market_variants SET modification_id = :m, mapped_by = 'manual' WHERE id = :v"),
+            {"m": mod_id, "v": variant_id},
+        )
+        stats["remapped"] += 1
+    return stats
 
 
 def _manufacturer_id(conn: Connection, name: str) -> int | None:
@@ -355,6 +698,25 @@ def apply_mirtek_smart(conn: Connection) -> int:
     ).rowcount or 0
 
 
+def apply_mirtek_stale_blanket_smart(conn: Connection) -> int:
+    """Снять след массового UPDATE 0109 с небазовых модификаций МИРТЕК.
+
+    Текст `MIRTEK_PRIMARY_NOTE` там — не решение аналитика, а признак старого правила «всем manual»;
+    из-за него модификация перекрывала вердикт по написанию. Настоящее ручное решение с другим
+    примечанием и три базовые строки не затрагиваются."""
+
+    return conn.execute(
+        text(
+            "UPDATE meter_market_modifications m SET smart_890 = NULL, smart_890_source = NULL, "
+            "smart_890_note = NULL, smart_890_at = NULL, updated_at = now() "
+            "FROM meter_market_types t, meter_market_manufacturers f "
+            "WHERE t.id = m.type_id AND f.id = t.manufacturer_id AND f.name = :f "
+            "AND m.name <> ALL(:names) AND m.smart_890_source = 'manual' AND m.smart_890_note = :n"
+        ),
+        {"f": MIRTEK, "names": list(MIRTEK_BASE_NAMES), "n": MIRTEK_PRIMARY_NOTE},
+    ).rowcount or 0
+
+
 # ── МИРТЕК: протокол Pn в обозначении (22.11.2026, раздел 120) ─────────────────────────────
 
 _ELEMENT_TOKEN = re.compile(r"^(S|SS|ST|TT|T)$")
@@ -364,12 +726,12 @@ _IFACE_TOKEN = re.compile(r"^(RS232|RS485|CAN|RF\d*(/\d+)?|RFWF.*|RFLT.*|G(/[\d.
 # Блок ⑫ «Дополнительные функции»: B, H, In, K, L, M, O, Qn, R, U, Vn, W/n, Y, Z/n — «HKMOQ1V3», «LOQ1V3», «V3».
 _FUNCTIONS_TOKEN = re.compile(r"^[BHIKLMOQRUVWYZ][A-Z0-9/]*$")
 PROTOCOL_NOTE_YES = (
-    "в обозначении есть протокол {p} и признак D (измерение в двух направлениях) — оба признака ПП 890 "
+    "в обозначении есть протокол {p}; отсутствие признака D — ошибка поверителя и не меняет соответствие "
     "(ответ аналитика 24.11.2026)"
 )
 PROTOCOL_NOTE_NO = (
-    "явное несоответствие: обозначение дошло до блока функций, но в нём нет {missing} — нужны и протокол Pn, "
-    "и признак D (ответ аналитика 24.11.2026)"
+    "явное несоответствие: обозначение дошло до блока функций, но в нём нет протокола Pn "
+    "(ответ аналитика 24.11.2026)"
 )
 PROTOCOL_NOTE_UNKNOWN = (
     "обозначение неполное — явного несоответствия нет, считаем «соответствует» (ответ аналитика 23.11.2026)"
@@ -379,10 +741,10 @@ PROTOCOL_NOTE_UNKNOWN = (
 def protocol_verdict(raw: str | None) -> tuple[bool | None, str | None]:
     """ПП 890 по написанию МИРТЕК (ответы аналитика 23–24.11.2026).
 
-    «P и D — признаки соответствия; нужны оба; сомнительное считаем соответствующим, отклоняем только явные»:
-    - в обозначении есть и протокол `Pn` (P1, P2), и признак `D` (два направления, блок ⑬) — «соответствует»;
-    - обозначение дошло до блока функций («HKMOQ1V3», «LOQ1V3», «V3»), а `Pn` или `D` нет — «не соответствует»
-      (явный случай: `D` стоит после функций, значит, обозначение не обрезано);
+    Последнее уточнение 24.11.2026 по красным отметкам в Excel: решает протокол `Pn`, а не связка «P и D»:
+    - в обозначении есть `P1`/`P2` — «соответствует», даже если завершающий `D` поверитель не дописал;
+    - обозначение дошло до блока функций («HKMOQ1V3», «LOQ1V3», «V3»), а `Pn` нет — «не соответствует»,
+      и наличие `D` без протокола это не меняет;
     - обозначение неполное («МИРТЕК-232-РУ», «…-W32-A15R1», «…-ST-G», «…-ST-RF433» — «лень поверителя») —
       «соответствует».
     Для пустого написания — `None`."""
@@ -393,14 +755,10 @@ def protocol_verdict(raw: str | None) -> tuple[bool | None, str | None]:
     start = next((i for i, t in enumerate(tokens) if _ELEMENT_TOKEN.match(t)), None)
     tail = tokens[start + 1 :] if start is not None else []
     protocol = next((t for t in tail if _PROTOCOL_TOKEN.match(t)), None)
-    two_way = "D" in tail
-    if protocol and two_way:
+    if protocol:
         return True, PROTOCOL_NOTE_YES.format(p=protocol)
     if any(_FUNCTIONS_TOKEN.match(t) and not _IFACE_TOKEN.match(t) for t in tail):
-        missing = "ни протокола Pn, ни признака D" if not protocol and not two_way else (
-            "признака D" if protocol else "протокола Pn"
-        )
-        return False, PROTOCOL_NOTE_NO.format(missing=missing)
+        return False, PROTOCOL_NOTE_NO
     return True, PROTOCOL_NOTE_UNKNOWN
 
 
@@ -607,8 +965,22 @@ def apply_all(conn: Connection) -> dict[str, int]:
     mirtek = apply_mirtek_smart(conn)
     excluded = apply_mirtek_exclusions(conn)
     typos = apply_mirtek_typos(conn)
+    body = apply_mirtek_body_mods(conn)
+    nartis = apply_nartis_corrections(conn)
+    stale_blanket = apply_mirtek_stale_blanket_smart(conn)
     protocol = apply_mirtek_protocol(conn)
-    return {"mirtek_excluded": excluded, "mirtek_typos": typos, "mirtek_protocol": protocol, "gas_variants": gas, "smart_unit_rows": unit, "mirtek_smart": mirtek, **{f"iprom_{k}": v for k, v in iprom.items()}}
+    return {
+        "mirtek_stale_blanket": stale_blanket,
+        "mirtek_excluded": excluded,
+        "mirtek_typos": typos,
+        "mirtek_protocol": protocol,
+        "gas_variants": gas,
+        "smart_unit_rows": unit,
+        "mirtek_smart": mirtek,
+        **{f"mirtek_body_{k}": v for k, v in body.items()},
+        **{f"nartis_{k}": v for k, v in nartis.items()},
+        **{f"iprom_{k}": v for k, v in iprom.items()},
+    }
 
 
 if __name__ == "__main__":

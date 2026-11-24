@@ -154,18 +154,21 @@ class Decision:
 
 
 _GLUED_PROTOCOL = re.compile(r"^(RF\d{3,4}/\d+)(P\d)$")  # «RF2400/1P1» — пропущен дефис перед протоколом
+_COMPACT_RF2400 = re.compile(r"^RF2400(\d)$")  # «RF24003» — пропущена косая: RF2400/3
 _BARE_FREQUENCY = re.compile(r"^\d{3,4}(/\d+)?$")
 
 
 def interface_tokens(raw: str) -> list[str]:
     """Токены обозначения; явные опечатки ввода поверителем исправляются: «RF-868/1» → RF868/1,
-    «RF2400/1P1» → RF2400/1 + P1, «2×RS485» → RS485. «2400/1» без RF не угадывается — на согласование."""
+    «RF2400/1P1» → RF2400/1 + P1, «RF24003» → RF2400/3, «2×RS485» → RS485. «2400/1» без RF
+    не угадывается — на согласование."""
 
     tokens: list[str] = []
     for token in _SPLIT.split(raw.upper().translate(_CYR_TO_LAT)):
         token = _COUNT.sub("", token)
         if not token:
             continue
+        token = _COMPACT_RF2400.sub(r"RF2400/\1", token)
         glued = _GLUED_PROTOCOL.match(token)
         if glued:
             tokens.extend(glued.groups())
@@ -433,6 +436,68 @@ def apply_nartis_codes(conn: Connection) -> int:
     return len(changed)
 
 
+# ── Таблица каналов МИРТЕК-12-РУ (24.11.2026) ─────────────────────────────────────────────
+
+MIRTEK_INTERFACE_CODES = """\
+RS485 = RS  # описание типа 61891-15
+RS232 = RS-232
+CAN = CAN
+RF433 = RF
+RF433/n = RF  # описание типа: радиоинтерфейс 433 МГц
+RF868 = RF
+RF868/n = RF  # описание типа: радиоинтерфейс 868 МГц
+RF2400 = RF  # сайт МИРТЕК: радиоканал 2400 МГц, не ZigBee/Bluetooth (правка аналитика 24.11.2026)
+RF2400/n = RF
+G/1 = GSM
+G1 = GSM  # опечатка без косой
+G/2 = GSM
+G2 = GSM
+G/5 = NB-IoT  # комбинированный GSM/GPRS + NB-IoT; у W9 — NB-IoT (правка аналитика 24.11.2026)
+G5 = NB-IoT
+G/5.1 = NB-IoT
+G/n = GSM  # остальные модули G/n — GSM/GPRS по описанию типа
+MOD = mod
+MOD/n = mod
+PF/n = PLC
+PO/n = PLC
+PL/n = PLC
+E/n = Ethernet
+RFWF = Wi-Fi
+RFWF/n = Wi-Fi
+RFLT = LTE
+RFLT/n = LTE
+"""
+MIRTEK_TYPES = ("61891-15",)  # МИРТЕК-12-РУ
+MIRTEK_CODE_NOTES = (
+    "Каналы МИРТЕК-12-РУ (аналитик 24.11.2026): RS485 — RS; RF433/RF868/RF2400 — RF; G/1 и G/2 — GSM; "
+    "G/5 и G/5.1 — NB-IoT; MOD — mod. Нет кода интерфейса в написании — «н/д»."
+)
+
+
+def apply_mirtek_codes(conn: Connection) -> int:
+    """Таблица каналов МИРТЕК-12-РУ, если у типа её ещё нет; написания пересчитываются."""
+
+    rows = conn.execute(
+        text("SELECT id, interface_codes, code_notes FROM meter_market_types WHERE mit_number = ANY(:m)"),
+        {"m": list(MIRTEK_TYPES)},
+    ).mappings().all()
+    changed = []
+    for r in rows:
+        if r["interface_codes"]:
+            continue
+        notes = r["code_notes"] or ""
+        if MIRTEK_CODE_NOTES not in notes:
+            notes = (notes + "\n" + MIRTEK_CODE_NOTES).strip()
+        conn.execute(
+            text("UPDATE meter_market_types SET interface_codes = :c, code_notes = :n WHERE id = :t"),
+            {"c": MIRTEK_INTERFACE_CODES, "n": notes, "t": r["id"]},
+        )
+        changed.append(r["id"])
+    if changed:
+        apply_interface_codes(conn, changed)
+    return len(changed)
+
+
 if __name__ == "__main__":
     import sys
 
@@ -441,4 +506,6 @@ if __name__ == "__main__":
     with engine.begin() as connection:
         if "--nartis" in sys.argv:
             print({"nartis_types": apply_nartis_codes(connection), "nartis_gsm": apply_nartis_gsm(connection), "nartis_rf2400": apply_nartis_rf2400(connection)})
+        if "--mirtek" in sys.argv:
+            print({"mirtek_types": apply_mirtek_codes(connection)})
         print(apply_interface_codes(connection))
