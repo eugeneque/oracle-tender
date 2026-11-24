@@ -162,6 +162,16 @@ def event_sections(db: Session, tender: Tender, events: list[TenderEvent]) -> di
         result: dict[str, list[dict[str, Any]]] = {"participants_prices": []}
         if bitrix.protocol_rows(db, tender, result):
             sections["participants_prices"] = result["participants_prices"]
+    if any((e.data or {}).get("decision_form") or (e.data or {}).get("relation") for e in events):
+        # Полный текст решения ФАС и подтверждённая повторная закупка уходят сразу с событием,
+        # не ждут следующего полного снимка анализа (пп. 42–43, 47).
+        from app.services import bitrix_extra_rows
+
+        extra: dict[str, list[dict[str, Any]]] = {"fas": [], "documents": []}
+        bitrix_extra_rows.complaint_rows(db, tender, extra)
+        for name, rows in extra.items():
+            if rows:
+                sections.setdefault(name, []).extend(rows)
     return sections
 
 
@@ -176,6 +186,12 @@ def build_events_payload(
     now = datetime.now(timezone.utc)
     # Пакет событий лота (23.11.2026): сделку лота портал ищет по `lookup` (deal_id = 0), поля
     # сделки не трогаем — даты и сумма относятся к процедуре, а не к лоту.
+    if lot is None and any(event.event_type == "AMOUNT_CHANGED" for event in events):
+        # НДС перечитываем до суммы: полный повторный анализ ставится позже и не должен оставить
+        # в событии прежний `price_vat` (п. 96).
+        from app.services.price_vat_service import refresh
+
+        refresh(db, tender)
     fields = {} if lot is not None else event_deal_fields(db, tender, events)
     payload = {
         "schema_version": bitrix.SCHEMA_VERSION,

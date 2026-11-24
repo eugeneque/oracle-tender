@@ -3,7 +3,7 @@
 * **Реестр жалоб** (`/epz/complaint/...`): поиск по номеру закупки; в выдаче — статус
   («Рассмотрена»), итог («Признана обоснованной»), предписание, орган контроля, заявитель, даты
   поступления и размещения, решение; во вкладке «Сведения жалобы» — дата, время и место
-  рассмотрения (пп. 41–47, 89).
+  рассмотрения, резолютивная часть и полный текст решения как разные публикации (пп. 41–47, 89).
 * **Реестр договоров 223-ФЗ и контрактов 44-ФЗ**: поиск по номеру закупки; карточка — цена,
   даты заключения и исполнения, обеспечение, причина изменения («Дополнительное соглашение»),
   номер и дата документа; у 223-ФЗ — журнал версий с редакциями (пп. 90, 94).
@@ -176,8 +176,51 @@ def parse_complaint_entry(block: Any) -> dict[str, Any] | None:
     }
 
 
+def _decision_documents(soup: BeautifulSoup, fields: dict[str, str]) -> dict[str, Any]:
+    """Резолютивная часть и полное решение — разные публикации карточки жалобы (пп. 42–43)."""
+
+    out: dict[str, Any] = {
+        "resolutive_text": _pick(fields, "Резолютивная часть"),
+        "full_text": _pick(fields, "Полный текст решения"),
+    }
+    for link in soup.select("a[href]"):
+        own = _text(link)
+        context = own if "решени" in own.lower() else (_text(link.parent) or own)
+        lowered = context.lower()
+        url = urljoin(BASE_URL, link.get("href", ""))
+        # Иногда ссылки стоят в одном блоке: после найденной резолютивной части вторая —
+        # полный текст. Собственный текст ссылки важнее общего текста родителя.
+        if "полный текст решения" in lowered and ("резолютив" not in lowered or out.get("resolutive_url")):
+            out.setdefault("full_url", url)
+            out.setdefault("decision_document_name", _text(link) or "Полный текст решения ФАС")
+        elif "резолютив" in lowered and "resolutive_url" not in out:
+            out["resolutive_url"] = url
+        elif "текст решения" in lowered and "резолютив" not in lowered:
+            out.setdefault("full_url", url)
+            out.setdefault("decision_document_name", _text(link) or "Полный текст решения ФАС")
+    out["decision_url"] = out.get("full_url") or out.get("resolutive_url")
+    out["decision_form"] = "FULL" if out.get("full_url") or out.get("full_text") else (
+        "RESOLUTIVE" if out.get("resolutive_url") or out.get("resolutive_text") else None
+    )
+    out["decision_access"] = "AVAILABLE" if out["decision_form"] else "NOT_PUBLISHED"
+    return out
+
+
+def _read_decision_text(http: httpx.Client, url: str, file_name: str) -> str:
+    """Текст опубликованного файла решения; ничего не сохраняем в документы закупки."""
+
+    from app.services import document_service
+    from app.services.document_extraction import extract_text, sniff_extension
+
+    response = fetch_with_retry(http, "GET", url)
+    if response.status_code >= 400:
+        raise EisRegistryError(f"ЕИС ответил HTTP {response.status_code} на файл решения")
+    extension = document_service._guess_extension(file_name, url) or sniff_extension(response.content)  # noqa: SLF001
+    return extract_text(extension, response.content)[:20000]
+
+
 def fetch_complaints(purchase_number: str) -> list[dict[str, Any]]:
-    """Жалобы по закупке: выдача реестра плюс дата и место рассмотрения из карточки."""
+    """Жалобы по закупке: выдача реестра плюс дата, место рассмотрения и части решения."""
 
     with client() as http:
         soup = _get(http, COMPLAINT_SEARCH, {"searchString": purchase_number, "recordsPerPage": "_50"})
@@ -190,7 +233,8 @@ def fetch_complaints(purchase_number: str) -> list[dict[str, Any]]:
             complaints.append(entry)
         for entry in complaints[:MAX_COMPLAINTS]:
             try:
-                card = sections(_get(http, COMPLAINT_INFO, {"complaintNumber": entry["number"]}))
+                soup = _get(http, COMPLAINT_INFO, {"complaintNumber": entry["number"]})
+                card = sections(soup)
             except (EisRegistryError, httpx.HTTPError):
                 continue
             entry["hearing_at"] = _date(_pick(card, "Дата и время рассмотрения жалобы"))
@@ -203,6 +247,16 @@ def fetch_complaints(purchase_number: str) -> list[dict[str, Any]]:
                 entry["result_record"] = record.group(1)
                 entry["result_placed"] = _date(record.group(2))
             entry["essence"] = (_pick(card, "Содержание жалобы") or "")[:1000] or None
+            entry.update(_decision_documents(soup, card))
+            for form, url_key, text_key in (("FULL", "full_url", "full_text"), ("RESOLUTIVE", "resolutive_url", "resolutive_text")):
+                if entry.get(url_key) and not entry.get(text_key):
+                    try:
+                        entry[text_key] = _read_decision_text(
+                            http, entry[url_key], entry.get("decision_document_name") or f"{form}.pdf"
+                        )
+                    except Exception as exc:  # noqa: BLE001 - ссылка и факт публикации остаются
+                        entry["decision_access"] = "UNAVAILABLE"
+                        entry["decision_note"] = f"Файл решения опубликован, но не прочитан: {exc}"
     return complaints[:MAX_COMPLAINTS]
 
 
@@ -302,10 +356,13 @@ def fetch_contracts(purchase_number: str, law: str | None, known: list[str] | No
 # --- закупки заказчика -----------------------------------------------------------------------------
 
 
-def fetch_customer_purchases(customer_inn: str, *, days: int = 365) -> list[dict[str, Any]]:
+def fetch_customer_purchases(
+    customer_inn: str, *, days: int = 365, as_of: date | None = None
+) -> list[dict[str, Any]]:
     """Закупки заказчика за период по его ИНН (поиск ЕИС находит ИНН в карточке заказчика)."""
 
-    since = (date.today() - timedelta(days=days)).strftime("%d.%m.%Y")
+    since = ((as_of or date.today()) - timedelta(days=days)).strftime("%d.%m.%Y")
+    until = (as_of or date.today()).strftime("%d.%m.%Y")
     out: list[dict[str, Any]] = []
     with client() as http:
         for page in range(1, HISTORY_PAGES + 1):
@@ -314,7 +371,7 @@ def fetch_customer_purchases(customer_inn: str, *, days: int = 365) -> list[dict
                 ORDER_SEARCH,
                 {"searchString": customer_inn, "morphology": "on", "fz44": "on", "fz223": "on",
                  "recordsPerPage": "_50", "pageNumber": str(page), "publishDateFrom": since,
-                 "sortBy": "PUBLISH_DATE", "sortDirection": "false"},
+                 "publishDateTo": until, "sortBy": "PUBLISH_DATE", "sortDirection": "false"},
             )
             blocks = soup.select(".search-registry-entry-block")
             for block in blocks:

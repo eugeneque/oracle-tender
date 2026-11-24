@@ -45,6 +45,26 @@ def test_contract_supplier_is_not_customer():
     assert eis_registries.supplier_of(eis_registries.pairs(soup)) == ("ООО «МИРТЕК»", "6154125635")
 
 
+def test_decision_documents_distinguish_resolutive_and_full_text():
+    soup = BeautifulSoup("""
+        <div><a href="/file/resolutive.pdf">Резолютивная часть решения</a></div>
+        <div><a href="/file/full.pdf">Полный текст решения</a></div>
+    """, "lxml")
+    found = eis_registries._decision_documents(soup, {"Резолютивная часть": "Жалобу удовлетворить частично"})
+    assert found["decision_form"] == "FULL"
+    assert found["resolutive_text"] == "Жалобу удовлетворить частично"
+    assert found["resolutive_url"].endswith("/file/resolutive.pdf")
+    assert found["decision_url"].endswith("/file/full.pdf")
+    assert found["decision_access"] == "AVAILABLE"
+    same_block = BeautifulSoup("""
+        <div><a href="/file/resolutive.pdf">Скачать</a> Резолютивная часть
+        <a href="/file/full.pdf">Скачать</a> Полный текст решения</div>
+    """, "lxml")
+    both = eis_registries._decision_documents(same_block, {})
+    assert both["resolutive_url"].endswith("/file/resolutive.pdf")
+    assert both["full_url"].endswith("/file/full.pdf")
+
+
 def test_notice_dates_kinds_and_timezone():
     exact = notice_dates.find_in_text("Дата и время проведения аукциона: 21.11.2026 10:00 (МСК+4)")["auction"]
     assert exact.moment.isoformat() == "2026-11-21T10:00:00+07:00"
@@ -64,21 +84,58 @@ def _snap(**extra):
 
 
 def test_registry_complaint_and_contract_events():
-    old = _snap(registry_complaints={}, registry_contracts={"5270": {"version": 1, "price": 100.0, "execution_end": "2026-11-30"}})
+    old = _snap(registry_complaints={"2026001": {"decision_form": "RESOLUTIVE", "decision_url": "https://e.test/r.pdf"}},
+                registry_related_procedures={},
+                registry_contracts={"5270": {"version": 1, "price": 100.0, "execution_end": "2026-11-30"}})
     new = _snap(
         registry_complaints={"2026001": {"status": "Рассмотрена", "outcome": "Признана необоснованной", "prescription": False,
-                                         "hearing_at": "2026-11-20T11:00+03:00", "applicant": "ООО «Лютик»", "placed": "2026-11-15"}},
+                                         "hearing_at": "2026-11-20T11:00+03:00", "applicant": "ООО «Лютик»", "placed": "2026-11-15",
+                                         "decision_form": "FULL", "decision_url": "https://e.test/full.pdf"}},
+        registry_related_procedures={"32615999999": {"related_to": "32615974226", "url": "https://e.test/repeat", "status": "Подача заявок"}},
         registry_contracts={"5270": {"version": 2, "price": 120.0, "execution_end": "2026-11-30",
                                      "change_reason": "Дополнительное соглашение", "placed": "2026-11-18T10:00+10:00"}},
     )
     changes = diff_snapshots(old, new)
     kinds = sorted(c["data"].get("fas_event") for c in changes if c["data"].get("fas_event"))
-    assert kinds == ["COMPLAINT", "DECISION", "HEARING"]
+    assert kinds == ["DECISION", "DECISION", "HEARING", "REPEAT_PUBLICATION"]
     contract = next(c for c in changes if c["event_type"] == "CONTRACT_CHANGED")
     assert contract["data"]["changes"] == [{"key": "price", "field": "Цена договора", "old_value": 100.0, "new_value": 120.0}]
     assert contract["source_version"] == "2"
+    decision = next(c for c in changes if c["field_key"] == "fas:2026001:decision-form")
+    assert decision["data"]["decision_form"] == "FULL" and decision["new_value"] == "FULL"
+    repeat = next(c for c in changes if c["data"].get("relation") == "REPEAT_AFTER_COMPLAINT")
+    assert repeat["event_type"] == "PROCEDURE_STATUS_CHANGED"
+    assert repeat["data"]["related_procedure_number"] == "32615999999"
     # Реестр ещё не читался в прошлый раз — первое чтение не события.
     assert diff_snapshots(_snap(), new) == []
+
+
+def test_missing_protocol_event_once_and_date_rules():
+    from datetime import datetime, timezone
+    from app.services import tender_monitor_service
+
+    old = _snap(fields={"result_date": "2026-11-20T00:00+03:00"}, protocol_missing=False,
+                documents={}, card_protocols={})
+    new = _snap(fields={"result_date": "2026-11-20T00:00+03:00"}, protocol_missing=True,
+                documents={}, card_protocols={})
+    (event,) = diff_snapshots(old, new)
+    assert event["event_type"] == "PROCEDURE_STATUS_CHANGED"
+    assert event["data"] == {"protocol_missing": True, "expected_result_date": "2026-11-20T00:00+03:00"}
+    assert diff_snapshots(new, new) == []
+    # До появления признака в старом слепке событие не задним числом не создаётся.
+    assert diff_snapshots(_snap(fields={"result_date": "2026-11-20T00:00+03:00"}), new) == []
+
+    now = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+    assert tender_monitor_service._protocol_missing(
+        {"result_date": "2026-11-20T00:00+03:00"}, {}, {}, now=now
+    ) is False  # дата без времени ждёт конца суток
+    assert tender_monitor_service._protocol_missing(
+        {"result_date": "2026-11-19T10:00+03:00"}, {}, {}, now=now
+    ) is True
+    assert tender_monitor_service._protocol_missing(
+        {"result_date": "2026-11-19T10:00+03:00"},
+        {"https://e.test/p": {"class": "protocol"}}, {}, now=now,
+    ) is False
 
 
 def _tender(db) -> Tender:
@@ -97,13 +154,16 @@ def test_registry_rows_in_package(db_session):
     db_session.add(TenderEisRegistry(
         tender_id=tender.id,
         complaints=[{"number": "2026001", "status": "Рассмотрена", "outcome": "Признана необоснованной", "prescription": False,
-                     "hearing_at": "2026-11-20T11:00+03:00", "hearing_place": "г. Москва", "placed": "2026-11-15"}],
+                     "hearing_at": "2026-11-20T11:00+03:00", "hearing_place": "г. Москва", "placed": "2026-11-15",
+                     "decision_form": "FULL", "decision_url": "https://e.test/full.pdf", "full_text": "Полный текст решения",
+                     "decision_document_name": "Решение.pdf", "decision_access": "AVAILABLE"}],
         contracts=[{"number": "5270", "price": 7963950.0, "security": 307200.0, "versions": [
             {"version": 1, "price": 7963950.0, "execution_end": "2026-11-30"},
             {"version": 2, "price": 7963950.0, "execution_end": "2026-12-31", "change_reason": "Дополнительное соглашение", "change_date": "2026-07-03"},
         ]}],
         customer_history=[{"number": "32615684320", "title": "Поставка счётчиков", "okpd2": "26.51.63.130", "okpd2_matched": True,
-                           "price": 2650433.33, "final_price": 2502150.0, "published": "2026-02-09"}],
+                           "price": 2650433.33, "final_price": 2502150.0, "published": "2026-02-09",
+                           "related_to": "32615974226", "url": "https://e.test/repeat"}],
     ))
     db_session.flush()
     sections = bitrix_ai_service.build_sections(db_session, tender)
@@ -114,6 +174,23 @@ def test_registry_rows_in_package(db_session):
     assert "Окончание исполнения: 2026-11-30 → 2026-12-31" in edition["data"]["changes"]
     history = next(r for r in sections["preparation"] if r["key"].startswith("customer-history"))
     assert history["data"]["final_price"] == 2502150.0 and history["data"]["publish_date"] == "09.02.2026"
+    decision_doc = next(r for r in sections["documents"] if r["key"] == "fas-decision-2026001")
+    assert decision_doc["data"]["file_url"] == "https://e.test/full.pdf"
+    assert decision_doc["data"]["analysis_status"] == "analyzed"
+    repeat = next(r for r in sections["fas"] if "repeat" in r["key"])
+    assert repeat["data"]["related_procedure_number"] == "32615684320"
+    assert repeat["data"]["relation"] == "REPEAT_AFTER_COMPLAINT"
+
+    from app.models.tender_event import TenderEvent
+    from app.services import tender_event_service
+
+    event = TenderEvent(
+        tender_id=tender.id, event_id="evt-full-decision", event_type="PROCEDURE_STATUS_CHANGED",
+        field_key="fas:2026001:decision-form", title="Полное решение", data={"decision_form": "FULL"},
+    )
+    event_sections = tender_event_service.event_sections(db_session, tender, [event])
+    assert any(r["key"] == "fas-decision-2026001" for r in event_sections["documents"])
+    assert any("repeat" in r["key"] for r in event_sections["fas"])
 
 
 def test_trade_date_row_without_timezone(db_session):

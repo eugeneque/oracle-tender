@@ -173,6 +173,13 @@ def customer_history_rows(db: Session, tender: Tender, sections: Sections) -> No
                         "initial_price": item.get("price"),
                         "final_price": item.get("final_price"),
                         "winner": item.get("winner"),
+                        "qualification": "; ".join(
+                            q.get("requirement") or q.get("qualification_kind") or ""
+                            for q in item.get("qualification") or []
+                        ) or None,
+                        "qualification_status": item.get("qualification_status"),
+                        "qualification_note": item.get("qualification_note"),
+                        "outcome_note": item.get("outcome_note"),
                         "status": item.get("status"),
                         "url": item.get("url"),
                         "note": "Реестр ЕИС по ИНН заказчика" + (
@@ -1009,6 +1016,14 @@ def complaint_rows(db: Session, tender: Tender, sections: Sections) -> None:
                     "outcome": complaint.get("outcome"),
                     "decision_number": complaint.get("decision_number"),
                     "decision_date": _fmt(_parse_iso(complaint.get("decision_date") or complaint.get("result_placed"))),
+                    "decision_form": complaint.get("decision_form"),
+                    "resolutive_text": b._clip(complaint.get("resolutive_text")),
+                    "full_text": b._clip(complaint.get("full_text")),
+                    "decision_url": complaint.get("decision_url"),
+                    "decision_access": complaint.get("decision_access"),
+                    "decision_note": complaint.get("decision_note") or (
+                        "Полный текст решения ещё не опубликован" if complaint.get("decision_form") == "RESOLUTIVE" else None
+                    ),
                     "prescription": {True: "Выдано", False: "Не выдано"}.get(complaint.get("prescription")),
                     "changes_after": "\n".join(f"{e.title} ({_fmt(e.effective_at or e.detected_at)})" for e in after) or None,
                     "url": complaint.get("url"),
@@ -1017,6 +1032,51 @@ def complaint_rows(db: Session, tender: Tender, sections: Sections) -> None:
                 status=b.STATUS_REVIEW,
             )
         )
+        if complaint.get("decision_form") == "FULL" and complaint.get("decision_url"):
+            file_name = complaint.get("decision_document_name") or f"Полный текст решения ФАС № {complaint['number']}.pdf"
+            sections["documents"].append(
+                b._row(
+                    f"fas-decision-{complaint['number']}",
+                    "procurement_document",
+                    f"Полный текст решения ФАС по жалобе № {complaint['number']}",
+                    {
+                        "file_name": file_name,
+                        "document_type": "Полное решение ФАС",
+                        "mime_type": "application/pdf" if ".pdf" in complaint["decision_url"].lower() else None,
+                        "file_url": complaint["decision_url"] if complaint["decision_url"].startswith("https://") else None,
+                        "source_url": complaint.get("url"),
+                        "published_at": complaint.get("decision_date") or complaint.get("result_placed"),
+                        "analysis_status": (
+                            "analyzed" if complaint.get("full_text")
+                            else "failed" if complaint.get("decision_access") == "UNAVAILABLE" else "pending"
+                        ),
+                        "analysis_note": complaint.get("decision_note"),
+                    },
+                    evidence=b._evidence("Реестр жалоб ЕИС", complaint.get("full_text") or complaint.get("outcome")),
+                    status="published",
+                )
+            )
+        for item in registry["customer_history"]:
+            if item.get("related_to") != b.procedure_number(tender):
+                continue
+            sections["fas"].append(
+                b._row(
+                    f"complaint-{complaint['number']}-repeat-{item['number']}",
+                    "fas_decision",
+                    f"Повторная закупка № {item['number']} после жалобы",
+                    {
+                        "complaint_number": complaint["number"],
+                        "related_procedure_number": item["number"],
+                        "related_procedure_url": item.get("url"),
+                        "relation": "REPEAT_AFTER_COMPLAINT",
+                        "procedure_status": item.get("status"),
+                        "published": item.get("published"),
+                        "relation_basis": "Связь с прежней процедурой прямо указана в карточке новой закупки ЕИС",
+                    },
+                    evidence=b._evidence("Карточка повторной закупки ЕИС", item.get("title")),
+                    status=b.STATUS_REVIEW,
+                )
+            )
 
 
 # --- пп. 90, 94: реестр договоров ЕИС -----------------------------------------------------------

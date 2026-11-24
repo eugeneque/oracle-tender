@@ -1,6 +1,6 @@
 """Условия договора и обеспечения: сроки, оплата, неустойки, гарантия, обеспечение (11.11.2026).
 
-Перечень Bitrix24 «Что еще нужно от ИИ», пункты 4, 6, 16–27, 30–31 и 95. Раньше условия
+Перечень Bitrix24 «Что еще нужно от ИИ», пункты 4, 6, 16–28, 30–31 и 95. Раньше условия
 договора уходили в портал списком коротких строк вкладки «Дополнительно» (`contract_terms`)
 без суммы, процента, вида дней, события-основания и цитаты — менеджер не мог ни посчитать срок,
 ни проверить условие по документу. Здесь каждое условие — отдельная запись своего вида
@@ -101,6 +101,10 @@ class ConditionAnswer(pydantic.BaseModel):
     allowed_forms: str
     obligation_model: str
     result: str
+    obligated_party: str
+    document_form: str
+    recurrence: str
+    recurrence_period: str
     lot: str
     document: str
     page: str
@@ -158,7 +162,11 @@ _SYSTEM_PROMPT = f"""Ты разбираешь закупочную докуме
 кроме самой поставки, оплаты и обеспечения (они — свои виды): уведомить о готовности к \
 отгрузке, согласовать график, передать документы, предоставить отчёт, провести обучение и т. п. \
 value — что сделать; trigger_event — после какого события; term — в какой срок; result — чем \
-подтверждается выполнение (уведомление, акт, документ), если сказано.
+подтверждается выполнение (уведомление, акт, документ), если сказано. obligated_party — кто \
+обязан выполнить действие по договору; document_form — предусмотренная форма или приложение; \
+recurrence — периодичность повторяющегося действия (например, «ежемесячно», «каждые 10 дней»); \
+recurrence_period — период, в течение которого действие повторяется (например, «до конца срока \
+договора»). Периодичность и период указывай только при прямом повторении действия в документе.
 Неиспользуемые поля — пустые строки. Отвечай по-русски."""
 
 
@@ -259,6 +267,10 @@ def normalize(answer: ConditionsAnswer) -> dict[str, Any]:
                         _enum(item.obligation_model, _OBLIGATION_MODELS) if kind == "CUSTOMER_OBLIGATION" else None
                     ),
                     "result": _clean(item.result, 300) if kind == "SUPPLIER_OBLIGATION" else None,
+                    "obligated_party": _clean(item.obligated_party, 200) if kind == "SUPPLIER_OBLIGATION" else None,
+                    "document_form": _clean(item.document_form, 500) if kind == "SUPPLIER_OBLIGATION" else None,
+                    "recurrence": _clean(item.recurrence, 300) if kind == "SUPPLIER_OBLIGATION" else None,
+                    "recurrence_period": _clean(item.recurrence_period, 300) if kind == "SUPPLIER_OBLIGATION" else None,
                     "lot_number": lot,
                     "document": _clean(item.document),
                     "page": _clean(item.page, 50),

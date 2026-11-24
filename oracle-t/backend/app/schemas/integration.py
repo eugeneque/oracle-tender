@@ -86,6 +86,46 @@ class IntegrationLeadPage(BaseModel):
     total: int
 
 
+class IntegrationQualificationOut(BaseModel):
+    requirement: str
+    qualification_kind: str | None
+    threshold: str | None = None
+    period: str | None = None
+    confirmation: str | None = None
+    deadline: str | None = None
+    special: bool = False
+
+
+class IntegrationCustomerHistoryItemOut(BaseModel):
+    number: str
+    law: str
+    title: str | None
+    status: str | None
+    price: float | None
+    final_price: float | None = None
+    winner: str | None = None
+    published: str | None
+    url: str
+    okpd2: str | None
+    okpd2_matched: bool
+    source_note: str | None = None
+    outcome_note: str | None = None
+    final_protocol: str | None = None
+    qualification: list[IntegrationQualificationOut]
+    qualification_status: str
+    qualification_note: str | None = None
+    related_to: str | None = None
+
+
+class IntegrationCustomerHistoryOut(BaseModel):
+    customer_inn: str
+    okpd2: str
+    as_of: date
+    checked_at: datetime
+    items: list[IntegrationCustomerHistoryItemOut]
+    warnings: list[str]
+
+
 class ApiClientOut(BaseModel):
     id: uuid.UUID
     name: str

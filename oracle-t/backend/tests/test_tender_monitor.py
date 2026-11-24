@@ -426,9 +426,9 @@ def test_new_documents_queue_full_review_and_bitrix_push(db_session, monkeypatch
         )
 
     monitor._schedule_reanalysis(db_session, tender, [event("AMOUNT_CHANGED")])
-    assert queued == []  # не о документах — разбор не трогаем
+    assert len(queued) == 1  # п. 96: при изменении цены перечитываем НДС и пакет
     monitor._schedule_reanalysis(db_session, tender, [event("TECHNICAL_REQUIREMENT_CHANGED")])
-    assert len(queued) == 1
+    assert len(queued) == 2
     assert queued[0]["kind"].value == "tender_full_review" and queued[0]["actor"] is None
     assert queued[0]["payload"]["push_bitrix_tender_id"] == str(tender.id)
 
@@ -436,7 +436,7 @@ def test_new_documents_queue_full_review_and_bitrix_push(db_session, monkeypatch
 
     monkeypatch.setattr(get_settings(), "monitor_auto_reanalyze", False)
     monitor._schedule_reanalysis(db_session, tender, [event("DOCUMENT_ADDED")])
-    assert len(queued) == 1  # выключено настройкой
+    assert len(queued) == 2  # выключено настройкой
 
 
 def test_push_after_review_sends_full_snapshot_as_deal_owner(db_session, admin_user, monkeypatch):

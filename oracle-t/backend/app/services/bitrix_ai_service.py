@@ -441,6 +441,8 @@ def _document_trade_dates(db: Session, tender: Tender, dates: dict[str, Any]) ->
 
 
 def build_deal_fields(db: Session, tender: Tender, lot: dict[str, Any] | None = None) -> dict[str, Any]:
+    from app.services.price_vat_service import deal_amount
+
     dates = card_dates(db, tender)
     dates = {**_document_trade_dates(db, tender, dates), **{k: v for k, v in dates.items() if v}}
     subject = _clip(tender.title, 180) or "Закупка"
@@ -452,6 +454,11 @@ def build_deal_fields(db: Session, tender: Tender, lot: dict[str, Any] | None = 
         lot_title = f"{procedure_number(tender)} — {subject}"
     else:
         lot_title = f"{procedure_number(tender)} — {subject} — лот 1"
+    result_status = _result_status(db, tender)
+    source_amount = lot["price"] if lot and lot.get("price") is not None else tender.price
+    # П. 96: в сумму сделки — опубликованная цена с НДС 22 % либо расчётная из цены без НДС.
+    # Неоднозначность не меняет сумму площадки; после победы договорную сумму НМЦК не затираем.
+    amount_with_vat = deal_amount(tender, lot, won=result_status == "WIN")
     fields = _compact(
         {
             "title": lot_title[:250],
@@ -459,7 +466,7 @@ def build_deal_fields(db: Session, tender: Tender, lot: dict[str, Any] | None = 
             # наименование и реестровый номер строкой (ведущие нули сохраняются — это не число).
             "procurement_name": _clip(tender.title, 2000),
             "notice_number": procedure_number(tender) or None,
-            "amount": _number(lot["price"] if lot and lot.get("price") is not None else tender.price),
+            "amount": _number(amount_with_vat if amount_with_vat is not None else source_amount),
             "currency": tender.currency or "RUB",
             "procedure_url": tender.source_url,
             "direction": _direction(tender),
@@ -482,7 +489,7 @@ def build_deal_fields(db: Session, tender: Tender, lot: dict[str, Any] | None = 
             "lot_number": lot["lot_number"] if lot else (None if multi else "1"),
             "lot_name": _clip(lot.get("name"), 500) if lot else None,
             "record_type": "LOT" if lot else ("PROCEDURE" if multi else "SINGLE"),
-            "result_status": _result_status(db, tender),
+            "result_status": result_status,
         }
     )
     return fields
@@ -492,29 +499,24 @@ _PRICING_VAT_BASIS = {"included": "INCLUDED", "excluded": "EXCLUDED", "not_appli
 
 
 def _pricing_kind(quote: str) -> str | None:
-    """Вид цены по формулировке документа. Не определился однозначно — `None`: вид не
-    выдумывается (API_CHANGE 17.11.2026, п. 4), а без вида Bitrix24 цену закупки всё равно не
-    считает подтверждённой НМЦК."""
+    """Вид цены по формулировке документа; общий с расчётом сделки справочник п. 96."""
 
-    text = (quote or "").lower()
-    if re.search(r"единичн\w*\s+расцен|сумм\w*\s+цен\s+единиц|цен\w*\s+единиц", text):
-        return "UNIT_SUM"
-    lot = bool(re.search(r"\bлот", text))
-    contract = bool(re.search(r"(?:цен|стоимост|сумм)\w*\s+(?:договор|контракт)", text))
-    if lot == contract:  # ни того ни другого либо оба сразу — неоднозначно
-        return None
-    return "LOT_MAX" if lot else "CONTRACT_MAX"
+    from app.services.price_vat_service import price_kind
+
+    return price_kind(quote)
 
 
-def build_pricing(tender: Tender) -> dict[str, Any] | None:
-    """Блок `pricing` верхнего уровня пакета (API_CHANGE 17.11.2026, п. 4): исходная сумма,
-    вид цены и НДС — только то, что прямо найдено в документации (`price_vat_service`, р. 106).
-    Не найдено, вид цены не определился, цена не в рублях или это уже договорная цена после
-    победы — блока нет. Ставка НДС — только из источника (`rate_assumed` — наша подстановка 22 %,
-    её не отправляем). `source_updated_at` не передаём: даты версии документа у нас нет, а дата
-    скачивания или отправки — не она."""
+def build_pricing(tender: Tender, lot: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Блок `pricing` верхнего уровня пакета: исходная сумма, вид цены и НДС из документации.
 
-    record = tender.price_vat or {}
+    По п. 96 ставка 22 % передаётся и тогда, когда она принята для расчёта при неуказанной
+    ставке. Сама расчётная сумма в этот блок не подмешивается: она видна отдельной строкой
+    анализа и попадает в `deal_fields.amount` только по правилу `price_vat_service.vat22`.
+    """
+
+    from app.services.price_vat_service import record_for_lot, vat22
+
+    record = record_for_lot(tender, lot) or {}
     if not record or (tender.currency or "RUB") != "RUB":
         return None
     basis = _PRICING_VAT_BASIS.get(record.get("mode"))
@@ -522,9 +524,13 @@ def build_pricing(tender: Tender) -> dict[str, Any] | None:
     amount = record.get("doc_price")
     if basis is None or kind is None or not amount:
         return None
+    calculated = vat22(tender, lot)
     rate = None
-    if basis != "NOT_TAXABLE" and record.get("vat_rate") and not record.get("rate_assumed"):
-        rate = _number(Decimal(record["vat_rate"]))
+    if basis != "NOT_TAXABLE":
+        if calculated["eligible"]:
+            rate = 22
+        elif record.get("vat_rate") and not record.get("rate_assumed"):
+            rate = _number(Decimal(record["vat_rate"]))
     return _compact(
         {
             "source_amount": f"{Decimal(amount):.2f}",
@@ -535,6 +541,44 @@ def build_pricing(tender: Tender) -> dict[str, Any] | None:
             "source_text": _clip(record.get("quote"), 1000),
         }
     )
+
+
+def _pricing_rows(db: Session, tender: Tender, sections: dict[str, list[dict[str, Any]]]) -> None:
+    """Исходная цена и отдельная цена с НДС 22 % по п. 96 — для процедуры и каждого лота."""
+
+    from app.services.price_vat_service import vat22
+
+    lots = procedure_lots(db, tender)
+    targets: list[dict[str, Any] | None] = [None, *lots] if len(lots) > 1 else [None]
+    for lot in targets:
+        number = lot.get("lot_number") if lot else None
+        result = vat22(tender, lot)
+        record = result["record"]
+        kind = _pricing_kind(record.get("quote") or "")
+        reason = result["review_reason"]
+        if result["eligible"] and kind is None:
+            reason = "Назначение цены (лот, договор или единичные расценки) не определено"
+        data = {
+            "source_amount": result["source_amount"],
+            "amount_kind": kind,
+            "vat_basis": _PRICING_VAT_BASIS.get(record.get("mode")),
+            "amount_with_vat_22": result["amount_with_vat_22"] if result["eligible"] and kind else None,
+            "calculation_basis": result.get("calculation_basis") if result["eligible"] and kind else None,
+            "review_reason": reason,
+            "source_document": record.get("document"),
+            "source_text": _clip(record.get("quote"), 1000),
+            "lot_number": number,
+        }
+        sections["contract"].append(
+            _row(
+                f"price-vat-22{('-lot-' + number) if number else ''}",
+                "contract_condition",
+                "НМЦК и НДС 22%" + (f" (лот {number})" if number else ""),
+                data,
+                evidence=_evidence(record.get("document"), record.get("quote")),
+                status=STATUS_EXTRACTED if result["eligible"] and kind else STATUS_REVIEW,
+            )
+        )
 
 
 # --- подробные строки ---------------------------------------------------------------------------
@@ -631,7 +675,13 @@ def _file_size_label(doc: TenderDocument) -> str | None:
 _ANALYSIS_STATUS = {"success": "analyzed", "pending": "pending", "error": "failed"}
 
 
-def document_row(tender: Tender, doc: TenderDocument, published_at: datetime | None = None) -> dict[str, Any]:
+def document_row(
+    tender: Tender,
+    doc: TenderDocument,
+    published_at: datetime | None = None,
+    *,
+    lot_numbers: list[str] | None = None,
+) -> dict[str, Any]:
     """Строка `procurement_document` раздела `documents` (API 1.7.0). Ключ постоянен для одной
     редакции одного документа (по адресу файла): новая редакция — новый адрес, новая строка,
     прежняя не исчезает. `file_url` — только HTTPS; иначе ссылка на файл не передаётся."""
@@ -657,6 +707,10 @@ def document_row(tender: Tender, doc: TenderDocument, published_at: datetime | N
             "published_at": _iso(published_at),
             "analysis_status": _ANALYSIS_STATUS.get(doc.parse_status, "pending"),
             "analysis_note": _clip(doc.parse_error, 500) if doc.parse_status == "error" else None,
+            # Связь с лотом — только подтверждённая; без неё документ остаётся на карточке процедуры.
+            "lot_number": lot_numbers[0] if lot_numbers and len(lot_numbers) == 1 else None,
+            "lot_numbers": lot_numbers or None,
+            "relation_status": "ESTABLISHED" if lot_numbers else None,
         },
         status="published",
         confidence=1.0,
@@ -763,6 +817,10 @@ def _contract_condition_rows(db: Session, tender: Tender, sections: dict[str, li
             "allowed_forms": item.get("allowed_forms"),
             "obligation_model": _OBLIGATION_LABELS.get(item.get("obligation_model") or ""),
             "result_form": item.get("result"),
+            "obligated_party": item.get("obligated_party"),
+            "document_form": item.get("document_form"),
+            "recurrence": item.get("recurrence"),
+            "recurrence_period": item.get("recurrence_period"),
             "lot_number": lot,
         }
         evidence = [
@@ -902,11 +960,33 @@ def protocol_rows(db: Session, tender: Tender, sections: dict[str, list[dict[str
     return count
 
 
-def _document_rows(db: Session, tender: Tender, sections: dict[str, list[dict[str, Any]]]) -> None:
+def _document_rows(
+    db: Session,
+    tender: Tender,
+    sections: dict[str, list[dict[str, Any]]],
+    *,
+    requirements: list[Requirement] | None = None,
+    positions: list[TenderPosition] | None = None,
+) -> None:
+    """Документы процедуры и их подтверждённые связи с лотами (п. 1).
+
+    Если из документа извлечено требование, сопоставленное с позицией лота, это явная связь
+    источника с лотом. Файл без такой связи не копируется во все сделки предположительно.
+    """
+
+    lots_by_document: dict[uuid.UUID, set[str]] = {}
+    if is_multi_lot(db, tender) and requirements is not None and positions is not None:
+        for requirement in requirements:
+            if requirement.source_document_id is None:
+                continue
+            _, relation = requirement_position(requirement, positions)
+            if relation.get("position_scope") == "position" and relation.get("lot_number"):
+                lots_by_document.setdefault(requirement.source_document_id, set()).add(relation["lot_number"])
     for doc in db.scalars(
         select(TenderDocument).where(TenderDocument.tender_id == tender.id).order_by(TenderDocument.created_at)
     ):
-        sections["documents"].append(document_row(tender, doc))
+        numbers = sorted(lots_by_document.get(doc.id, set()), key=int)
+        sections["documents"].append(document_row(tender, doc, lot_numbers=numbers or None))
 
 
 def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]]]:
@@ -1163,8 +1243,9 @@ def build_sections(db: Session, tender: Tender) -> dict[str, list[dict[str, Any]
                 )
             )
 
+    _pricing_rows(db, tender, sections)
     _delivery_rows(db, tender, sections)
-    _document_rows(db, tender, sections)
+    _document_rows(db, tender, sections, requirements=requirements, positions=positions)
 
     # Участники и цены: разбор протоколов (раздел 96); без него — прежний итог из
     # `tender_outcomes`, если его когда-нибудь заполнят вручную.
@@ -1307,6 +1388,7 @@ def requirement_position(
             "position": _clip(position_label(item), 200),
             "position_no": number,
             "position_key": position_key(item),
+            "lot_number": item.lot_number or "1",
         }
     if not label:
         return (0, 0, ""), {
@@ -1386,11 +1468,19 @@ def _deal_id(db: Session, tender: Tender) -> int:
 
 
 def _lot_sections(sections: dict[str, list[dict[str, Any]]], number: str) -> dict[str, list[dict[str, Any]]]:
-    """Строки сделки лота: только те, что явно относятся к этому лоту (`data.lot_number`)."""
+    """Строки сделки лота: явная одиночная связь либо документ, связанный с несколькими лотами."""
 
     out = {}
     for name, rows in sections.items():
-        mine = [row for row in rows if str((row.get("data") or {}).get("lot_number") or "") == number]
+        mine = []
+        for row in rows:
+            data = row.get("data") or {}
+            if str(data.get("lot_number") or "") == number:
+                mine.append(row)
+            elif number in [str(value) for value in data.get("lot_numbers") or []]:
+                contextual = {**row, "data": {**data, "lot_number": number}}
+                contextual["data"].pop("lot_numbers", None)
+                mine.append(contextual)
         if mine:
             out[name] = mine
     return out
@@ -1432,8 +1522,8 @@ def build_payload(
         "sections": sections,
     }
     # После победы цена — договорная, НМЦК-блок не отправляем (как и `amount` в событиях).
-    if lot is None and _result_status(db, tender) != "WIN":
-        pricing = build_pricing(tender)
+    if _result_status(db, tender) != "WIN":
+        pricing = build_pricing(tender, lot)
         if pricing:
             payload["pricing"] = pricing
     return payload

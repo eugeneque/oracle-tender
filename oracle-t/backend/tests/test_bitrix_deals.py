@@ -162,6 +162,18 @@ class TestDealFields:
         # Воронку и стадию задаёт только создание.
         assert "STAGE_ID" not in fields and "CATEGORY_ID" not in fields
 
+    def test_vat22_amount_uses_same_rule_as_ai_package(self, db_session):
+        tender = _tender(db_session)
+        tender.price_vat = {"mode": "excluded", "doc_price": "100.00", "quote": "Максимальная цена договора 100 руб. без НДС"}
+        db_session.flush()
+        fields = bitrix_deal_service.build_deal_fields(db_session, tender)
+        assert fields["OPPORTUNITY"] == "122.00"
+        assert fields["UF_CRM_1784720624836"] == "122.00|RUB"
+
+        tender.price_vat["vat_rate"] = "20"
+        fields = bitrix_deal_service.build_deal_fields(db_session, tender)
+        assert fields["OPPORTUNITY"] == "1234567.89"  # другая ставка — без автопересчёта
+
     def test_empty_values_are_not_sent(self, db_session):
         tender = _tender(db_session, price=None, application_end=None, procurement_method=None)
         fields = bitrix_deal_service.build_deal_fields(db_session, tender)

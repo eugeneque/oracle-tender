@@ -13,10 +13,12 @@
 источник данных для будущей интеграции.
 """
 
+import re
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -27,6 +29,7 @@ from app.models.api_client import ApiClient
 from app.models.manufacturer import Manufacturer
 from app.models.tender import Tender
 from app.schemas.integration import (
+    IntegrationCustomerHistoryOut,
     IntegrationLeadPage,
     IntegrationTenderDetailOut,
     IntegrationTenderPage,
@@ -143,6 +146,51 @@ def list_tenders_for_integration(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get("/customer-history", response_model=IntegrationCustomerHistoryOut)
+def get_customer_history_for_integration(
+    customer_inn: str = Query(description="ИНН заказчика: 10 или 12 цифр"),
+    okpd2: str = Query(description="Код ОКПД2, например 26.51.63.130"),
+    as_of: date | None = Query(default=None, description="Дата проверки; история за предшествующий год"),
+    title: str | None = Query(default=None, max_length=300, description="Предмет ожидаемой закупки для приоритизации"),
+    db: Session = Depends(get_db),
+    _client: ApiClient = Depends(require_api_client),
+) -> IntegrationCustomerHistoryOut:
+    """Завершённые закупки заказчика по ОКПД2 за год — по запросу Bitrix24 до публикации."""
+
+    digits = re.sub(r"\D", "", customer_inn or "")
+    if digits != (customer_inn or "").strip() or len(digits) not in (10, 12):
+        raise HTTPException(status_code=422, detail="customer_inn должен содержать 10 или 12 цифр без пробелов и букв.")
+    if not re.fullmatch(r"\d{2}(?:\.\d{2}){1,4}(?:\.\d{1,3})?", okpd2 or ""):
+        raise HTTPException(status_code=422, detail="okpd2 должен быть кодом вида 26.51.63.130.")
+    from app.adapters.eis_registries import EisRegistryError
+    from app.services import eis_registry_service
+
+    checked_for = as_of or date.today()
+    try:
+        result = eis_registry_service.customer_history_for(
+            db,
+            customer_inn=digits,
+            okpd2_code=okpd2,
+            title=title or "",
+            as_of=checked_for,
+            fetch_qualification_documents=True,
+            completed_only=True,
+        )
+    except (EisRegistryError, httpx.HTTPError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Не удалось получить историю заказчика из ЕИС: {exc}",
+        ) from exc
+    return IntegrationCustomerHistoryOut(
+        customer_inn=digits,
+        okpd2=okpd2,
+        as_of=checked_for,
+        checked_at=result["checked_at"],
+        items=result["items"],
+        warnings=result["warnings"],
     )
 
 

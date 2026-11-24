@@ -156,6 +156,15 @@ def build_deal_fields(db: Session, tender: Tender) -> dict[str, Any]:
     }
     for field in DEAL_FIELDS:
         fields[field.key] = field.value(tender)
+    # П. 96: оба канала создания сделки используют один расчёт НДС 22 %. При неоднозначности
+    # функция возвращает None и остаётся исходная сумма площадки.
+    from app.services.price_vat_service import deal_amount
+    from app.services.protocol_results_service import our_result
+
+    amount_with_vat = deal_amount(tender, won=our_result(db, tender) == "WIN")
+    if amount_with_vat is not None:
+        fields["OPPORTUNITY"] = f"{amount_with_vat:.2f}"
+        fields["UF_CRM_1784720624836"] = f"{amount_with_vat:.2f}|{tender.currency or 'RUB'}"
     # Пустое не отправляем: на обновлении оно стёрло бы значение, введённое менеджером.
     return {key: value for key, value in fields.items() if value not in ("", None)}
 

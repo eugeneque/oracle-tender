@@ -302,6 +302,63 @@ class TestIntegrationApi:
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
 
+    def test_customer_history_validates_parameters(self, client, api_key):
+        assert client.get("/integration/v1/customer-history", headers={"X-API-Key": api_key}).status_code == 422
+        response = client.get(
+            "/integration/v1/customer-history?customer_inn=abc&okpd2=26.51.63.130",
+            headers={"X-API-Key": api_key},
+        )
+        assert response.status_code == 422 and "customer_inn" in response.json()["detail"]
+        response = client.get(
+            "/integration/v1/customer-history?customer_inn=1234567890&okpd2=bad",
+            headers={"X-API-Key": api_key},
+        )
+        assert response.status_code == 422 and "okpd2" in response.json()["detail"]
+
+    def test_customer_history_endpoint(self, client, api_key, monkeypatch):
+        from app.services import eis_registry_service
+
+        def history(_db, **params):
+            assert params["customer_inn"] == "1234567890"
+            assert params["as_of"].isoformat() == "2026-11-24"
+            assert params["fetch_qualification_documents"] is True
+            return {
+                "checked_at": datetime(2026, 11, 24, 12, tzinfo=timezone.utc),
+                "warnings": [],
+                "items": [{
+                    "number": "32615000001", "law": "223", "title": "Поставка счётчиков", "status": "Завершена",
+                    "price": 120000.0, "final_price": 110000.0, "winner": "ООО «Победитель»",
+                    "published": "2026-01-10", "url": "https://example.test/p/1", "okpd2": "26.51.63.130",
+                    "okpd2_matched": True, "final_protocol": "Итоговый протокол.pdf",
+                    "qualification": [{"requirement": "Опыт не менее 3 лет", "qualification_kind": "Опыт", "special": False}],
+                    "qualification_status": "EXTRACTED",
+                }],
+            }
+
+        monkeypatch.setattr(eis_registry_service, "customer_history_for", history)
+        response = client.get(
+            "/integration/v1/customer-history?customer_inn=1234567890&okpd2=26.51.63.130&as_of=2026-11-24",
+            headers={"X-API-Key": api_key},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["items"][0]["final_price"] == 110000
+        assert body["items"][0]["qualification"][0]["requirement"] == "Опыт не менее 3 лет"
+
+    def test_customer_history_source_failure_is_not_empty_success(self, client, api_key, monkeypatch):
+        from app.adapters.eis_registries import EisRegistryError
+        from app.services import eis_registry_service
+
+        def fail(*_args, **_kwargs):
+            raise EisRegistryError("ЕИС ответил HTTP 503")
+
+        monkeypatch.setattr(eis_registry_service, "customer_history_for", fail)
+        response = client.get(
+            "/integration/v1/customer-history?customer_inn=1234567890&okpd2=26.51.63.130",
+            headers={"X-API-Key": api_key},
+        )
+        assert response.status_code == 503 and "ЕИС" in response.json()["detail"]
+
     def test_revoked_key_stops_working(self, client, admin_token, api_key):
         clients = client.get(
             "/integrations/api-clients", headers={"Authorization": f"Bearer {admin_token}"}

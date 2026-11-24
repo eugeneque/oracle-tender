@@ -23,7 +23,9 @@
   её не принимали за указанную заказчиком.
 
 Результат — `tenders.price_vat` (JSONB), переносится на записи-двойники вместе с прочими
-полями разбора (`tender_twins.SHARED_FIELDS`). Раздел 106 ARCHITECTURE.md.
+полями разбора (`tender_twins.SHARED_FIELDS`). Для многолотовой закупки в `lots` хранятся записи
+по номерам лотов, противоречия — в `conflicts`. `vat22`/`deal_amount` реализуют п. 96 перечня
+Bitrix24: сумма с НДС 22 % в сделку только при однозначных исходных данных (раздел 124).
 """
 
 from __future__ import annotations
@@ -250,9 +252,14 @@ def _candidates(db: Session, tender: Tender, anchor: re.Pattern[str]):
         lines = (document.extracted_text or "").splitlines()
         for index, line in enumerate(lines):
             for match in anchor.finditer(line):
-                found = parse_block(_block(lines, index, match.start()))
+                block = _block(lines, index, match.start())
+                found = parse_block(block)
                 if found is not None:
                     found["document"] = document.file_name
+                    # Явный номер лота рядом с НМЦК — единственный безопасный способ отнести
+                    # запись к лоту по тексту. Без него ниже используется только цена лота из ЕИС.
+                    if lot := re.search(r"\bлот\w*\s*(?:№\s*)?(\d{1,3})(?!\d)", block, re.IGNORECASE):
+                        found["lot_number"] = lot.group(1)
                     yield found
                     break
 
@@ -355,11 +362,153 @@ def find(db: Session, tender: Tender) -> dict[str, Any] | None:
     return None
 
 
+def _find_lot_records(db: Session, tender: Tender) -> dict[str, dict[str, Any]]:
+    """Записи НМЦК по лотам многолотовой закупки (п. 96 перечня Bitrix24).
+
+    Кандидат относится к лоту по явному номеру в пункте о цене либо по уникальному совпадению
+    с ценой лота из карточки ЕИС. Общая сумма процедуры для этого не используется: она не
+    доказывает связь с конкретным лотом.
+    """
+
+    from app.models.tender_card import TenderCard
+    from app.services import eis_card_tables, tender_twins
+
+    card = db.get(TenderCard, tender_twins.subject(db, tender).id)
+    lots = eis_card_tables.lots(card.payload if card else None)
+    if len(lots) <= 1:
+        return {}
+    by_number = {item["lot_number"]: item for item in lots}
+    out: dict[str, dict[str, Any]] = {}
+    for candidate in _candidates(db, tender, _ANCHOR_RE):
+        number = candidate.get("lot_number")
+        prices = {
+            key: Decimal(str(lot["price"])) if lot.get("price") is not None else None
+            for key, lot in by_number.items()
+        }
+        if number not in by_number:
+            matches = [key for key, price in prices.items() if _close(candidate["doc_price"], price)]
+            number = matches[0] if len(matches) == 1 else None
+        if number not in by_number:
+            continue
+        record = complete(candidate, prices[number])
+        previous = out.get(number)
+        if previous is None:
+            out[number] = record
+            continue
+        same = all(previous.get(key) == record.get(key) for key in ("doc_price", "mode", "vat_rate"))
+        if not same:
+            conflicts = list(previous.get("conflicts") or [])
+            conflicts.append({key: record.get(key) for key in ("document", "doc_price", "mode", "vat_rate", "quote")})
+            previous["conflicts"] = conflicts
+    return out
+
+
+def record_for_lot(tender: Tender, lot: dict[str, Any] | str | None = None) -> dict[str, Any] | None:
+    """Запись НДС общей карточки или конкретного лота; чужую запись лоту не подставляем."""
+
+    record = tender.price_vat or {}
+    if lot is None:
+        if record.get("lots"):
+            # Цена одного лота не является ценой процедуры. Общую карточку пересчитываем только
+            # по записи, которая совпала с полной суммой закупки на площадке.
+            return record if record.get("scope") == "PROCEDURE" else None
+        return record or None
+    number = str(lot.get("lot_number") if isinstance(lot, dict) else lot)
+    return (record.get("lots") or {}).get(number)
+
+
+def vat22(tender: Tender, lot: dict[str, Any] | str | None = None) -> dict[str, Any]:
+    """Единое правило п. 96: опубликованная цена и цена с НДС 22 % для сделки.
+
+    Автоматический результат возможен только для рублёвой цены с НДС / без НДС, ставка которой
+    22 % либо не названа. Остальные случаи возвращаются с причиной проверки и без расчётной суммы.
+    """
+
+    record = record_for_lot(tender, lot) or {}
+    source = record.get("doc_price")
+    out: dict[str, Any] = {
+        "record": record,
+        "source_amount": str(Decimal(source)) if source else None,
+        "amount_with_vat_22": None,
+        "eligible": False,
+        "review_reason": None,
+    }
+    if (tender.currency or "RUB") != "RUB":
+        out["review_reason"] = "Валюта закупки не RUB — автоматический расчёт НДС не выполняется"
+        return out
+    if not record or not source:
+        out["review_reason"] = "Сведения о цене и НДС в доступной документации не найдены"
+        return out
+    if record.get("conflicts"):
+        out["review_reason"] = "В документах найдены противоречивые цены или условия НДС"
+        return out
+    if record.get("matches_platform_price") is False:
+        out["review_reason"] = "Цена из документации не совпадает с суммой площадки"
+        return out
+    mode = record.get("mode")
+    if mode == NOT_APPLICABLE:
+        out["review_reason"] = "В документации указано «НДС не облагается» — пересчёт не выполняется"
+        return out
+    if mode not in (INCLUDED, EXCLUDED):
+        out["review_reason"] = "Условие включения НДС в документации не определено"
+        return out
+    rate = record.get("vat_rate")
+    if rate is not None and Decimal(str(rate)) != DEFAULT_RATE:
+        out["review_reason"] = f"В документации указана другая ставка НДС ({rate}%) — пересчёт по 22% не выполняется"
+        return out
+    amount = Decimal(str(source))
+    with_vat = amount if mode == INCLUDED else _round(amount * (1 + DEFAULT_RATE / 100))
+    out.update(
+        amount_with_vat_22=str(_round(with_vat)),
+        eligible=True,
+        vat_rate=DEFAULT_RATE,
+        rate_assumed=rate is None,
+        calculation_basis=(
+            "Сумма опубликована с НДС; пересчёт не требуется"
+            if mode == INCLUDED
+            else "Исходная сумма без НДС × 1,22" + ("; ставка 22% принята по п. 96" if rate is None else "")
+        ),
+    )
+    return out
+
+
+def price_kind(quote: str | None) -> str | None:
+    """Назначение исходной суммы по формулировке документа; неоднозначность не угадываем."""
+
+    text = (quote or "").lower()
+    if re.search(r"единичн\w*\s+расцен|сумм\w*\s+цен\s+единиц|цен\w*\s+единиц", text):
+        return "UNIT_SUM"
+    lot = bool(re.search(r"\bлот", text))
+    contract = bool(re.search(r"(?:цен|стоимост|сумм)\w*\s+(?:договор|контракт)", text))
+    if lot == contract:
+        return None
+    return "LOT_MAX" if lot else "CONTRACT_MAX"
+
+
+def deal_amount(tender: Tender, lot: dict[str, Any] | str | None = None, *, won: bool = False) -> Decimal | None:
+    """Сумма НМЦК для сделки; `None` — оставить исходную сумму площадки без автопересчёта."""
+
+    if won:
+        return None
+    record = record_for_lot(tender, lot) or {}
+    if price_kind(record.get("quote")) is None:
+        return None
+    result = vat22(tender, lot)
+    return Decimal(result["amount_with_vat_22"]) if result["eligible"] else None
+
+
 def refresh(db: Session, tender: Tender) -> dict[str, Any] | None:
     """Пересчитывает `tender.price_vat` по документам. Ничего не нашлось — прежнее значение
     остаётся (документы могли не скачаться в этот раз), но и не появляется ложное."""
 
     found = find(db, tender)
+    lots = _find_lot_records(db, tender)
+    if found is None and lots:
+        found = dict(next(iter(lots.values())))
+    if found is not None and lots:
+        if found.get("matches_platform_price") is True:
+            found["scope"] = "PROCEDURE"
+        found["lots"] = lots
     if found is not None and tender.price_vat != found:
         tender.price_vat = found
         db.flush()

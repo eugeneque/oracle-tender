@@ -178,6 +178,74 @@ def test_pricing_does_not_invent_values():
     assert build_pricing(_tender_with(base)) is None  # вид цены не определился
     ok = dict(base, quote="Максимальное значение цены договора 100 руб. без НДС")
     block = build_pricing(_tender_with(ok))
-    assert block["amount_kind"] == "CONTRACT_MAX" and "vat_rate" not in block  # ставка — наша
+    # П. 96: если ставка не названа, для расчёта и пакета используется 22 %.
+    assert block["amount_kind"] == "CONTRACT_MAX" and block["vat_rate"] == 22
     assert build_pricing(_tender_with(ok, currency="USD")) is None
     assert build_pricing(_tender_with(None)) is None
+
+
+def test_vat22_deal_amount_rules():
+    base = {"mode": "excluded", "doc_price": "100.00", "quote": "Максимальная цена договора 100 руб. без НДС"}
+    calculated = service.vat22(_tender_with(base))
+    assert calculated["eligible"] is True and calculated["amount_with_vat_22"] == "122.00"
+    assert service.deal_amount(_tender_with(base)) == Decimal("122.00")
+    assert service.deal_amount(_tender_with(base), won=True) is None
+    assert service.deal_amount(_tender_with(dict(base, quote="НМЦК 100 руб. без НДС"))) is None  # назначение неизвестно
+
+    included = service.vat22(_tender_with(dict(base, mode="included")))
+    assert included["eligible"] is True and included["amount_with_vat_22"] == "100.00"
+
+    for record in (
+        dict(base, vat_rate="20"),
+        dict(base, mode="not_applicable"),
+        dict(base, conflicts=[{"doc_price": "120.00"}]),
+        dict(base, matches_platform_price=False),
+    ):
+        result = service.vat22(_tender_with(record))
+        assert result["eligible"] is False and result["amount_with_vat_22"] is None
+        assert result["review_reason"]
+        assert service.deal_amount(_tender_with(record)) is None
+
+
+def test_lot_records_and_pricing():
+    tender = _tender_with({
+        "mode": "excluded", "doc_price": "1000.00", "vat_rate": "22",
+        "quote": "НМЦК лота 1 — 1000 руб. без НДС",
+        "lots": {
+            "1": {"mode": "excluded", "doc_price": "1000.00", "quote": "НМЦК лота 1 — 1000 руб. без НДС"},
+            "2": {"mode": "included", "doc_price": "2000.00", "quote": "НМЦК лота 2 — 2000 руб. с НДС"},
+        },
+    })
+    from app.services.bitrix_ai_service import build_pricing
+
+    assert service.record_for_lot(tender) is None  # запись лота не подменяет цену процедуры
+    assert service.record_for_lot(tender, "1")["doc_price"] == "1000.00"
+    assert service.deal_amount(tender, "1") == Decimal("1220.00")
+    assert service.deal_amount(tender, "2") == Decimal("2000.00")
+    assert build_pricing(tender, {"lot_number": "2"})["source_amount"] == "2000.00"
+
+
+def test_refresh_collects_lot_prices_and_conflicts(db_session):
+    tender = _tender(
+        db_session,
+        "3000.00",
+        [("Извещение.docx", "notice", "НМЦК лота 1: 1 000,00 руб. без НДС\nНМЦК лота 2: 2 000,00 руб. с НДС")],
+    )
+    from app.models.tender_card import TenderCard
+
+    db_session.add(TenderCard(tender_id=tender.id, payload={"tables": {"lots": {"headers": [], "rows": [
+        ["1 Первый", "Нет", "Цена: 1 000,00 ₽"], ["2 Второй", "Нет", "Цена: 2 000,00 ₽"],
+    ]}}}))
+    db_session.flush()
+    record = service.refresh(db_session, tender)
+    assert record["lots"]["1"]["doc_price"] == "1000.00"
+    assert record["lots"]["2"]["doc_price"] == "2000.00"
+    assert service.deal_amount(tender, "1") == Decimal("1220.00")
+    assert service.deal_amount(tender, "2") == Decimal("2000.00")
+
+    doc = db_session.query(TenderDocument).filter_by(tender_id=tender.id).one()
+    doc.extracted_text += "\nНМЦК лота 2: 2 100,00 руб. с НДС"
+    db_session.flush()
+    record = service.refresh(db_session, tender)
+    assert record["lots"]["2"]["conflicts"]
+    assert service.deal_amount(tender, "2") is None

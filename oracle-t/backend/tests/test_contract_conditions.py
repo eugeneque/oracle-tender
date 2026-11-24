@@ -56,7 +56,8 @@ def _cond(**kw) -> ConditionAnswer:
         kind="PREPAYMENT", presence="PRESENT", value="30 % от цены договора в течение 10 рабочих дней",
         amount="", percent="30", base="от цены договора", term="в течение 10 рабочих дней", day_type="",
         trigger_event="с даты заключения договора", payer="заказчик", allowed_forms="", obligation_model="",
-        result="", lot="1", document="Проект договора.docx", page="п. 3.2", quote="Аванс в размере 30 % от цены договора",
+        result="", obligated_party="", document_form="", recurrence="", recurrence_period="",
+        lot="1", document="Проект договора.docx", page="п. 3.2", quote="Аванс в размере 30 % от цены договора",
     )
     return ConditionAnswer(**{**base, **kw})
 
@@ -165,7 +166,7 @@ def test_bitrix_rows_replace_short_contract_terms(db_session, client, monkeypatc
 
     # Без структурного разбора — прежние короткие строки.
     sections = bitrix_ai_service.build_sections(db_session, tender)
-    assert [r["title"] for r in sections["contract"] if r["type"] == "contract_condition"] == ["Условие договора 1"]
+    assert [r["title"] for r in sections["contract"] if r["type"] == "contract_condition" and r["key"] != "price-vat-22"] == ["Условие договора 1"]
 
     monkeypatch.setattr(
         service,
@@ -180,7 +181,7 @@ def test_bitrix_rows_replace_short_contract_terms(db_session, client, monkeypatc
     )
     service.extract(db_session, tender)
     sections = bitrix_ai_service.build_sections(db_session, tender)
-    rows = {r["data"]["condition_kind"]: r for r in sections["contract"] if r["type"] == "contract_condition"}
+    rows = {r["data"]["condition_kind"]: r for r in sections["contract"] if r["type"] == "contract_condition" and r["key"] != "price-vat-22"}
     assert set(rows) == {"PREPAYMENT", "PENALTY", "CONTRACT_SECURITY", "PLATFORM_COMMISSION"}
     assert "Условие договора 1" not in [r["title"] for r in sections["contract"]]  # не дублируется
     assert [r["type"] for r in sections["contract"]].count("obligation") == 1  # особые условия остались
@@ -215,3 +216,37 @@ def test_contract_conditions_api(client, admin_token):
     response = client.get(f"/tenders/{tender_id}/contract-conditions", headers=headers)
     assert response.status_code == 200 and response.json() == {"conditions": []}
     assert client.get(f"/tenders/{uuid.uuid4()}/contract-conditions", headers=headers).status_code == 404
+
+
+def test_supplier_obligation_has_party_form_and_recurrence(db_session, client, monkeypatch):
+    tender = _tender(db_session)
+    monkeypatch.setattr(
+        service,
+        "run_structured",
+        lambda *a, **k: _answer(_cond(
+            kind="SUPPLIER_OBLIGATION",
+            value="Предоставлять отчёт о поставках",
+            trigger_event="после каждой отгрузки",
+            term="в течение 5 рабочих дней",
+            result="отчёт с подписью заказчика",
+            obligated_party="поставщик",
+            document_form="форма по приложению № 4",
+            recurrence="ежемесячно",
+            recurrence_period="до окончания срока договора",
+            page="п. 6.2",
+        )),
+    )
+    service.extract(db_session, tender)
+    sections = bitrix_ai_service.build_sections(db_session, tender)
+    row = next(r for r in sections["contract"] if r["type"] == "obligation" and r["data"].get("action") == "Предоставлять отчёт о поставках")
+    assert row["data"]["obligated_party"] == "поставщик"
+    assert row["data"]["document_form"] == "форма по приложению № 4"
+    assert row["data"]["recurrence"] == "ежемесячно"
+    assert row["data"]["recurrence_period"] == "до окончания срока договора"
+    assert row["data"]["result_form"] == "отчёт с подписью заказчика"
+    assert row["evidence"][0]["page"] == "п. 6.2"
+
+    # Записи, извлечённые до появления новых атрибутов, остаются совместимыми.
+    payload = service.get_conditions(db_session, tender)["conditions"][0]
+    payload.pop("recurrence")
+    assert bitrix_ai_service.build_sections(db_session, tender)["contract"]

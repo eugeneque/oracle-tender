@@ -11,14 +11,13 @@ Bitrix24 принимает изменения по тендерам в «Жур
 Первая проверка событий не создаёт: она снимает исходный слепок (в документе Bitrix24 —
 «при первичной загрузке изменение не выдумывать»).
 
-С 12.11.2026 (раздел 100) под наблюдение сама встаёт каждая закупка, выгруженная в Bitrix24:
-выгрузка была единственным рукопожатием, и журнал событий на портале не пополнялся. Найденные
-изменения ещё и уходят письмом, а важные для оценки помечают разбор ИИ неактуальным
-(`analysis_outdated_events`) — сам разбор заново не запускается.
+С 12.11.2026 (раздел 100) под наблюдение сама встаёт каждая закупка, выгруженная в Bitrix24.
+Найденные изменения уходят письмом, важные для оценки помечают разбор неактуальным, а новая
+документация и цена ставят повторный разбор с полной выгрузкой (разделы 118, 124).
 
-Чего здесь нет сознательно — см. «Ограничения» в разделе 84: лоты не различаются (всё на
-уровне процедуры), документ, заменённый по тому же адресу, не замечается (содержимое не
-сверяется), статус «приостановлена» площадки отдельно не отдают.
+События отдельных лотов маршрутизируются на сделки лотов (раздел 117). Документ, заменённый
+по тому же адресу без изменения карточки ЕИС, по-прежнему не замечается; статус приостановки
+берётся из официального этапа и журнала ЕИС, а не из общего статуса коммерческой площадки.
 """
 
 from __future__ import annotations
@@ -150,6 +149,31 @@ def _position_label(item: Any) -> str:
     return label[:300] + (f" (лот {item.lot_number})" if item.lot_number not in (None, "1") else "")
 
 
+def _protocol_missing(
+    fields: dict[str, Any],
+    documents: dict[str, Any],
+    card_protocols: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Дата итогов наступила, а протокола нет (п. 69). Дата без времени ждёт конца суток."""
+
+    value = fields.get("result_date")
+    if not value:
+        return False
+    try:
+        expected = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return False
+    if expected.tzinfo is None:
+        expected = expected.replace(tzinfo=timezone.utc)
+    if (expected.hour, expected.minute, expected.second) == (0, 0, 0):
+        expected += timedelta(days=1)
+    has_documents = any((item.get("class") == DocumentClass.PROTOCOL.value) for item in documents.values())
+    has_card_protocols = any("недейств" not in (item.get("status") or "").lower() for item in card_protocols.values())
+    return not has_documents and not has_card_protocols and (now or datetime.now(timezone.utc)) > expected
+
+
 def build_snapshot(db: Session, tender: Tender) -> dict[str, Any]:
     """Слепок наблюдаемых показателей закупки в виде, пригодном для сравнения и для JSONB."""
 
@@ -197,6 +221,7 @@ def build_snapshot(db: Session, tender: Tender) -> dict[str, Any]:
         "card_changes": eis_card_tables.documents_map(card_payload, "changes"),
         "positions": positions,
         "doc_security": _doc_security(db, tender),
+        "protocol_missing": _protocol_missing(fields, documents, card_payload and eis_card_tables.documents_map(card_payload, "protocols") or {}),
         **_registry_snapshot(db, tender),
     }
 
@@ -214,9 +239,20 @@ def _registry_snapshot(db: Session, tender: Tender) -> dict[str, Any]:
         item["number"]: {
             "status": item.get("status"), "outcome": item.get("outcome"), "prescription": item.get("prescription"),
             "hearing_at": item.get("hearing_at"), "decision": item.get("decision_number"),
+            "decision_form": item.get("decision_form"), "decision_url": item.get("decision_url"),
+            "resolutive_url": item.get("resolutive_url"), "full_url": item.get("full_url"),
+            "decision_date": item.get("decision_date") or item.get("result_placed"),
             "applicant": item.get("applicant"), "control_body": item.get("control_body"), "placed": item.get("placed"),
         }
         for item in data["complaints"]
+    }
+    related = {
+        item["number"]: {
+            "related_to": item["related_to"], "url": item.get("url"),
+            "status": item.get("status"), "published": item.get("published"),
+        }
+        for item in data["customer_history"]
+        if item.get("related_to")
     }
     contracts = {}
     for item in data["contracts"]:
@@ -226,7 +262,11 @@ def _registry_snapshot(db: Session, tender: Tender) -> dict[str, Any]:
             "version": last.get("version") or 1, "price": last.get("price"), "execution_end": last.get("execution_end"),
             "change_reason": last.get("change_reason"), "change_date": last.get("change_date"), "placed": last.get("placed"),
         }
-    return {"registry_complaints": complaints, "registry_contracts": contracts}
+    return {
+        "registry_complaints": complaints,
+        "registry_contracts": contracts,
+        "registry_related_procedures": related,
+    }
 
 
 def _doc_security(db: Session, tender: Tender) -> dict[str, str]:
@@ -471,6 +511,17 @@ def _card_changes(old: dict[str, Any], new: dict[str, Any], found: list[dict[str
     out: list[dict[str, Any]] = []
     types = lambda: {c["event_type"] for c in found + out}  # noqa: E731 - короткая проверка дублей
 
+    # П. 69: ожидаемая дата итогов прошла, а протокол так и не опубликован. Первый слепок без
+    # этого признака события не создаёт; повторные проверки того же отсутствия — тоже.
+    if "protocol_missing" in old and new.get("protocol_missing") and not old.get("protocol_missing"):
+        expected = (new.get("fields") or {}).get("result_date")
+        out.append(_change(
+            "PROCEDURE_STATUS_CHANGED", "protocol_missing",
+            "Дата подведения итогов прошла, протокол не опубликован", expected, None,
+            data={"protocol_missing": True, "expected_result_date": expected},
+            source_document=_CARD_SOURCE,
+            note="Проверены документы закупки и вкладка протоколов ЕИС; результат по плановой дате не выдумывается."))
+
     # Официальный этап (пп. 62, 63, 66): формулировка ЕИС главнее классификации СОВЫ.
     if "stage" in old and new.get("stage") and old.get("stage") and new["stage"] != old["stage"]:
         before, after = old["stage"], new["stage"]
@@ -618,10 +669,44 @@ def _card_changes(old: dict[str, Any], new: dict[str, Any], found: list[dict[str
                     "PROCEDURE_STATUS_CHANGED", f"fas:{number}:decision", f"Решение по жалобе № {number}: {item['outcome']}",
                     (prev or {}).get("outcome"), item["outcome"],
                     data={"fas_event": "DECISION", "complaint_number": number, "decision_number": item.get("decision")}, **common))
+            if item.get("decision_form") and (
+                item.get("decision_form") != (prev or {}).get("decision_form")
+                or item.get("decision_url") != (prev or {}).get("decision_url")
+            ):
+                full = item["decision_form"] == "FULL"
+                out.append(_change(
+                    "PROCEDURE_STATUS_CHANGED", f"fas:{number}:decision-form",
+                    f"Опубликован {'полный текст решения' if full else 'резолютивная часть решения'} по жалобе № {number}",
+                    (prev or {}).get("decision_form"), item["decision_form"],
+                    data={
+                        "fas_event": "DECISION", "complaint_number": number,
+                        "decision_form": item["decision_form"], "decision_url": item.get("decision_url"),
+                    },
+                    effective_at=item.get("decision_date"), source_url=item.get("decision_url"), **common))
             if item.get("prescription") is True and (prev or {}).get("prescription") is not True:
                 out.append(_change(
                     "PROCEDURE_STATUS_CHANGED", f"fas:{number}:prescription", f"Выдано предписание по жалобе № {number}",
                     None, "Предписание выдано", data={"fas_event": "PRESCRIPTION", "complaint_number": number}, **common))
+
+    # Повторная публикация после жалобы (п. 47): связь подтверждена текстом новой карточки ЕИС,
+    # а не совпадением заказчика/ОКПД2. Портал создаёт связанную сделку по новому номеру.
+    if "registry_related_procedures" in old:
+        for number, item in (new.get("registry_related_procedures") or {}).items():
+            if number in (old.get("registry_related_procedures") or {}):
+                continue
+            complaints = new.get("registry_complaints") or {}
+            complaint_number = next(iter(complaints), None)
+            out.append(_change(
+                "PROCEDURE_STATUS_CHANGED", f"fas:repeat:{number}"[:300],
+                f"Опубликована повторная закупка № {number}", item["related_to"], number,
+                data={
+                    "fas_event": "REPEAT_PUBLICATION", "complaint_number": complaint_number,
+                    "related_procedure_number": number, "related_procedure_url": item.get("url"),
+                    "relation": "REPEAT_AFTER_COMPLAINT", "procedure_status": item.get("status"),
+                },
+                effective_at=item.get("published"), source_url=item.get("url"),
+                source_document="Карточка повторной закупки ЕИС",
+                note="Связь с прежней процедурой прямо указана в карточке новой закупки."))
 
     # Реестр договоров ЕИС (пп. 90, 94): новая редакция сведений — что изменилось.
     if "registry_contracts" in old:
@@ -1050,6 +1135,7 @@ def check_tender(db: Session, tender: Tender, *, refresh: bool = True) -> list[T
 # (раздел 118): новые требования, проект договора, разъяснения и просто новые файлы документации.
 REANALYSIS_EVENTS = frozenset(
     {
+        "AMOUNT_CHANGED",
         "DOCUMENT_ADDED",
         "DOCUMENT_REPLACED",
         "TECHNICAL_REQUIREMENT_CHANGED",

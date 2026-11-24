@@ -543,6 +543,12 @@ def test_multi_lot_tender_sends_common_card_and_lot_deals(db_session, client, ad
             }
         },
     }
+    tender.price_vat = {
+        "lots": {
+            "1": {"mode": "excluded", "doc_price": "100000.00", "quote": "НМЦК лота 1: 100 000 руб. без НДС"},
+            "2": {"mode": "included", "doc_price": "200000.50", "quote": "НМЦК лота 2: 200 000,50 руб. с НДС"},
+        }
+    }
     db_session.commit()
     _configure(db_session, admin_user)
     receiver = FakeReceiver()
@@ -554,6 +560,8 @@ def test_multi_lot_tender_sends_common_card_and_lot_deals(db_session, client, ad
     assert common["deal_fields"]["record_type"] == "PROCEDURE" and "lot_number" not in common["deal_fields"]
     assert [lot["deal_fields"]["record_type"] for lot in (lot1, lot2)] == ["LOT", "LOT"]
     assert lot2["lookup"]["lot_number"] == "2" and lot2["deal_fields"]["amount"] == 200000.5
+    assert lot1["deal_fields"]["amount"] == 122000  # 100 000 без НДС × 1,22 (п. 96)
+    assert lot1["pricing"]["vat_rate"] == 22 and lot2["pricing"]["source_amount"] == "200000.50"
     assert lot2["deal_fields"]["lot_name"] == "Счётчики трёхфазные"
     assert lot2["deal_id"] == 0 and lot2["full_snapshot"] is False
     # Связь закупки — со сделкой общей карточки, а не лота.
@@ -571,3 +579,55 @@ def test_general_card_lookup_has_no_lot_number_and_documents_carry_analysis_stat
     db_session.commit()
     assert "lot_number" not in service.build_payload(db_session, tender)["lookup"]
     assert service.build_lookup(db_session, tender, {"lot_number": "2"})["lot_number"] == "2"
+
+
+def test_vat22_amount_and_review_row(db_session, client, admin_user):
+    tender = _tender(db_session)
+    tender.price_vat = {
+        "mode": "excluded", "doc_price": "1250000.50",
+        "quote": "Начальная максимальная цена договора 1 250 000,50 руб. без НДС",
+        "document": "Извещение.docx",
+    }
+    db_session.flush()
+    payload = service.build_payload(db_session, tender)
+    assert payload["deal_fields"]["amount"] == 1525000.61
+    assert payload["pricing"]["vat_rate"] == 22
+    row = next(r for r in payload["sections"]["contract"] if r["key"] == "price-vat-22")
+    assert row["status"] == "extracted" and row["data"]["amount_with_vat_22"] == "1525000.61"
+    assert row["data"]["source_amount"] == "1250000.50"
+
+    tender.price_vat["vat_rate"] = "20"
+    payload = service.build_payload(db_session, tender)
+    assert payload["deal_fields"]["amount"] == 1250000.5  # другая ставка — сумму не меняем
+    row = next(r for r in payload["sections"]["contract"] if r["key"] == "price-vat-22")
+    assert row["status"] == "requires_review" and "20%" in row["data"]["review_reason"]
+
+
+def test_lot_payload_includes_only_related_requirements_and_documents(db_session, client, admin_user):
+    from app.models.tender_document import TenderDocument
+    from app.models.tender_position import TenderPosition
+
+    tender = _tender(db_session)
+    card = db_session.get(TenderCard, tender.id)
+    card.payload = {**card.payload, "tables": {"lots": {"headers": [], "rows": [
+        ["1 Однофазные", "Нет", "Цена: 100 000,00 ₽"], ["2 Трёхфазные", "Нет", "Цена: 200 000,00 ₽"],
+    ]}}}
+    doc1 = TenderDocument(tender_id=tender.id, file_name="ТЗ лот 1.docx", source_url="https://e.test/lot1", document_class="tz_description")
+    doc2 = TenderDocument(tender_id=tender.id, file_name="ТЗ лот 2.docx", source_url="https://e.test/lot2", document_class="tz_description")
+    db_session.add_all([doc1, doc2])
+    db_session.flush()
+    db_session.add_all([
+        TenderPosition(tender_id=tender.id, position_no="1", name="Счётчики однофазные", lot_number="1", sort=1),
+        TenderPosition(tender_id=tender.id, position_no="2", name="Счётчики трёхфазные", lot_number="2", sort=2),
+        Requirement(tender_id=tender.id, text="Однофазный прибор", kind="product", position="Счётчики однофазные", source_document_id=doc1.id),
+        Requirement(tender_id=tender.id, text="Трёхфазный прибор", kind="product", position="Счётчики трёхфазные", source_document_id=doc2.id),
+    ])
+    db_session.commit()
+
+    lot1 = service.build_payload(db_session, tender, lot={"lot_number": "1", "name": "Однофазные", "price": 100000})
+    requirements = [r for r in lot1["sections"]["technical_specification"] if r["type"] == "requirement"]
+    assert [r["data"]["requirement"] for r in requirements] == ["Однофазный прибор"]
+    assert requirements[0]["data"]["lot_number"] == "1"
+    documents = lot1["sections"]["documents"]
+    assert [r["data"]["file_name"] for r in documents] == ["ТЗ лот 1.docx"]
+    assert documents[0]["data"]["lot_number"] == "1"
