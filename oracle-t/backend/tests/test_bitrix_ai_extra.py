@@ -121,6 +121,27 @@ def test_journal_fas_and_round_cancellation():
     assert cancel["data"] == {"round_cancelled": True}
 
 
+def test_first_protocol_in_card_is_event_only_once():
+    new = _snap(
+        card_protocols={
+            "Итоговый протокол": {
+                "revision": "1",
+                "status": "Действующая",
+                "placed": "2026-11-14T09:00+03:00",
+            }
+        }
+    )
+    (event,) = diff_snapshots(_snap(), new)
+    assert event["event_type"] == "PROTOCOL_PUBLISHED"
+    assert event["title"] == "Опубликован протокол: Итоговый протокол"
+    assert event["source_version"] == "1"
+    assert event["effective_at"] == "2026-11-14T09:00+03:00"
+    assert event["data"] == {"protocol_kind": "Итоговый протокол", "is_final": True}
+    assert diff_snapshots(new, new) == []
+    old_without_block = {key: value for key, value in _snap().items() if key != "card_protocols"}
+    assert diff_snapshots(old_without_block, new) == []
+
+
 def test_protocol_revision_contract_and_customer_request():
     old = _snap(card_protocols={"Итоговый протокол": {"revision": "1", "status": "Действующая"}},
                 card_contracts={"Договор №5": {"revision": "1"}})

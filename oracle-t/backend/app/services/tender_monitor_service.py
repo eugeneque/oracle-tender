@@ -581,8 +581,15 @@ def _card_changes(old: dict[str, Any], new: dict[str, Any], found: list[dict[str
         for name, doc in (new.get("card_protocols") or {}).items():
             prev = before_all.get(name)
             if prev is None:
-                continue
-            if doc.get("revision") and doc.get("revision") != prev.get("revision"):
+                # Протокол может появиться только во вкладке ЕИС, без нового файла у адаптера.
+                # Раньше такая запись пропускалась, а `protocol_missing` уже снимался — закупка
+                # молча оставалась без события и результата в Bitrix24 (сделка 2018, 25.11.2026).
+                out.append(_change(
+                    "PROTOCOL_PUBLISHED", f"card-protocol:{name}"[:300], f"Опубликован протокол: {name}",
+                    None, name, source_document=name, source_version=doc.get("revision"), effective_at=doc.get("placed"),
+                    data={"protocol_kind": name, "is_final": True if "итог" in name.lower() else None},
+                    note="Новый протокол из карточки ЕИС; итоги перечитываются из его текста."))
+            elif doc.get("revision") and doc.get("revision") != prev.get("revision"):
                 out.append(_change(
                     "PROTOCOL_PUBLISHED", f"card-protocol:{name}"[:300], f"Новая редакция протокола: {name}",
                     f"Редакция {prev.get('revision') or '—'}", f"Редакция {doc['revision']}",

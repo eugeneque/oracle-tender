@@ -177,6 +177,37 @@ def test_payload_shape_matches_portal_contract(db_session, client, admin_user):
     assert all(row["sort"] and row["key"] and row["title"] for row in tz + prep)
 
 
+def test_customer_inn_from_any_twin_and_label_with_colon(db_session, client, admin_user):
+    primary = _tender(db_session)
+    db_session.delete(db_session.get(TenderCard, primary.id))
+    exported = Tender(
+        source_id=primary.source_id,
+        external_id=f"tp:{primary.external_id}",
+        registry_number=primary.external_id,
+        title=primary.title,
+        customer_name=primary.customer_name,
+        analysis_tender_id=primary.id,
+    )
+    eis_twin = Tender(
+        source_id=primary.source_id,
+        external_id=f"eis:{primary.external_id}",
+        registry_number=primary.external_id,
+        title=primary.title,
+        analysis_tender_id=primary.id,
+    )
+    db_session.add_all([exported, eis_twin])
+    db_session.flush()
+    db_session.add(
+        TenderCard(
+            tender_id=eis_twin.id,
+            payload={"sections": [{"title": "Сведения о заказчике", "fields": [["ИНН:", "2224143922"]]}]},
+        )
+    )
+    db_session.flush()
+
+    assert service.build_lookup(db_session, exported)["customer_inn"] == "2224143922"
+
+
 def test_row_keys_survive_reanalysis(db_session, client, admin_user):
     """Требования пересоздаются при повторном разборе — ключ строки не должен меняться,
     иначе портал заведёт дубль вместо обновления."""

@@ -284,16 +284,19 @@ def customer_inn(db: Session, tender: Tender) -> str | None:
     В модели тендера ИНН нет, а портал ищет по нему компанию; сначала — раздел про
     заказчика, затем любой ИНН карточки. Только 10 или 12 цифр — иначе портал отклонит пакет."""
 
-    # Карточка может лежать и у самой записи, и у основной записи закупки (tender_twins):
-    # Госплан и площадка карточку ЕИС не загружают.
-    cards = [db.get(TenderCard, item.id) for item in dict.fromkeys((tender, tender_twins.subject(db, tender)))]
+    # Карточка ЕИС может остаться у любого двойника, а не только у выгруженной или основной
+    # записи: основную выбирают по наличию разбора, а не по источнику карточки (25.11.2026).
+    primary = tender_twins.subject(db, tender)
+    records = dict.fromkeys((tender, primary, *tender_twins.twins(db, primary)))
+    cards = [db.get(TenderCard, item.id) for item in records]
     candidates: list[tuple[int, str]] = []
     for section in [s for card in cards if card is not None for s in (card.payload or {}).get("sections", []) or []]:
         title = str(section.get("title") or "").lower()
         for field in section.get("fields", []) or []:
             if not isinstance(field, (list, tuple)) or len(field) < 2:
                 continue
-            if str(field[0]).strip().upper() != "ИНН":
+            label = re.sub(r"\s+", " ", str(field[0])).strip().rstrip(":").strip().upper()
+            if label != "ИНН":
                 continue
             digits = re.sub(r"\D", "", str(field[1]))
             if len(digits) in (10, 12):
