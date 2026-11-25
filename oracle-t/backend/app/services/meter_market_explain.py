@@ -291,8 +291,27 @@ def explain_localization(
         if key not in positions:
             positions[key] = {"key": key, "modification_id": piece.modification_id, "unmapped_type_id": type_id,
                               "variant_id": piece.variant_id, "counted": 0, "exclusions": defaultdict(int),
-                              "records": set(), "basis": ""}
+                              "records": set(), "record_rows": {}, "applied_scores": set(),
+                              "applied_years": set(), "basis": ""}
         return positions[key]
+
+    def remember_verdict(item: dict[str, Any], piece: report.LocPiece, reason: str, included: bool) -> None:
+        verdict = piece.verdict
+        if verdict.score is not None:
+            item["applied_scores"].add(verdict.score)
+            year = report.requirement_year(verdict.score, limits)
+            if year:
+                item["applied_years"].add(year)
+        if not verdict.record:
+            return
+        record = verdict.record
+        item["records"].add(record.label() + (
+            f", {verdict.score:g} баллов" if verdict.score is not None else ""
+        ))
+        usage = item["record_rows"].setdefault(record, {"counted": 0, "excluded": 0, "reasons": set()})
+        usage["counted" if included else "excluded"] += piece.count
+        if reason:
+            usage["reasons"].add(reason)
 
     # Неразмеченные написания этих типов учтены бухгалтерией (общая запись РПП исполнений).
     inherited_types = sorted({p.unmapped_type_id for p in pieces if p.unmapped_type_id})
@@ -306,21 +325,20 @@ def explain_localization(
                 continue  # другая строка таблицы, а не исключение
             mismatch = report.requirement_reason(verdict.score, requirement, limits) if requirement else None
             item = position(piece)
-            if verdict.record:
-                item["records"].add(verdict.record.label() + (f", {verdict.score:g} баллов" if verdict.score is not None else ""))
             if mismatch:
                 item["exclusions"][mismatch] += piece.count
                 reasons[(mismatch, False)] += piece.count
+                remember_verdict(item, piece, mismatch, False)
             else:
                 item["counted"] += piece.count
                 item["basis"] = verdict.reason
                 reasons[(verdict.reason, True)] += piece.count
+                remember_verdict(item, piece, verdict.reason, True)
         elif score is None:
             item = position(piece)
-            if verdict.record:
-                item["records"].add(verdict.record.label())
             item["exclusions"][verdict.reason] += piece.count
             reasons[(verdict.reason, False)] += piece.count
+            remember_verdict(item, piece, verdict.reason, False)
 
     # Строка производителя или итог: что не попало в локализацию совсем.
     start = date(report.LOCALIZATION_FROM_YEAR, 1, 1)
@@ -347,7 +365,8 @@ def explain_localization(
                 key,
                 {"key": key, "modification_id": mod_id, "unmapped_type_id": type_id if unmapped else None,
                  "variant_id": None if unmapped else variant_id, "counted": 0, "exclusions": defaultdict(int),
-                 "records": set(), "basis": ""},
+                 "records": set(), "record_rows": {}, "applied_scores": set(), "applied_years": set(),
+                 "basis": ""},
             )
             item["exclusions"][reason] += int(count)
             reasons[(reason, False)] += int(count)
@@ -378,6 +397,20 @@ def explain_localization(
         else:
             source = info[item["variant_id"]]
         records = sorted(item.pop("records"))
+        item["applied_scores"] = sorted(item["applied_scores"])
+        item["applied_years"] = sorted(item["applied_years"])
+        item["rpp_records"] = [
+            {
+                "number": record.number,
+                "issued": record.issued,
+                "valid_to": record.valid_to,
+                "score": record.score,
+                "counted": usage["counted"],
+                "excluded": usage["excluded"],
+                "reasons": sorted(usage["reasons"]),
+            }
+            for record, usage in sorted(item.pop("record_rows").items(), key=lambda pair: pair[0].issued)
+        ]
         item.update({k: v for k, v in _position(source, names, limits).items()})
         item["raw"] = source.get("raw")
         item["mapped_by"] = source.get("mapped_by")
@@ -394,7 +427,9 @@ def explain_localization(
     label = report.quarter_label(*(int(x) for x in quarter.split("-"))) + " г." if quarter else (
         f"{report.LOCALIZATION_FROM_YEAR} г. – {report._edge_label(edge)}"
     )
-    return _result(title or "Локализованные ПУ ЭЭ", label, positions, reasons, {"requirement": requirement})
+    result = _result(title or "Локализованные ПУ ЭЭ", label, positions, reasons, {"requirement": requirement})
+    result["rpp_reference"] = True
+    return result
 
 
 def _result(
@@ -432,19 +467,62 @@ _HEADER = [
 
 
 def _line(p: dict[str, Any], counted: int, excluded: int, reason: str) -> list[Any]:
+    if "applied_scores" in p:
+        scores = p["applied_scores"]
+        years = p["applied_years"]
+        score = scores[0] if len(scores) == 1 else "; ".join(f"{value:g}" for value in scores)
+        requirement = years[0] if len(years) == 1 else "; ".join(map(str, years))
+    else:
+        score = p["rpp"]["score"] if p["rpp"]["score"] is not None else ""
+        requirement = p["rpp"]["requirement_year"] or ""
     return [
         p["manufacturer"], p["mit_number"], p.get("notation") or "", p.get("modification") or report.NO_DATA,
         p.get("raw") or "", p["phase"], p["design"], p["interface"], counted, excluded, reason,
-        p["smart"]["status"], p["smart"]["reason"],
-        p["rpp"]["score"] if p["rpp"]["score"] is not None else "",
-        p["rpp"]["requirement_year"] or "",
+        p["smart"]["status"], p["smart"]["reason"], score, requirement,
         "; ".join(d["label"] for d in p["documents"]),
         "\n".join(p["rules"]),
     ]
 
 
+def _rpp_reference_rows(positions: list[dict[str, Any]]) -> list[list[Any]]:
+    """Одна строка на запись исполнения, даже если в отчёте у него несколько написаний."""
+
+    rows: dict[tuple, dict[str, Any]] = {}
+    for position in positions:
+        for record in position.get("rpp_records", []):
+            key = (
+                position["type_id"], position["modification_id"], record["number"], record["issued"],
+                record["valid_to"], record["score"],
+            )
+            item = rows.setdefault(key, {"position": position, "record": record, "counted": 0, "excluded": 0,
+                                         "reasons": set()})
+            item["counted"] += record["counted"]
+            item["excluded"] += record["excluded"]
+            item["reasons"].update(record["reasons"])
+    result = []
+    for item in sorted(
+        rows.values(),
+        key=lambda r: (r["position"]["manufacturer"], r["position"].get("modification") or "", r["record"]["issued"]),
+    ):
+        position, record = item["position"], item["record"]
+        usage = []
+        if item["counted"]:
+            usage.append(f"учтено: {item['counted']}")
+        if item["excluded"]:
+            usage.append(f"исключено: {item['excluded']}")
+        usage.extend(sorted(item["reasons"]))
+        result.append([
+            position["manufacturer"], position["mit_number"], position.get("notation") or "",
+            position.get("modification") or report.NO_DATA, record["number"] or "не указан",
+            "не указана" if record["issued"] == date.min else record["issued"].strftime("%d.%m.%Y"),
+            record["valid_to"].strftime("%d.%m.%Y") if record["valid_to"] else "не ограничен",
+            record["score"] if record["score"] is not None else "не указаны", "; ".join(usage),
+        ])
+    return result
+
+
 def to_xlsx(result: dict[str, Any], subtitle: str) -> bytes:
-    """Три листа: «Учтено», «Исключено» (позиция × причина), «Итог по причинам»."""
+    """Листы расчёта и, для локализации, справка о периодах и баллах записей РПП."""
 
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font
@@ -489,6 +567,14 @@ def to_xlsx(result: dict[str, Any], subtitle: str) -> bytes:
         [[r["reason"], "учтено" if r["included"] else "исключено", r["count"]] for r in result["reasons"]]
         + [["Итого учтено", "", result["value"]], ["Итого исключено", "", result["excluded"]]],
     )
+    if result.get("rpp_reference"):
+        reference = workbook.create_sheet("Записи РПП")
+        sheet(
+            reference,
+            ["Производитель", "ГРСИ", "Тип СИ", "Модификация (результат сопоставления)",
+             "Номер записи РПП", "Действует с", "Действует по", "Баллы", "Использование в отчёте"],
+            _rpp_reference_rows(positions),
+        )
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()

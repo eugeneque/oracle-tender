@@ -345,6 +345,40 @@ def test_localization_follows_rpp_record_history(market, db_session):
     assert next(r for r in only_2025["rows"] if r["name"] == "Завод НАРТИС")["total"] == 30
 
 
+def test_localization_xlsx_has_applied_scores_and_rpp_reference(market, db_session):
+    """25.11.2026: в Excel — не текущие 114 из справочника, а 95/113, применённые по датам поверок."""
+
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    from app.services import meter_market_explain as explain
+
+    db_session.execute(text(
+        "INSERT INTO meter_market_rpp_records (modification_id, issued_at, valid_to, score, record_number, source) "
+        "VALUES (:m, '2024-11-12', '2026-08-14', 95, '10001', 'gisp'), "
+        "(:m, '2026-08-15', NULL, 113, '10002', 'gisp')"
+    ), {"m": market["m_din"]})
+    result = explain.explain_localization(
+        db_session, date(2026, 10, 1), manufacturer_id=market["nartis"], quarter="2026-3"
+    )
+    workbook = load_workbook(BytesIO(explain.to_xlsx(result, "тест")), data_only=True)
+
+    assert workbook.sheetnames == ["Учтено", "Исключено", "Итог по причинам", "Записи РПП"]
+    included = list(workbook["Учтено"].values)
+    excluded = list(workbook["Исключено"].values)
+    assert {row[13] for row in included[4:]} == {95, "95; 113"}
+    assert {row[14] for row in included[4:]} == {2024, "2024; 2025"}
+    assert excluded[4][13] is None and excluded[4][14] is None  # поверки до внесения — применённого балла нет
+
+    reference = list(workbook["Записи РПП"].values)
+    assert len(reference) == 6  # заголовок, подзаголовок, пустая строка, шапка и две записи без дублей
+    assert reference[4][4:8] == ("10001", "12.11.2024", "14.08.2026", 95)
+    assert "учтено: 110" in reference[4][8]
+    assert reference[5][4:8] == ("10002", "15.08.2026", "не ограничен", 113)
+    assert "учтено: 30" in reference[5][8]
+
+
 # ── Детализация показателей и статусы (замечания 09.11.2026) ────────────────────────────────
 
 
@@ -374,7 +408,12 @@ def test_explain_overview_sums_to_shown_number_and_lists_exclusions(market, db_s
     # С фильтром по производителю — только его позиции, сумма совпадает с таблицей.
     narrowed = explain.explain_overview(db_session, period, report.Filters(manufacturer_id=market["nartis"]))
     assert narrowed["value"] == 145
-    assert explain.to_xlsx(result, "тест")[:2] == b"PK"
+    content = explain.to_xlsx(result, "тест")
+    assert content[:2] == b"PK"
+    from io import BytesIO
+    from openpyxl import load_workbook
+
+    assert load_workbook(BytesIO(content)).sheetnames == ["Учтено", "Исключено", "Итог по причинам"]
 
 
 def test_explain_groups_follow_membership_year(market, db_session):
