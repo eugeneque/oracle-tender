@@ -463,7 +463,22 @@ _HEADER = [
     "Производитель", "ГРСИ", "Тип СИ", "Модификация (результат сопоставления)", "Написание во ФГИС",
     "Тип ПУ", "Исполнение", "Интерфейс", "Учтено", "Исключено", "Основание включения / причина исключения",
     "ПП 890", "ПП 890: причина", "РПП, баллы", "Требования года", "Документ-основание", "Применённые правила",
+    "Комментарии",
 ]
+
+_COUNTRY_COMMENTS = tuple(
+    (re.compile(rf"(?<![A-Za-z]){code}(?![A-Za-z])|(?<=SPds){code}", re.IGNORECASE), comment)
+    for code, comment in (("GE", "для Грузии"), ("UZ", "для Узбекистана"), ("KZ", "для Казахстана"))
+)
+
+
+def _export_comment(p: dict[str, Any]) -> str:
+    """Страна — отдельным кодом в написании Энергомеры; регистр у поверителей непостоянный."""
+
+    if p["manufacturer"] != "Энергомера":
+        return ""
+    raw = p.get("raw") or ""
+    return "; ".join(comment for pattern, comment in _COUNTRY_COMMENTS if pattern.search(raw))
 
 
 def _line(p: dict[str, Any], counted: int, excluded: int, reason: str) -> list[Any]:
@@ -481,6 +496,7 @@ def _line(p: dict[str, Any], counted: int, excluded: int, reason: str) -> list[A
         p["smart"]["status"], p["smart"]["reason"], score, requirement,
         "; ".join(d["label"] for d in p["documents"]),
         "\n".join(p["rules"]),
+        _export_comment(p),
     ]
 
 

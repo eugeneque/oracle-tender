@@ -194,7 +194,7 @@ def update_modification(
 
 
 def set_variant_smart(db: Session, variant_id: int, value: bool | None) -> MeterMarketVariant:
-    """Ручное решение «соответствует ПП 890» по написанию (22.11.2026): главнее правила по протоколу Pn
+    """Ручное решение «соответствует ПП 890» по написанию: главнее Pn МИРТЕК, SPDs/IEC Энергомеры
     и решения модификации. `None` — снять; правило по обозначению (если применимо) вернётся сразу."""
 
     from datetime import datetime, timezone
@@ -204,6 +204,7 @@ def set_variant_smart(db: Session, variant_id: int, value: bool | None) -> Meter
         variant.smart_890, variant.smart_890_source, variant.smart_890_note, variant.smart_890_at = None, None, None, None
         db.flush()
         rules.apply_mirtek_protocol(db.connection())
+        rules.apply_energomera_smart(db.connection())
         db.refresh(variant)
     else:
         variant.smart_890, variant.smart_890_source = value, "manual"
@@ -214,8 +215,8 @@ def set_variant_smart(db: Session, variant_id: int, value: bool | None) -> Meter
 
 
 def set_variant_interface(db: Session, variant_id: int, value: str | None) -> MeterMarketVariant:
-    """Решение аналитика по интерфейсу написания (23.11.2026, раздел 122): подтвердить предложение или
-    исправить. Главнее таблицы кодов и модификации; `None` — снять, правило по таблице вернётся сразу."""
+    """Решение аналитика по интерфейсу написания: главнее таблицы кодов, правил Энергомеры и
+    модификации; `None` — снять, автоматическая расшифровка вернётся сразу."""
 
     from datetime import datetime, timezone
 
@@ -225,6 +226,7 @@ def set_variant_interface(db: Session, variant_id: int, value: str | None) -> Me
         variant.interface_review = variant.interface_suggested = variant.interface_at = None
         db.flush()
         interface_rules.apply_interface_codes(db.connection(), [variant.type_id])
+        interface_rules.apply_energomera_interfaces(db.connection(), [variant.type_id])
         db.refresh(variant)
         return variant
     label = interface_rules.join_label(interface_rules.split_label(value))  # пусто или «н/д» → «н/д»

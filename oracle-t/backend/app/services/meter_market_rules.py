@@ -40,6 +40,7 @@ from sqlalchemy.engine import Connection
 from app.services.meter_market_normalize import modification_key
 
 MIRTEK = "МИРТЕК"
+ENERGOMERA = "Энергомера"
 SMART_UNIT = "Умный учет"
 # Строки, к которым относится замечание «не производим несоответствующие» (ключи нормализации).
 MIRTEK_BASE_NAMES = ("МИРТЕК-12-РУ", "МИРТЕК-212-РУ", "МИРТЕК-232-РУ")
@@ -798,6 +799,61 @@ def apply_mirtek_protocol(conn: Connection) -> int:
     return changed
 
 
+# ── ЭНЕРГОМЕРА: СПОДЭС и IEC в написании (26.11.2026) ─────────────────────────────────────
+
+_IEC_TOKEN = re.compile(r"(?<![A-Z])IEC(?![A-Z])", re.IGNORECASE)
+ENERGOMERA_SPDS_NOTE = "в написании есть SPDs (точный регистр) — соответствует ПП 890 (аналитик 26.11.2026)"
+ENERGOMERA_IEC_NOTE = "в написании есть IEC — не соответствует ПП 890 (аналитик 26.11.2026)"
+
+
+def energomera_smart_verdict(raw: str | None) -> tuple[bool | None, str | None]:
+    """ПП 890 по написанию Энергомеры. SPDs проверяется с учётом регистра, IEC — без;
+    явное несоответствие IEC главнее, если поверитель записал оба кода."""
+
+    if not raw:
+        return None, None
+    if _IEC_TOKEN.search(raw):
+        return False, ENERGOMERA_IEC_NOTE
+    if "SPDs" in raw:
+        return True, ENERGOMERA_SPDS_NOTE
+    return None, None
+
+
+def apply_energomera_smart(conn: Connection) -> int:
+    """Выставить ПП 890 написаниям Энергомеры; ручные решения аналитика сохраняются."""
+
+    rows = conn.execute(
+        text(
+            "SELECT v.id, v.raw, v.smart_890, v.smart_890_source, v.smart_890_note FROM meter_market_variants v "
+            "JOIN meter_market_types t ON t.id = v.type_id JOIN meter_market_manufacturers f ON f.id = t.manufacturer_id "
+            "WHERE f.name = :f AND v.excluded_reason IS NULL AND v.smart_890_source IS DISTINCT FROM 'manual'"
+        ),
+        {"f": ENERGOMERA},
+    ).all()
+    now = datetime.now(timezone.utc)
+    changed = 0
+    for variant_id, raw, current, source, note in rows:
+        verdict, why = energomera_smart_verdict(raw)
+        if verdict is None:
+            if source == "rule":
+                conn.execute(
+                    text("UPDATE meter_market_variants SET smart_890 = NULL, smart_890_source = NULL, "
+                         "smart_890_note = NULL, smart_890_at = NULL WHERE id = :v"),
+                    {"v": variant_id},
+                )
+                changed += 1
+            continue
+        if current is verdict and source == "rule" and note == why:
+            continue
+        conn.execute(
+            text("UPDATE meter_market_variants SET smart_890 = :s, smart_890_source = 'rule', smart_890_note = :n, "
+                 "smart_890_at = :at WHERE id = :v"),
+            {"s": verdict, "n": why, "at": now, "v": variant_id},
+        )
+        changed += 1
+    return changed
+
+
 def apply_smart_unit_split(conn: Connection) -> int:
     """Поверки «Нет модификации» с U в номере у 61891-15 → «Умный учет», исполнение D17-2."""
 
@@ -969,7 +1025,9 @@ def apply_all(conn: Connection) -> dict[str, int]:
     nartis = apply_nartis_corrections(conn)
     stale_blanket = apply_mirtek_stale_blanket_smart(conn)
     protocol = apply_mirtek_protocol(conn)
+    energomera = apply_energomera_smart(conn)
     return {
+        "energomera_smart": energomera,
         "mirtek_stale_blanket": stale_blanket,
         "mirtek_excluded": excluded,
         "mirtek_typos": typos,

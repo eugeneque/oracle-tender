@@ -688,8 +688,10 @@ def apply_package_file(
         rules.apply_mirtek_body_mods(conn)  # корпуса W2/W3/SP1 МИРТЕК — отдельные модификации (раздел 125)
         rules.apply_mirtek_stale_blanket_smart(conn)  # след массового «manual» 0109 не перекрывает написание (раздел 125)
         rules.apply_mirtek_protocol(conn)  # ПП 890 новых написаний МИРТЕК по протоколу Pn (раздел 120)
+        rules.apply_energomera_smart(conn)  # SPDs / IEC в написании Энергомеры (раздел 128)
         interface_rules.apply_mirtek_codes(conn)  # таблица каналов МИРТЕК, если её ещё нет (раздел 125)
         interface_rules.apply_interface_codes(conn)  # интерфейс новых написаний по таблице кодов типа (раздел 122)
+        interface_rules.apply_energomera_interfaces(conn)  # однозначные коды Энергомеры (раздел 128)
         totals = conn.execute(
             text("SELECT rows_total, rows_kept, rows_annulled FROM meter_market_loads WHERE id = :i"), {"i": load_id}
         ).one()

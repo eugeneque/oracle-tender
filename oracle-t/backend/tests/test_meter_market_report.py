@@ -531,3 +531,52 @@ def test_explain_localization_lists_spellings_with_their_own_smart(market, db_se
     assert rows["НАРТИС-100.121RIL"]["variant_smart_source"] == "manual"
     assert rows["HAPTИC-100.121RIL"]["smart"]["key"] != "no"
     assert {p["modification"] for p in rows.values()} == {"НАРТИС-100.121RIL"}
+
+
+def test_energomera_country_comments_in_both_excel_sheets(market, db_session):
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    from app.services import meter_market_explain as explain
+
+    db = db_session
+    maker = db.execute(text("SELECT id FROM meter_market_manufacturers WHERE name = 'Энергомера'")).scalar()
+    type_id = _id(
+        db,
+        "INSERT INTO meter_market_types (mit_number, manufacturer_id, in_report, review_status) "
+        "VALUES ('59520-14', :m, true, 'included')",
+        m=maker,
+    )
+    mod = _id(db, "INSERT INTO meter_market_modifications (type_id, name) VALUES (:t, 'CE308')", t=type_id)
+    variants = {}
+    for key, raw in (("ge", "CE308 S34 SPds GE"), ("uz", "CE308 S34 Uz CAS"), ("kz", "CE308 S31 SPdsKZ")):
+        variants[key] = _id(
+            db,
+            "INSERT INTO meter_market_variants (type_id, raw, norm_key, modification_id) VALUES (:t, :r, :r, :m)",
+            t=type_id, r=raw, m=mod,
+        )
+        db.execute(
+            text("INSERT INTO meter_verification_monthly (variant_id, month, count) VALUES (:v, '2026-08-01', 1)"),
+            {"v": variants[key]},
+        )
+    db.execute(
+        text("INSERT INTO meter_verifications (global_id, variant_id, verification_date, applicable, annulled) "
+             "VALUES (6001, :v, '2026-08-10', false, false)"),
+        {"v": variants["ge"]},
+    )
+
+    result = explain.explain_overview(
+        db, report.parse_period("quarter:2026-3", date(2026, 10, 1)), report.Filters(manufacturer_id=maker)
+    )
+    workbook = load_workbook(BytesIO(explain.to_xlsx(result, "тест")), data_only=True)
+    included = list(workbook["Учтено"].values)
+    excluded = list(workbook["Исключено"].values)
+    assert included[3][-1] == "Комментарии" and excluded[3][-1] == "Комментарии"
+    comments = {row[4]: row[-1] for row in included[4:]}
+    assert comments == {
+        "CE308 S34 SPds GE": "для Грузии",
+        "CE308 S34 Uz CAS": "для Узбекистана",
+        "CE308 S31 SPdsKZ": "для Казахстана",
+    }
+    assert ("CE308 S34 SPds GE", "для Грузии") in [(row[4], row[-1]) for row in excluded[4:]]

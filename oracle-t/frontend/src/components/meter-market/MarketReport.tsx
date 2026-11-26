@@ -82,8 +82,11 @@ function PeriodPicker({
   const switchKind = (k: PeriodKind) => {
     if (k === "all") onChange("all");
     else if (k === "ytd") onChange(`ytd:${viewYear}`);
-    else if (k === "quarters") onChange(`quarters:${key(k, last.year, Math.ceil(last.month / 3))}`);
-    else onChange(`months:${key(k, last.year, last.month)}`);
+    else {
+      // Год на экране важнее последнего загруженного: иначе к 2025 незаметно добавлялся IV квартал 2026.
+      const month = viewYear === last.year ? last.month : 12;
+      onChange(k === "quarters" ? `quarters:${key(k, viewYear, Math.ceil(month / 3))}` : `months:${key(k, viewYear, month)}`);
+    }
   };
   const toggle = (k: "quarters" | "months", n: number) => {
     const id = key(k, viewYear, n);

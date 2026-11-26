@@ -498,6 +498,129 @@ def apply_mirtek_codes(conn: Connection) -> int:
     return len(changed)
 
 
+# ── ЭНЕРГОМЕРА: коды каналов в написании (26.11.2026) ────────────────────────────────────
+
+
+def energomera_interface(raw: str | None) -> tuple[str, str] | None:
+    """Однозначные каналы Энергомеры из замечаний аналитика; прочие написания не меняем.
+
+    Коды нередко склеены (`GB04cмPLCRf`), поэтому общий разбор токенов здесь не подходит.
+    """
+
+    if not raw:
+        return None
+    normalized = raw.upper().translate(_CYR_TO_LAT)
+    compact = re.sub(r"[^A-Z0-9]+", "", normalized)
+    if "GB04" in compact:
+        if "PLCRF" in compact:
+            return "Bluetooth, GSM + mod (PLC+RF)", "GB04 + PLCRF — Bluetooth, GSM и сменный модуль PLC+RF"
+        return "Bluetooth, GSM", "GB04 — Bluetooth и GSM"
+    if "LG14" in compact:
+        return "GSM, LoRaWAN", "LG14 — GSM и LoRaWAN"
+    nb02 = next((code for code in ("NBO2", "NB02") if code in compact), None)
+    if nb02:
+        return "RS, NB-IoT", f"{nb02} — NB-IoT и RS"
+    nb01 = next((code for code in ("NBO1", "NB01") if code in compact), None)
+    if nb01:
+        return "NB-IoT", f"{nb01} — NB-IoT"
+    if re.search(r"\bCE308\s+S34\b", normalized) and "SPDSGE" in compact:
+        return "RS", "CE308 S34 для Грузии без кода удалённого канала — RS (аналитик 26.11.2026)"
+    return None
+
+
+def apply_energomera_interfaces(conn: Connection, type_ids: list[int] | None = None) -> int:
+    """Применить однозначные коды Энергомеры, не трогая ручные и нераспознанные написания."""
+
+    changed = 0
+    ge_type = conn.execute(text("SELECT id FROM meter_market_types WHERE mit_number = '59520-14'")).scalar()
+    if type_ids is None or ge_type in type_ids:
+        ge_mod = conn.execute(
+            text("SELECT id FROM meter_market_modifications WHERE type_id = :t AND name = 'CE308 S34 GE'"),
+            {"t": ge_type},
+        ).scalar() if ge_type else None
+        if ge_mod:
+            changed += conn.execute(
+                text("UPDATE meter_market_modifications SET interface = 'RS' WHERE id = :m AND interface IS DISTINCT FROM 'RS'"),
+                {"m": ge_mod},
+            ).rowcount
+            unmapped = conn.execute(
+                text("SELECT id, raw FROM meter_market_variants WHERE type_id = :t AND modification_id IS NULL"),
+                {"t": ge_type},
+            ).all()
+            for variant_id, raw in unmapped:
+                decision = energomera_interface(raw)
+                if decision and decision[1].startswith("CE308 S34"):
+                    conn.execute(
+                        text("UPDATE meter_market_variants SET modification_id = :m, mapped_by = 'auto' WHERE id = :v"),
+                        {"m": ge_mod, "v": variant_id},
+                    )
+                    changed += 1
+
+    nb_type = conn.execute(text("SELECT id FROM meter_market_types WHERE mit_number = '72632-18'")).scalar()
+    if nb_type and (type_ids is None or nb_type in type_ids):
+        nb_rows = conn.execute(
+            text("SELECT v.id, v.raw, v.modification_id, m.name AS mod_name FROM meter_market_variants v "
+                 "LEFT JOIN meter_market_modifications m ON m.id = v.modification_id WHERE v.type_id = :t"),
+            {"t": nb_type},
+        ).all()
+        nb_rows = [r for r in nb_rows if (d := energomera_interface(r.raw)) and d[0] == "NB-IoT"]
+        if nb_rows:
+            nb_mod = conn.execute(
+                text("SELECT id FROM meter_market_modifications WHERE type_id = :t AND name = 'CE207 R7 NB01'"),
+                {"t": nb_type},
+            ).scalar()
+            if nb_mod is None:
+                nb_mod = conn.execute(
+                    text("INSERT INTO meter_market_modifications (type_id, name, interface) "
+                         "VALUES (:t, 'CE207 R7 NB01', 'NB-IoT') RETURNING id"),
+                    {"t": nb_type},
+                ).scalar_one()
+                changed += 1
+            for row in nb_rows:
+                if row.modification_id is None or row.mod_name == "CE207 R7 oa.":
+                    conn.execute(
+                        text("UPDATE meter_market_variants SET modification_id = :m, mapped_by = 'auto' WHERE id = :v"),
+                        {"m": nb_mod, "v": row.id},
+                    )
+                    changed += 1
+
+    where = "f.name = :f AND v.excluded_reason IS NULL AND v.interface_source IS DISTINCT FROM 'manual'"
+    params: dict = {"f": "Энергомера"}
+    if type_ids is not None:
+        where += " AND v.type_id = ANY(:ids)"
+        params["ids"] = list(type_ids)
+    rows = conn.execute(
+        text(
+            "SELECT v.id, v.raw, v.interface, v.interface_source, v.interface_note FROM meter_market_variants v "
+            "JOIN meter_market_types t ON t.id = v.type_id JOIN meter_market_manufacturers f ON f.id = t.manufacturer_id "
+            f"WHERE {where}"
+        ),
+        params,
+    ).all()
+    now = datetime.now(timezone.utc)
+    for variant_id, raw, current, source, current_note in rows:
+        decision = energomera_interface(raw)
+        if decision is None:
+            if source == "rule":
+                conn.execute(
+                    text("UPDATE meter_market_variants SET interface = NULL, interface_source = NULL, interface_note = NULL, "
+                         "interface_suggested = NULL, interface_review = NULL, interface_at = NULL WHERE id = :v"),
+                    {"v": variant_id},
+                )
+                changed += 1
+            continue
+        label, note = decision
+        if current == label and source == "rule" and current_note == note:
+            continue
+        conn.execute(
+            text("UPDATE meter_market_variants SET interface = :i, interface_source = 'rule', interface_note = :n, "
+                 "interface_suggested = :i, interface_review = NULL, interface_at = :at WHERE id = :v"),
+            {"i": label, "n": note, "at": now, "v": variant_id},
+        )
+        changed += 1
+    return changed
+
+
 if __name__ == "__main__":
     import sys
 

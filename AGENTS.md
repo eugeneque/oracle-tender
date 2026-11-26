@@ -1,0 +1,161 @@
+# AGENTS.md — Sova Scanner / ORACLE-T
+
+Платформа тендерной аналитики для МИРТЕК (счётчики электроэнергии, АСКУЭ): собирает закупки с
+площадок, отбирает релевантные профилями и ИИ, разбирает документацию, сопоставляет требования
+с каталогом продукции (МИРТЕК и конкуренты) и считает шансы на победу. Интерфейс и все тексты —
+на русском. Этот файл — карта проекта, чтобы не перечитывать код в каждой сессии; подробности
+по разделам — в `oracle-t/ARCHITECTURE.md` (6000+ строк, оглавление: `grep -n "^## "`).
+
+## Раскладка
+
+```
+oracle-tender-main/            ← корень git-репозитория
+├── AGENTS.md                  ← эта карта проекта
+├── CLAUDE.md                  ← параллельная карта проекта; перед использованием сверять с кодом
+├── README.md, DEPLOY.md       ← установка (install.sh: server|docker|local), обновление (update.sh)
+├── oracle-t-tender-scoring.md ← описание механизма оценки тендеров (профиль компании, продукция, профили)
+├── ORACLE-T.html              ← статический прототип интерфейса
+├── reports/                   ← отчёты, исходные JSON и скрипты их сборки; не часть приложения
+└── oracle-t/
+    ├── ARCHITECTURE.md        ← главный документ: по разделам, что и почему сделано (с датами)
+    ├── README.md              ← запуск, тесты, источники тендеров
+    ├── CRITERIA.md            ← критерии соответствия и реестры допуска
+    ├── AI_SCORE_PROMPTS.md    ← промпты AI-оценки
+    ├── ARSHIN_ANALYTICS.md    ← ТЗ на блок «Аналитика → Рынок ПУ» по поверкам ФГИС «Аршин»
+    ├── BITRIX_AI_GAP.md       ← сопоставление перечня доработок Bitrix24 с кодом
+    ├── run.sh                 ← локальный стенд: Postgres (Homebrew) + uvicorn :8000 + vite :5173
+    ├── docker-compose.yml
+    ├── backend/               ← FastAPI + SQLAlchemy 2 (sync) + Alembic, Python 3.11
+    └── frontend/              ← React 18 + Vite + TypeScript + Tailwind
+```
+
+### Backend (`oracle-t/backend/app`)
+- `api/endpoints/*.py` — роутеры (tenders, relevance, analytics, export, sources, company_profile,
+  manufacturers, integrations, upper_software, users, logs, notifications, tags, …);
+  `api/deps.py` — `get_current_user`, `require_role`, `parse_okpd2`, `resolve_relevance_profiles`.
+- `services/*.py` — вся бизнес-логика (эндпоинты тонкие). Ключевые:
+  - `tender_service.py` — `TenderFilters`, `_build_conditions`, список/доска/воронка (`count_tenders`,
+    funnel). Список, Kanban, аналитика и Excel-выгрузка обязаны фильтровать одинаково — через
+    общие `TenderFilters`/`apply_tender_filters`.
+  - `relevance_service.py` — движок отбора `match_profile` (исключения → слова → ОКПД2),
+    `tokenize`/`tender_text` (title + customer_name + procurement_method), `exclusion_text`
+    (только title), отметка `tenders.passed_relevance_filter` общими профилями, `backfill`.
+  - `relevance_profile_service.py` — совпадения профилей в `relevance_profile_matches`
+    (`refresh_matches`: полный пересчёт при смене `rules_version`, иначе инкремент по
+    `tenders.updated_at`), `preview`, `prepare_for_filter` (с `FOR UPDATE`), `can_edit`.
+
+  - `ai_*`, `analysis_service`, `compliance_service`, `tender_analysis` — ИИ-разбор, матрица
+    соответствия, AI-оценка; провайдеры YandexGPT, DeepSeek и Qwen (DeepSeek и Qwen через
+    RouterAI) — `ai_provider_service`; Claude и GigaChat убраны 20.10.2026 (раздел 66).
+  - `product_catalog_service`, `fgis_*`, `catalog_*`, `manufacturer_*` — справочник продукции.
+- `adapters/` — площадки (`eis*`, `roseltorg`, `sberbank_ast`, `fabrikant`, `tektorg`, `etpgpb`,
+  `etprf`, `zakazrf`, `lot_online`, внешние каналы `gosplan`, `seldon`, `tenderplan`) и каталоги
+  (`fgis`, `mirtek_catalog`, `manufacturer_site`, `rusprofile`). Интерфейс — `adapters/base.py`,
+  реестр — `adapters/registry.py`.
+- `core/scheduler.py` (APScheduler: опрос площадок, сроки, уборка), `core/jobs.py` (фоновые задачи).
+- `models/` — одна сущность на файл; `alembic/versions/NNNN_name.py` — миграции с нумерацией
+  (на 26.11.2026 последняя — `0119_meter_market_energomera_26_11`), докстринг объясняет «зачем».
+- Учёт токенов и стоимости ИИ — `ai_usage_service`; окно контекста —
+  `ai_provider_service.get_model_limits`/`input_budget_chars` (разделы 52, 104). Модель матрицы
+  отдельно выбирает администратор через `matrix_model_service`; массовый пересчёт матрицы —
+  самая дорогая операция, не запускать без явной необходимости.
+- Полный автоматический разбор закупок удалён 12.11.2026: разбор запускается по кнопке.
+  Фоновыми остаются ИИ-отбор новых закупок, ночная достройка брешей уже разобранных матриц,
+  разметка «Рынка ПУ» и поиск характеристик каталога (раздел 105).
+- Центр уведомлений в шапке — `GET /activity` (`activity_service`, задания планировщика —
+  `core/activity.py`), фронт `components/nav/NotificationCenter.tsx`; раздел 58.
+- Оценка вердиктов матрицы специалистом — `compliance_review_service` (исправление перекрывает
+  вердикт и уходит прецедентом в запросы по похожим требованиям); раздел 70.
+  Несогласия с заключением ИИ — прецеденты для похожих закупок
+  (`ai_conclusion_service.precedents_block`); раздел 71.
+- Интеграции МИРТЕК в ПО верхнего уровня (данные специалиста, черновик/«Сохранить», сканы) —
+  `software_integration_service`/`software_integration_scan`, фронт
+  `components/catalog/SoftwareIntegrationsSection.tsx`; раздел 82.
+- Отслеживание изменений по закупкам и «Журнал событий» Bitrix24 — `tender_monitor_service`
+  (слепок/сравнение) и `tender_event_service` (пакет `events`); выгруженные закупки встают под
+  наблюдение сами (разделы 84, 100). Условия поставки — `delivery_terms_service` (85), условия
+  договора — `contract_conditions_service` (95), итоги протоколов — `protocol_results_service` (96).
+- Ошибки обращений к ИИ — `ai_log_service.log_ai_event` (компонент журнала `ai_models`, файл
+  `logs/ai.log`, вкладка «Логирование → Ошибки ИИ»); раздел 56.
+- Рынок ПУ по поверкам ФГИС «Аршин» — `meter_market_loader`, `meter_market_import`,
+  `meter_market_report`, `meter_market_dictionary`; фронт `components/meter-market/`; раздел 79.
+  Детализация чисел — `meter_market_explain` + `ExplainPanel.tsx`; разметка написаний —
+  `meter_market_markup`; интерфейсы — `meter_market_interface`; правила аналитика —
+  `meter_market_rules`. ПП 890 МИРТЕК решает протокол `Pn` в написании, у Энергомеры — точный
+  `SPDs` / `IEC`; интерфейсы Энергомеры — по `GB04`, `PLCRF`, `LG14`, `NB01/NB02` (и `NBO1/NBO2`), страновые
+  комментарии GE/UZ/KZ добавляются в Excel-детализацию. Ручные решения не перезаписываются
+  (125, 128; ранние правила в 120–123 уточнены).
+- НМЦК с НДС и без НДС из документации — `price_vat_service` (кодом, без ИИ; `tenders.price_vat`,
+  блок в «Обзоре», колонки Excel); разделы 106, 124.
+- Обновление из интерфейса («Система → Обновление», только админ) — `system_update_service`,
+  фронт `pages/SystemUpdate.tsx`; раздел 91.
+- `seed/snapshot.py` — наполнение базы «из коробки» (`python -m app.seed.snapshot prepare`).
+- `tests/` — pytest против реальной БД `oraclet_test`.
+
+### Frontend (`oracle-t/frontend/src`)
+- `pages/` — `Tenders.tsx` (главная: фильтры, профили, воронка, виды списка),
+  `TenderFull`, `Analytics`, `Catalog`, `Company`, `Apps` («Приложения»: внешние сервисы, новая
+  интеграция — запись в `components/apps/appsCatalog.tsx`), `AiSettings` («Модели ИИ»),
+  `Settings`, `SystemUpdate`, `Users`, `Logs`, `Home` («Что нового?»), `Changelog`.
+- `components/` — `ProfilePicker`, `RelevanceProfilesModal` (+ `ProfilesManager`, редактор
+  профиля с предпросмотром), `SelectionFunnelBar`, `SelectionGuide`, `TenderDetailPanel`, …
+- `api/` — клиент (`api.get/post/put/delete`, `ApiError`) и `types.ts`.
+- `content/changelog.ts` — **журнал изменений: при каждой правке, видимой пользователю, добавлять
+  запись сверху** (`new` / `improved` / `fixed`, дата ISO). `content/homeSlides.ts` — плитки
+  «Что нового?» для крупных нововведений.
+- Дизайн — стиль Apple, Inter, монохром + один акцент; если скилл `oracle-t-design` доступен
+  в окружении, использовать его.
+
+## Отбор тендеров (частый источник багов)
+
+Слои: **Собрано → Профили → Модель (ИИ) → Фильтры = в списке** (воронка над списком).
+
+- **Профили отбора** (`relevance_profiles`): общие (`is_default`, правит админ, 9 штук — бывшие
+  группы `search_keyword_groups`) и личные (`owner_id`). Поля: `keywords`, `exclusion_keywords`,
+  `okpd2_codes`, `match_mode` (any/all по словам), `okpd2_mode` (`narrow` — нужны и слова, и код;
+  `either` — достаточно одного), `source_keys` (пусто = все площадки), `is_active`.
+- Положительные слова проверяются по названию, заказчику и способу закупки, а слова-исключения —
+  **только по названию** (`exclusion_text`): исключение описывает предмет, а не заказчика (86).
+- `okpd2_mode='narrow'` (по умолчанию у новых профилей) **отбрасывает закупки без кода ОКПД2** —
+  а код есть лишь у небольшой части закупок (заполняется ИИ-анализом). Это задумано (тест
+  `test_keywords_and_okpd2_narrow_each_other`), но объясняет «профиль почти ничего не находит».
+- У явно выбранных профилей площадочная область строгая: закупка проходит, только если на её
+  площадке действует выбранный профиль и она ему подходит. Общие профили по умолчанию нестрогие:
+  закупки площадок вне их области проходят без профильного отбора (80).
+- Несколько профилей на площадке — «любой» (объединение) или «все» (`_profiles_condition`).
+- Фронт: `filters.relevanceProfileIds === null` → «общие по умолчанию»
+  (`relevance_profile_default=true`); массив → явный выбор (`relevance_profile=<id>`…).
+  Выбор личного профиля поверх умолчания **заменяет** общие (`applyProfileSelection` в
+  `Tenders.tsx`), а не дописывается к ним.
+- Канал «Все» (`feed=all`) намеренно хранит записи разных каналов, но схлопывает двойники при
+  выдаче по номеру ЕИС и дополнительному ключу. Остальные фильтры участвуют в выборе
+  представителя закупки; отметка человека главнее, поэтому «Неактуально» нельзя обойти двойником
+  (89, 90, 109).
+- Фразы сбора («что спрашиваем у площадок») — отдельная таблица `collection_terms`, к отбору
+  отношения не имеют.
+- «Релевантен» как решение человека — `tenders.relevance_status`; не путать с
+  `passed_relevance_filter` (профили) и `ai_relevant` (модель).
+
+## Запуск и проверки
+
+```bash
+cd oracle-t && ./run.sh                 # http://localhost:5173, API http://localhost:8000/health
+```
+- БД: Postgres 15 из Homebrew (`/opt/homebrew/opt/postgresql@15/bin/psql`), база/пользователь/
+  пароль `oraclet`. Быстрая проверка данных: `PGPASSWORD=oraclet psql -h localhost -U oraclet oraclet`.
+- Тесты бэкенда: `cd oracle-t/backend && POSTGRES_HOST=localhost .venv/bin/pytest -q`
+  (нужна база `oraclet_test`).
+- Фронт: `cd oracle-t/frontend && npm run build` (tsc + vite), `npm run lint`.
+- На этой машине `backend/.venv` и `frontend/node_modules` могут отсутствовать — тогда их
+  создаёт `run.sh` (venv на python3.11, `npm install`). Без них ни pytest, ни tsc не запустить.
+- Docker в системе не установлен; стенд — только через `run.sh`.
+- Админ: логин/пароль в `oracle-t/.env` (`BOOTSTRAP_ADMIN_*`), сброс — `backend/reset_admin.py`.
+
+## Соглашения
+
+- Комментарии и докстринги — по-русски, объясняют «почему» (часто с датой и ссылкой на раздел ТЗ
+  или замечание тестировщика). Сохранять этот стиль и плотность.
+- Новая колонка/таблица — только через новую миграцию Alembic со следующим номером.
+- Важные решения дописываются новым разделом в `oracle-t/ARCHITECTURE.md`; если меняется
+  описанное здесь устройство или поведение, актуализировать и этот `AGENTS.md`.
+- Ошибки пользователю — понятным текстом (`HTTPException(detail="…")`), не пустой выдачей.

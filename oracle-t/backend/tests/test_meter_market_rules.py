@@ -506,3 +506,48 @@ def test_mirtek_body_mods_split_from_base_row(conn):
     assert _scalar(conn, "SELECT modification_id FROM meter_market_variants WHERE id = :v", v=sp1) == sp1_mod
     assert _scalar(conn, "SELECT design FROM meter_market_modifications WHERE id = :i", i=sp1_mod) == "split"
     assert rules.apply_mirtek_body_mods(conn) == {"created": 0, "fixed": 0, "remapped": 0}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("CE207 R7 GS04 SPDs", True),
+        ("CE207 R7 GS04 SPDs*", True),
+        ("CE207 R7 GS04 SPds", None),
+        ("CE207 R7 GS04 spDS", None),
+        ("CE308 S31.543.OA.VF IEC", False),
+        ("СЕ 308 S31 543 OA VF iec", False),
+        ("CE207 GS04 SPDs IEC", False),
+        ("CE207 GS04", None),
+        (None, None),
+    ],
+)
+def test_energomera_smart_verdict(raw, expected):
+    assert rules.energomera_smart_verdict(raw)[0] is expected
+
+
+def test_energomera_smart_applied_once_and_preserves_manual(conn):
+    maker = _scalar(conn, "INSERT INTO meter_market_manufacturers (name) VALUES ('Энергомера') RETURNING id")
+    type_id = _scalar(
+        conn,
+        "INSERT INTO meter_market_types (mit_number, manufacturer_id, in_report) VALUES ('72632-18', :m, true) RETURNING id",
+        m=maker,
+    )
+    spds = _variant(conn, type_id, "CE207 R7 GS04 SPDs")
+    other_case = _variant(conn, type_id, "CE207 R7 GS04 SPds")
+    iec = _variant(conn, type_id, "CE308 S31 543 OA VF iec")
+    both = _variant(conn, type_id, "CE207 R7 GS04 SPDs IEC")
+    manual = _variant(conn, type_id, "CE207 R7 GS01 SPDs")
+    conn.execute(
+        text("UPDATE meter_market_variants SET smart_890 = false, smart_890_source = 'manual' WHERE id = :v"),
+        {"v": manual},
+    )
+
+    assert rules.apply_energomera_smart(conn) == 3
+    get = lambda v: tuple(conn.execute(text("SELECT smart_890, smart_890_source FROM meter_market_variants WHERE id = :v"), {"v": v}).one())
+    assert get(spds) == (True, "rule")
+    assert get(other_case) == (None, None)
+    assert get(iec) == (False, "rule")
+    assert get(both) == (False, "rule")
+    assert get(manual) == (False, "manual")
+    assert rules.apply_energomera_smart(conn) == 0

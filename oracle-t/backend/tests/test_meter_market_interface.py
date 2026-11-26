@@ -275,3 +275,117 @@ def test_nartis_rf2400_line_added_once(nartis, db_session):
     assert (row.interface, row.interface_review) == ("ZigBee", None)
     dictionary.update_type(db, nartis["type_id"], {"interface_codes": old + "RF2400 = Bluetooth  # аналитик\n"})
     assert iface.apply_nartis_rf2400(db.connection()) == 0
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("CE208 C4.846.2.OGR1.QYUDVFZ GB04 SPDs", "Bluetooth, GSM"),
+        ("CE308 C36.746.OGR1.QYUDVFZM GB04cмPLCRf", "Bluetooth, GSM + mod (PLC+RF)"),
+        ("CE208 C4.846.2.OGR1.QYUDVFZM GB04+plcrf", "Bluetooth, GSM + mod (PLC+RF)"),
+        ("CE208 R7.749.2.OR1G.QYUVLFZM LG14 spDS", "GSM, LoRaWAN"),
+        ("CE308 S34.746.OA.QYUVLFZSPDsGE", "RS"),
+        ("CE308 S34.746.OA.QYUVLFZ SPds GE", "RS"),
+        ("CE207 R7.749.2.OAG.QUVLF NBO2 SPDs", "RS, NB-IoT"),
+        ("CE207 R7.749.2.OAG.QUVLF NB02 SPDs", "RS, NB-IoT"),
+        ("CE207 R7.749.2.OG.QUVLF NBO1 spDS", "NB-IoT"),
+        ("CE207 R7.749.2.OG.QUVLF NB01 spDS", "NB-IoT"),
+        ("CE207 R7.749.2.OG.QUVLF GS01", None),
+    ],
+)
+def test_energomera_interface(raw, expected):
+    decision = iface.energomera_interface(raw)
+    assert (decision[0] if decision else None) == expected
+
+
+def test_energomera_interfaces_applied_once_and_preserve_manual(db_session):
+    db = db_session
+    maker = db.execute(text("INSERT INTO meter_market_manufacturers (name) VALUES ('Энергомера') RETURNING id")).scalar()
+    type_id = db.execute(
+        text("INSERT INTO meter_market_types (mit_number, manufacturer_id, in_report) VALUES ('55454-13', :m, true) RETURNING id"),
+        {"m": maker},
+    ).scalar()
+    mod = db.execute(
+        text("INSERT INTO meter_market_modifications (type_id, name, interface) VALUES (:t, 'CE208 C4', 'GSM') RETURNING id"),
+        {"t": type_id},
+    ).scalar()
+    gb = db.execute(
+        text("INSERT INTO meter_market_variants (type_id, raw, norm_key, modification_id) VALUES (:t, 'CE208 C4 GB04', 'gb', :m) RETURNING id"),
+        {"t": type_id, "m": mod},
+    ).scalar()
+    unknown = db.execute(
+        text("INSERT INTO meter_market_variants (type_id, raw, norm_key, modification_id) VALUES (:t, 'CE208 C4 GS01', 'gs', :m) RETURNING id"),
+        {"t": type_id, "m": mod},
+    ).scalar()
+    manual = db.execute(
+        text("INSERT INTO meter_market_variants (type_id, raw, norm_key, modification_id, interface, interface_source) "
+             "VALUES (:t, 'CE208 R7 LG14', 'lg', :m, 'RS', 'manual') RETURNING id"),
+        {"t": type_id, "m": mod},
+    ).scalar()
+
+    assert iface.apply_energomera_interfaces(db.connection()) == 1
+    assert db.execute(text("SELECT interface FROM meter_market_variants WHERE id = :v"), {"v": gb}).scalar() == "Bluetooth, GSM"
+    assert db.execute(text("SELECT interface FROM meter_market_variants WHERE id = :v"), {"v": unknown}).scalar() is None
+    assert db.execute(text("SELECT interface FROM meter_market_variants WHERE id = :v"), {"v": manual}).scalar() == "RS"
+    assert iface.apply_energomera_interfaces(db.connection()) == 0
+
+
+def test_energomera_ge_modification_is_corrected_and_mapped(db_session):
+    db = db_session
+    maker = db.execute(text("INSERT INTO meter_market_manufacturers (name) VALUES ('Энергомера') RETURNING id")).scalar()
+    type_id = db.execute(
+        text("INSERT INTO meter_market_types (mit_number, manufacturer_id, in_report) VALUES ('59520-14', :m, true) RETURNING id"),
+        {"m": maker},
+    ).scalar()
+    mod = db.execute(
+        text("INSERT INTO meter_market_modifications (type_id, name, interface) VALUES (:t, 'CE308 S34 GE', 'NB-IoT') RETURNING id"),
+        {"t": type_id},
+    ).scalar()
+    raw = "CE308 S34.746.OA.QYUVLFZ SPds GE"
+    variant = db.execute(
+        text("INSERT INTO meter_market_variants (type_id, raw, norm_key) VALUES (:t, :r, 'ge') RETURNING id"),
+        {"t": type_id, "r": raw},
+    ).scalar()
+
+    assert iface.apply_energomera_interfaces(db.connection()) == 3  # модификация, привязка, интерфейс написания
+    row = db.execute(
+        text("SELECT v.modification_id, v.interface, m.interface FROM meter_market_variants v "
+             "JOIN meter_market_modifications m ON m.id = v.modification_id WHERE v.id = :v"),
+        {"v": variant},
+    ).one()
+    assert tuple(row) == (mod, "RS", "RS")
+    assert iface.apply_energomera_interfaces(db.connection()) == 0
+
+
+def test_energomera_nb01_gets_own_modification(db_session):
+    db = db_session
+    maker = db.execute(text("INSERT INTO meter_market_manufacturers (name) VALUES ('Энергомера') RETURNING id")).scalar()
+    type_id = db.execute(
+        text("INSERT INTO meter_market_types (mit_number, manufacturer_id, in_report) VALUES ('72632-18', :m, true) RETURNING id"),
+        {"m": maker},
+    ).scalar()
+    wrong = db.execute(
+        text("INSERT INTO meter_market_modifications (type_id, name, interface) VALUES (:t, 'CE207 R7 oa.', 'RS') RETURNING id"),
+        {"t": type_id},
+    ).scalar()
+    raws = (
+        ("CE207 R7.749.2.OAG.QUVLF NB01 SPDs~", wrong),
+        ("CE207 R7.749.2.OG.QUVLF NB01 spDS~", None),
+    )
+    ids = []
+    for i, (raw, mod) in enumerate(raws):
+        ids.append(db.execute(
+            text("INSERT INTO meter_market_variants (type_id, raw, norm_key, modification_id) VALUES (:t, :r, :k, :m) RETURNING id"),
+            {"t": type_id, "r": raw, "k": f"nb{i}", "m": mod},
+        ).scalar())
+
+    assert iface.apply_energomera_interfaces(db.connection()) == 5  # новая модификация, две привязки, два интерфейса
+    rows = db.execute(
+        text("SELECT v.raw, v.interface, m.name, m.interface FROM meter_market_variants v "
+             "JOIN meter_market_modifications m ON m.id = v.modification_id WHERE v.id = ANY(:ids) ORDER BY v.raw"),
+        {"ids": ids},
+    ).all()
+    assert [(r.raw, r.interface, r.name, r.interface) for r in rows] == [
+        (raw, "NB-IoT", "CE207 R7 NB01", "NB-IoT") for raw, _ in raws
+    ]
+    assert iface.apply_energomera_interfaces(db.connection()) == 0
