@@ -550,7 +550,7 @@ def test_energomera_country_comments_in_both_excel_sheets(market, db_session):
     )
     mod = _id(db, "INSERT INTO meter_market_modifications (type_id, name) VALUES (:t, 'CE308')", t=type_id)
     variants = {}
-    for key, raw in (("ge", "CE308 S34 SPds GE"), ("uz", "CE308 S34 Uz CAS"), ("kz", "CE308 S31 SPdsKZ")):
+    for key, raw in (("ge", "CE308 S34 SPDs GE"), ("uz", "CE308 S34 SPDs UZ CAS"), ("kz", "CE308 S31 SPDsKZ")):
         variants[key] = _id(
             db,
             "INSERT INTO meter_market_variants (type_id, raw, norm_key, modification_id) VALUES (:t, :r, :r, :m)",
@@ -575,11 +575,11 @@ def test_energomera_country_comments_in_both_excel_sheets(market, db_session):
     assert included[3][-1] == "Комментарии" and excluded[3][-1] == "Комментарии"
     comments = {row[4]: row[-1] for row in included[4:]}
     assert comments == {
-        "CE308 S34 SPds GE": "для Грузии",
-        "CE308 S34 Uz CAS": "для Узбекистана",
-        "CE308 S31 SPdsKZ": "для Казахстана",
+        "CE308 S34 SPDs GE": "для Грузии",
+        "CE308 S34 SPDs UZ CAS": "для Узбекистана",
+        "CE308 S31 SPDsKZ": "для Казахстана",
     }
-    assert ("CE308 S34 SPds GE", "для Грузии") in [(row[4], row[-1]) for row in excluded[4:]]
+    assert ("CE308 S34 SPDs GE", "для Грузии") in [(row[4], row[-1]) for row in excluded[4:]]
 
 
 def test_energomera_localization_requires_exact_spds(market, db_session):
@@ -621,3 +621,12 @@ def test_energomera_localization_requires_exact_spds(market, db_session):
     excluded = {p["raw"]: p["excluded"] for p in result["positions"] if p["excluded"]}
     assert excluded == {"CE208 C4 GB04 SPds": 20, "CE208 C4 GB04": 30}
     assert all(p["exclusions"][0]["reason"] == report.REASON_NO_SPDS for p in result["positions"] if p["excluded"])
+
+    # Тот же сценарий в привычной детализации «Общей информации», а не только на экране «Локализация».
+    overview = explain.explain_overview(
+        db, report.parse_period("quarter:2026-3", edge), report.Filters(manufacturer_id=maker)
+    )
+    assert overview["value"] == 10 and overview["excluded"] == 1049  # 50 без SPDs + 999 из типа вне отчёта
+    assert [p["raw"] for p in overview["positions"] if p["counted"]] == ["CE208 C4 GB04 SPDs"]
+    overview_excluded = {p["raw"]: p["excluded"] for p in overview["positions"] if p["excluded"] and p["raw"]}
+    assert overview_excluded == {"CE208 C4 GB04 SPds": 20, "CE208 C4 GB04": 30}
