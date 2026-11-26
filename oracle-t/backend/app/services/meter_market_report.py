@@ -556,6 +556,7 @@ REASON_UNDATED = "в РПП, но дата внесения неизвестна
 REASON_TYPE_INHERITED = (
     "исполнение в написании не указано полностью, но все исполнения типа в РПП с одинаковыми баллами"
 )
+REASON_NO_SPDS = "у Энергомеры в написании нет SPDs (точный регистр) — не локализовано"
 
 
 def rpp_verdict(records: list[RppRecord], day: date) -> LocVerdict:
@@ -625,8 +626,8 @@ def localization_ledger(
     детализации совпадают по построению.
 
     `by_variant` — части исполнений разложены ещё и по написаниям (детализация «Локализации», выбор
-    аналитика 24.11.2026: строка = написание, чтобы ПП 890 совпадал с основным отчётом). Решение по РПП
-    зависит только от исполнения и даты поверки, поэтому суммы с разбивкой и без неё одинаковы.
+    аналитика 24.11.2026: строка = написание, чтобы ПП 890 совпадал с основным отчётом). Дата и баллы
+    РПП зависят от исполнения; у Энергомеры дополнительно требуется точное SPDs в самом написании (129).
 
     Возвращает части, сведения об исполнениях и исполнения без даты внесения."""
 
@@ -666,6 +667,13 @@ def localization_ledger(
         return [], by_id, undated_mods
     inherited = _inherited_type_records(db, records, manufacturer_id)
 
+    # У Энергомеры локализация зависит не только от модификации: учитывается само написание SPDs.
+    names = _manufacturer_names(db)
+    energomera_mods = [mid for mid in records if names.get(by_id[mid]["manufacturer_id"]) == "Энергомера"]
+    energomera_types = [tid for tid, (mid, _) in inherited.items() if names.get(mid) == "Энергомера"]
+    spds_mod = " AND (NOT v.modification_id = ANY(:em) OR v.raw LIKE '%SPDs%')" if energomera_mods else ""
+    spds_type = " AND (NOT v.type_id = ANY(:et) OR v.raw LIKE '%SPDs%')" if energomera_types else ""
+
     # Источники поверок: исполнение (ключ «m»), написание исполнения (ключ «v», при `by_variant`)
     # или неразмеченные написания типа (ключ «u»).
     variant_mod: dict[int, int] = {}
@@ -675,9 +683,9 @@ def localization_ledger(
             text(
                 "SELECT v.id, v.modification_id, mv.month, sum(mv.count) FROM meter_verification_monthly mv "
                 "JOIN meter_market_variants v ON v.id = mv.variant_id "
-                "WHERE v.modification_id = ANY(:ids) AND mv.month >= :start AND mv.month < :end GROUP BY 1, 2, 3"
+                f"WHERE v.modification_id = ANY(:ids) AND mv.month >= :start AND mv.month < :end{spds_mod} GROUP BY 1, 2, 3"
             ),
-            {"ids": list(records), "start": start, "end": edge},
+            {"ids": list(records), "start": start, "end": edge, "em": energomera_mods},
         ):
             variant_mod[variant_id] = mod_id
             monthly.append((("v", variant_id), month, count))
@@ -688,9 +696,9 @@ def localization_ledger(
                 text(
                     "SELECT v.modification_id, mv.month, sum(mv.count) FROM meter_verification_monthly mv "
                     "JOIN meter_market_variants v ON v.id = mv.variant_id "
-                    "WHERE v.modification_id = ANY(:ids) AND mv.month >= :start AND mv.month < :end GROUP BY 1, 2"
+                    f"WHERE v.modification_id = ANY(:ids) AND mv.month >= :start AND mv.month < :end{spds_mod} GROUP BY 1, 2"
                 ),
-                {"ids": list(records), "start": start, "end": edge},
+                {"ids": list(records), "start": start, "end": edge, "em": energomera_mods},
             )
         ]
     if inherited:
@@ -700,9 +708,9 @@ def localization_ledger(
                 text(
                     "SELECT v.type_id, mv.month, sum(mv.count) FROM meter_verification_monthly mv "
                     "JOIN meter_market_variants v ON v.id = mv.variant_id WHERE v.modification_id IS NULL "
-                    "AND v.type_id = ANY(:ids) AND mv.month >= :start AND mv.month < :end GROUP BY 1, 2"
+                    f"AND v.type_id = ANY(:ids) AND mv.month >= :start AND mv.month < :end{spds_type} GROUP BY 1, 2"
                 ),
-                {"ids": list(inherited), "start": start, "end": edge},
+                {"ids": list(inherited), "start": start, "end": edge, "et": energomera_types},
             )
         ]
 
@@ -718,6 +726,32 @@ def localization_ledger(
         return LocPiece(None, inherited[key][0], month, count, verdict, unmapped_type_id=key)
 
     pieces: list[LocPiece] = []
+    if energomera_mods:
+        for variant_id, mod_id, month, count in db.execute(
+            text(
+                "SELECT v.id, v.modification_id, mv.month, sum(mv.count) FROM meter_verification_monthly mv "
+                "JOIN meter_market_variants v ON v.id = mv.variant_id "
+                "WHERE v.modification_id = ANY(:ids) AND v.raw NOT LIKE '%SPDs%' "
+                "AND mv.month >= :start AND mv.month < :end GROUP BY 1, 2, 3"
+            ),
+            {"ids": energomera_mods, "start": start, "end": edge},
+        ):
+            verdict = LocVerdict(False, None, REASON_NO_SPDS, None)
+            pieces.append(LocPiece(mod_id, by_id[mod_id]["manufacturer_id"], month, int(count), verdict,
+                                   variant_id=variant_id if by_variant else None))
+    if energomera_types:
+        for type_id, month, count in db.execute(
+            text(
+                "SELECT v.type_id, mv.month, sum(mv.count) FROM meter_verification_monthly mv "
+                "JOIN meter_market_variants v ON v.id = mv.variant_id WHERE v.modification_id IS NULL "
+                "AND v.type_id = ANY(:ids) AND v.raw NOT LIKE '%SPDs%' "
+                "AND mv.month >= :start AND mv.month < :end GROUP BY 1, 2"
+            ),
+            {"ids": energomera_types, "start": start, "end": edge},
+        ):
+            verdict = LocVerdict(False, None, REASON_NO_SPDS, None)
+            pieces.append(LocPiece(None, inherited[type_id][0], month, int(count), verdict, unmapped_type_id=type_id))
+
     for source, month, count in monthly:
         month_end = _add_months(month, 1)
         source_records = (
@@ -815,7 +849,8 @@ def localization(db: Session, edge: date, requirement: int | None = None) -> dic
     names = _manufacturer_names(db)
     limits = thresholds(db)
     quarters = localization_quarters(edge)
-    pieces, _, _ = localization_ledger(db, edge)
+    # Написания нужны для правила SPDs Энергомеры; заодно экран и детализация получают одинаковые части.
+    pieces, _, _ = localization_ledger(db, edge, by_variant=True)
     empty = {"quarters": quarters, "rows": [], "totals": {q: 0 for q in quarters}, "total": 0, "undated": 0,
              "requirement": requirement, "requirement_years": sorted({y for y, _ in limits})}
 

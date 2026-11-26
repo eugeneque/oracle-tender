@@ -580,3 +580,44 @@ def test_energomera_country_comments_in_both_excel_sheets(market, db_session):
         "CE308 S31 SPdsKZ": "для Казахстана",
     }
     assert ("CE308 S34 SPds GE", "для Грузии") in [(row[4], row[-1]) for row in excluded[4:]]
+
+
+def test_energomera_localization_requires_exact_spds(market, db_session):
+    from app.services import meter_market_explain as explain
+
+    db = db_session
+    maker = db.execute(text("SELECT id FROM meter_market_manufacturers WHERE name = 'Энергомера'")).scalar()
+    type_id = _id(
+        db,
+        "INSERT INTO meter_market_types (mit_number, manufacturer_id, in_report, review_status) "
+        "VALUES ('55454-13', :m, true, 'included')",
+        m=maker,
+    )
+    mod = _id(
+        db,
+        "INSERT INTO meter_market_modifications (type_id, name, in_rpp, score, rpp_included_at) "
+        "VALUES (:t, 'CE208 C4 GB04', true, 115, '2025-01-01')",
+        t=type_id,
+    )
+    for raw, count in (("CE208 C4 GB04 SPDs", 10), ("CE208 C4 GB04 SPds", 20), ("CE208 C4 GB04", 30)):
+        variant = _id(
+            db,
+            "INSERT INTO meter_market_variants (type_id, raw, norm_key, modification_id) VALUES (:t, :r, :r, :m)",
+            t=type_id, r=raw, m=mod,
+        )
+        db.execute(
+            text("INSERT INTO meter_verification_monthly (variant_id, month, count) VALUES (:v, '2026-08-01', :c)"),
+            {"v": variant, "c": count},
+        )
+
+    edge = date(2026, 10, 1)
+    data = report.localization(db, edge)
+    energomera = next(r for r in data["rows"] if r["manufacturer_id"] == maker)
+    assert energomera["total"] == 10 and data["totals"]["2026-3"] == 40
+
+    result = explain.explain_localization(db, edge, manufacturer_id=maker, quarter="2026-3")
+    assert result["value"] == 10 and result["excluded"] == 50
+    assert [p["raw"] for p in result["positions"] if p["counted"]] == ["CE208 C4 GB04 SPDs"]
+    excluded = {p["raw"]: p["excluded"] for p in result["positions"] if p["excluded"]}
+    assert excluded == {"CE208 C4 GB04 SPds": 20, "CE208 C4 GB04": 30}
+    assert all(p["exclusions"][0]["reason"] == report.REASON_NO_SPDS for p in result["positions"] if p["excluded"])
