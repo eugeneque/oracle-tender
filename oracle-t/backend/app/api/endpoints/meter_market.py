@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import re
+import uuid
 from datetime import date
 from typing import Any
 from urllib.parse import quote
@@ -26,6 +27,7 @@ from app.schemas.meter_market import (
     ThresholdsIn,
     TypeIn,
     TypeSmartIn,
+    TypesMarkupIn,
     VariantInterfaceIn,
     VariantSmartIn,
     VariantMapIn,
@@ -485,6 +487,66 @@ def get_catalog_jobs(_: User = Depends(get_current_user)) -> list[dict[str, Any]
     return sorted(_catalog_jobs.values(), key=lambda item: item["key"])
 
 
+@router.post("/types/markup")
+def post_types_markup(
+    payload: TypesMarkupIn, db: Session = Depends(get_db), user: User = Depends(require_analytics)
+) -> dict[str, Any]:
+    """Полная или выборочная разметка таблицы приборов, последовательно в одном фоновом задании."""
+
+    import threading
+
+    from app.db.session import SessionLocal
+    from app.services import meter_market_markup
+
+    if payload.type_ids is None:
+        type_ids = [row[0] for row in db.execute(text("SELECT id FROM meter_market_types ORDER BY mit_number")).all()]
+        scope = "весь справочник"
+    else:
+        type_ids = [row[0] for row in db.execute(
+            text("SELECT id FROM meter_market_types WHERE id = ANY(:ids) ORDER BY mit_number"), {"ids": payload.type_ids}
+        ).all()]
+        if len(type_ids) != len(set(payload.type_ids)):
+            raise HTTPException(status_code=404, detail="Один или несколько выбранных типов не найдены")
+        scope = f"выбрано типов: {len(type_ids)}"
+    if not type_ids:
+        raise HTTPException(status_code=422, detail="Нет типов для разметки")
+    key = f"batch-markup:{uuid.uuid4().hex[:12]}"
+    log_action(db, component="meter_market", action="types_markup", result="success", details=scope, user_id=user.id)
+    db.commit()
+
+    def work() -> None:
+        from app.services.ai_provider_service import AiNotConfiguredError, AiQuotaExceededError
+
+        total: dict[str, Any] = {"types": 0, "script": 0, "mapped": 0, "created": 0, "failed": 0, "errors": []}
+        try:
+            with SessionLocal() as session:
+                for type_id in type_ids:
+                    meter_type = session.get(MeterMarketType, type_id)
+                    try:
+                        if not characteristics.description_text(session, meter_type):
+                            characteristics.refresh_description(session, meter_type)
+                            session.commit()
+                        stats = meter_market_markup.markup_type(session, meter_type, recheck=True, include_modifications=True)
+                        total["types"] += 1
+                        for field in ("script", "mapped", "created", "failed"):
+                            total[field] += stats.get(field, 0)
+                    except (AiNotConfiguredError, AiQuotaExceededError) as exc:
+                        session.rollback()
+                        _job_finish(key, error=str(exc))
+                        return
+                    except Exception as exc:  # noqa: BLE001 - остальные типы продолжают разметку
+                        session.rollback()
+                        total["failed"] += 1
+                        total["errors"].append(f"{meter_type.mit_number}: {exc}")
+            _job_finish(key, result=total)
+        except Exception as exc:  # noqa: BLE001
+            _job_finish(key, error=str(exc))
+
+    _job_start(key, f"ИИ-разметка: {scope}")
+    threading.Thread(target=work, name=key, daemon=True).start()
+    return {"started": True, "job": key, "types": len(type_ids)}
+
+
 @router.post("/types/{type_id}/markup")
 def post_type_markup(
     type_id: int,
@@ -615,6 +677,19 @@ def post_manufacturer_markup(
     _job_start(key, f"Разбор приборов {manufacturer.name}")
     threading.Thread(target=work, name=f"meter-manufacturer-markup-{manufacturer_id}", daemon=True).start()
     return {"started": True, "job": key}
+
+
+@router.get("/devices")
+def get_devices(
+    manufacturer_id: int | None = None,
+    search: str | None = None,
+    review: str | None = None,
+    type_ids: str | None = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    ids = [int(value) for value in type_ids.split(",") if value.strip()] if type_ids else None
+    return dictionary.devices(db, manufacturer_id=manufacturer_id, search=search, review=review, type_ids=ids)
 
 
 @router.get("/types/{type_id}/modifications")

@@ -54,6 +54,12 @@ class VariantSmartIn(BaseModel):
     smart_890: bool | None = None
 
 
+class TypesMarkupIn(BaseModel):
+    """Выбранные типы для ИИ-разметки; null — весь справочник по явной кнопке пользователя."""
+
+    type_ids: list[int] | None = Field(default=None, min_length=1)
+
+
 class TypeSmartIn(BaseModel):
     """Ручная отметка ПП 890 всем модификациям типа; null — снять ручные отметки."""
 

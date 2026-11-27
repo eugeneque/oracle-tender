@@ -229,3 +229,73 @@ def test_sync_adds_registry_devices_without_including_them_in_report(db_session)
     assert db_session.scalar(select(MeterMarketModification).where(MeterMarketModification.type_id == meter_type.id)).name == FOBOS_RAW
     again = meter_market_sync.sync_manufacturer(db_session, manufacturer, adapter=_FakeAdapter([result]))
     assert again.types_created == 0 and again.modifications_created == 0
+
+
+
+def _delete_type(session, type_id):
+    meter_type = session.get(MeterMarketType, type_id)
+    if meter_type is not None:
+        session.delete(meter_type)
+        session.commit()
+
+
+def test_devices_route_returns_flat_rows_and_review_filter(client, admin_token):
+    from app.db.session import SessionLocal
+
+    with SessionLocal() as session:
+        meter_type, modification = _modification(session)
+        characteristics.apply_attribute(
+            session, modification, "design", "cabinet", source="ai", status="pending", reason="M(1)"
+        )
+        session.commit()
+        type_id = meter_type.id
+        modification_id = modification.id
+        mit_number = meter_type.mit_number
+    try:
+        response = client.get("/meter-market/devices?review=pending", headers={"Authorization": f"Bearer {admin_token}"})
+        assert response.status_code == 200, response.text
+        row = next(item for item in response.json() if item["id"] == modification_id)
+        assert row["mit_number"] == mit_number
+        assert row["attributes"]["design"]["status"] == "pending"
+        excluded = client.get("/meter-market/devices?review=unresolved", headers={"Authorization": f"Bearer {admin_token}"})
+        assert modification_id not in [item["id"] for item in excluded.json()]
+    finally:
+        with SessionLocal() as session:
+            _delete_type(session, type_id)
+
+
+def test_selected_types_markup_route_processes_only_requested_ids(client, admin_token, monkeypatch):
+    from app.db.session import SessionLocal
+    from app.services import meter_market_markup
+
+    with SessionLocal() as session:
+        meter_type, _ = _modification(session)
+        session.commit()
+        type_id = meter_type.id
+        mit_number = meter_type.mit_number
+    called = []
+
+    def fake_markup(session, meter_type, **kwargs):
+        called.append(meter_type.mit_number)
+        return {"script": 2, "mapped": 0, "created": 0, "failed": 0}
+
+    monkeypatch.setattr(meter_market_markup, "markup_type", fake_markup)
+    try:
+        response = client.post(
+            "/meter-market/types/markup",
+            json={"type_ids": [type_id]},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert response.status_code == 200, response.text
+        key = response.json()["job"]
+        for _ in range(50):
+            jobs = client.get("/meter-market/catalog-jobs", headers={"Authorization": f"Bearer {admin_token}"}).json()
+            job = next(item for item in jobs if item["key"] == key)
+            if job["state"] != "running":
+                break
+        assert job["state"] == "done", job
+        assert job["result"]["script"] == 2
+        assert called == [mit_number]
+    finally:
+        with SessionLocal() as session:
+            _delete_type(session, type_id)

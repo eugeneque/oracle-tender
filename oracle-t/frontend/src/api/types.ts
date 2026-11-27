@@ -2602,6 +2602,15 @@ export interface MarketModification {
   attributes: Record<string, MarketAttributeMetadata>;
 }
 
+export interface MarketDeviceRow extends MarketModification {
+  mit_number: string;
+  notation: string | null;
+  type_title: string | null;
+  manufacturer: string | null;
+  in_report: boolean;
+  review_status: "new" | "included" | "excluded";
+}
+
 export interface MarketManufacturer {
   id: number;
   name: string;

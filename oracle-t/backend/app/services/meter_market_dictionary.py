@@ -367,6 +367,52 @@ def modifications(db: Session, type_id: int) -> list[dict[str, Any]]:
     return items
 
 
+def devices(
+    db: Session,
+    *,
+    manufacturer_id: int | None = None,
+    search: str | None = None,
+    review: str | None = None,
+    type_ids: list[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Плоская таблица приборов: тип и модификация в одной строке, без вложенных экранов."""
+
+    where = ["true"]
+    params: dict[str, Any] = {}
+    if manufacturer_id is not None:
+        where.append("t.manufacturer_id = :manufacturer_id")
+        params["manufacturer_id"] = manufacturer_id
+    if type_ids is not None:
+        where.append("t.id = ANY(:type_ids)")
+        params["type_ids"] = type_ids
+    if search:
+        where.append("(m.name ILIKE :q OR t.mit_number ILIKE :q OR t.notation ILIKE :q OR mf.name ILIKE :q)")
+        params["q"] = f"%{search}%"
+    if review in ("pending", "unresolved"):
+        where.append(
+            "EXISTS (SELECT 1 FROM meter_market_modification_attribute_reviews r "
+            "WHERE r.modification_id = m.id AND r.status = :review)"
+        )
+        params["review"] = review
+    rows = db.execute(
+        text(
+            "SELECT m.*, t.mit_number, t.notation, t.title AS type_title, t.in_report, t.review_status, "
+            "mf.name AS manufacturer, (SELECT count(*) FROM meter_market_variants v WHERE v.modification_id = m.id) AS variants, "
+            "(SELECT coalesce(sum(mv.count), 0) FROM meter_market_variants v "
+            " JOIN meter_verification_monthly mv ON mv.variant_id = v.id WHERE v.modification_id = m.id) AS count "
+            "FROM meter_market_modifications m JOIN meter_market_types t ON t.id = m.type_id "
+            "LEFT JOIN meter_market_manufacturers mf ON mf.id = t.manufacturer_id "
+            f"WHERE {' AND '.join(where)} ORDER BY mf.name NULLS LAST, t.mit_number, m.name"
+        ),
+        params,
+    ).mappings()
+    items = [dict(r) for r in rows]
+    metadata = characteristics.attributes_for(db, [item["id"] for item in items])
+    for item in items:
+        item["attributes"] = metadata.get(item["id"], {})
+    return items
+
+
 def variants_of(db: Session, modification_id: int) -> list[dict[str, Any]]:
     """Как записывали модификацию и сколько поверок у каждого написания (раздел 6.3 ТЗ)."""
 
