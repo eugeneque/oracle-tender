@@ -25,7 +25,7 @@ export function NewTypesTable({ canEdit, report, fail }: Props) {
     api.get<MarketType[]>(`/meter-market/types?${params}`).then(setTypes).catch((err) => fail(err, "Не удалось загрузить новые типы"));
   }, [search, fail]);
   useEffect(load, [load]);
-  const { jobs, startJob, hasRunning } = useCatalogJobs(load, fail);
+  const { jobs, startJob, cancelJob, hasRunning } = useCatalogJobs(load, fail);
   const ids = (types ?? []).map((type) => type.id);
   const allSelected = ids.length > 0 && ids.every((id) => selected.has(id));
   const decide = async (type: MarketType, status: MarketType["review_status"]) => {
@@ -53,7 +53,7 @@ export function NewTypesTable({ canEdit, report, fail }: Props) {
         <button type="button" className={BUTTON} disabled={!canEdit || hasRunning || selected.size === 0} onClick={() => void startJob("/meter-market/types/markup", { type_ids: [...selected] })}>Разметить выбранные через ИИ</button>
         <button type="button" className={PRIMARY} disabled={!canEdit || hasRunning || ids.length === 0} onClick={() => void startJob("/meter-market/types/markup", { type_ids: ids })}>Разметить все новые через ИИ</button>
       </div>
-      <CatalogJobs jobs={jobs} />
+      <CatalogJobs jobs={jobs} onCancel={cancelJob} />
       {!canEdit && <p className="mb-2 text-xs text-zinc-500">{NO_RIGHT} — у вас просмотр.</p>}
       {!types ? (
         <div className="py-12 text-center text-sm text-zinc-600">Загружаю…</div>

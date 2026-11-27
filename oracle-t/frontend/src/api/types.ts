@@ -2627,6 +2627,7 @@ export interface MarketCatalogJob {
   state: "running" | "done" | "error";
   result: Record<string, unknown> | null;
   error: string | null;
+  progress?: { current: number; total: number | null; mit_number: string | null; failed: number };
 }
 
 export interface MarketGroup {

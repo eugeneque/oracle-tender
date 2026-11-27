@@ -423,7 +423,7 @@ def _run_meter_market_job() -> None:
         from app.services import meter_market_markup
 
         with SessionLocal() as session:
-            stats = meter_market_markup.run(session, since=datetime.now(timezone.utc) - timedelta(days=3))
+            stats = meter_market_markup.run(session, since=datetime.now(timezone.utc) - timedelta(days=3), cell_mode=True)
         if stats.get("mapped") or stats.get("created"):
             logger.info(f"Рынок ПУ, разметка ИИ: {stats}")
     except Exception as exc:  # noqa: BLE001

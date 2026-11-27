@@ -7,7 +7,7 @@ from __future__ import annotations
 import io
 import re
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -469,22 +469,58 @@ _markup_running: set[int] = set()
 _catalog_jobs: dict[str, dict[str, Any]] = {}
 
 
-def _job_start(key: str, label: str) -> None:
-    _catalog_jobs[key] = {"key": key, "label": label, "state": "running", "result": None, "error": None}
+def _job_start(key: str, label: str, *, total: int | None = None) -> None:
+    _catalog_jobs[key] = {
+        "key": key,
+        "label": label,
+        "state": "running",
+        "result": None,
+        "error": None,
+        "progress": {"current": 0, "total": total, "mit_number": None, "failed": 0},
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _job_progress(key: str, *, current: int, total: int, mit_number: str | None, failed: int) -> None:
+    job = _catalog_jobs.get(key)
+    if job is None:
+        return
+    job["progress"] = {"current": current, "total": total, "mit_number": mit_number, "failed": failed}
+    job["updated_at"] = datetime.now(timezone.utc).isoformat()
 
 
 def _job_finish(key: str, *, result: Any = None, error: str | None = None) -> None:
+    previous = _catalog_jobs.get(key, {"key": key})
+    if previous.get("cancel_requested"):
+        error = "Остановлено пользователем"
     _catalog_jobs[key] = {
-        **_catalog_jobs.get(key, {"key": key}),
+        **previous,
         "state": "error" if error else "done",
         "result": result,
         "error": error,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
 @router.get("/catalog-jobs")
 def get_catalog_jobs(_: User = Depends(get_current_user)) -> list[dict[str, Any]]:
     return sorted(_catalog_jobs.values(), key=lambda item: item["key"])
+
+
+@router.post("/catalog-jobs/{job_key}/cancel")
+def cancel_catalog_job(job_key: str, db: Session = Depends(get_db), _: User = Depends(require_analytics)) -> dict[str, Any]:
+    """Остановить пакетную задачу после текущего типа с сохранением частичного результата."""
+
+    job = _catalog_jobs.get(job_key)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+    if job["state"] != "running":
+        raise HTTPException(status_code=409, detail="Задача уже завершена")
+    job["cancel_requested"] = True
+    result = job.get("result") or {"types": 0, "script": 0, "mapped": 0, "created": 0, "failed": 0, "errors": []}
+    _job_finish(job_key, result=result, error="Остановлено пользователем")
+    return _catalog_jobs[job_key]
 
 
 @router.post("/types/markup")
@@ -499,8 +535,19 @@ def post_types_markup(
     from app.services import meter_market_markup
 
     if payload.type_ids is None:
-        type_ids = [row[0] for row in db.execute(text("SELECT id FROM meter_market_types ORDER BY mit_number")).all()]
-        scope = "весь справочник"
+        missing_sql = (
+            "SELECT id FROM meter_market_types t WHERE "
+            + ("EXISTS (SELECT 1 FROM meter_market_variants v WHERE v.type_id = t.id AND v.modification_id IS NULL) "
+               "OR EXISTS (SELECT 1 FROM meter_market_modifications m WHERE m.type_id = t.id AND "
+               "(m.phase IS NULL OR m.design = 'nd' OR m.interface IS NULL OR m.interface = 'н/д')) "
+               "OR EXISTS (SELECT 1 FROM meter_market_modifications m JOIN meter_market_modification_attribute_reviews r "
+               "ON r.modification_id = m.id AND r.status = 'unresolved' WHERE m.type_id = t.id) "
+               "ORDER BY mit_number")
+            if payload.only_missing
+            else "SELECT id FROM meter_market_types ORDER BY mit_number"
+        )
+        type_ids = [row[0] for row in db.execute(text(missing_sql)).all()]
+        scope = "весь справочник с незаполненными характеристиками" if payload.only_missing else "весь справочник"
     else:
         type_ids = [row[0] for row in db.execute(
             text("SELECT id FROM meter_market_types WHERE id = ANY(:ids) ORDER BY mit_number"), {"ids": payload.type_ids}
@@ -510,6 +557,8 @@ def post_types_markup(
         scope = f"выбрано типов: {len(type_ids)}"
     if not type_ids:
         raise HTTPException(status_code=422, detail="Нет типов для разметки")
+    if any(key.startswith("batch-markup:") and job["state"] == "running" for key, job in _catalog_jobs.items()):
+        raise HTTPException(status_code=409, detail="Пакетная разметка уже идёт — дождитесь её завершения")
     key = f"batch-markup:{uuid.uuid4().hex[:12]}"
     log_action(db, component="meter_market", action="types_markup", result="success", details=scope, user_id=user.id)
     db.commit()
@@ -520,29 +569,41 @@ def post_types_markup(
         total: dict[str, Any] = {"types": 0, "script": 0, "mapped": 0, "created": 0, "failed": 0, "errors": []}
         try:
             with SessionLocal() as session:
-                for type_id in type_ids:
+                for index, type_id in enumerate(type_ids, start=1):
+                    if _catalog_jobs.get(key, {}).get("cancel_requested"):
+                        _job_finish(key, result=total, error="Остановлено пользователем")
+                        return
                     meter_type = session.get(MeterMarketType, type_id)
+                    _job_progress(key, current=index - 1, total=len(type_ids), mit_number=meter_type.mit_number, failed=total["failed"])
                     try:
                         if not characteristics.description_text(session, meter_type):
                             characteristics.refresh_description(session, meter_type)
                             session.commit()
-                        stats = meter_market_markup.markup_type(session, meter_type, recheck=True, include_modifications=True)
+                        stats = meter_market_markup.markup_type(
+                            session, meter_type, recheck=True, include_modifications=True, cell_mode=payload.cell_mode
+                        )
                         total["types"] += 1
                         for field in ("script", "mapped", "created", "failed"):
                             total[field] += stats.get(field, 0)
+                        _job_progress(key, current=index, total=len(type_ids), mit_number=meter_type.mit_number, failed=total["failed"])
+                        if stats.get("stopped"):
+                            total["errors"].append(f"{meter_type.mit_number}: ответ модели оборван по лимиту токенов")
+                            _job_finish(key, result=total, error="ИИ обрывает ответ по лимиту токенов. Разметка остановлена, обработанные типы сохранены.")
+                            return
                     except (AiNotConfiguredError, AiQuotaExceededError) as exc:
                         session.rollback()
-                        _job_finish(key, error=str(exc))
+                        _job_finish(key, result=total, error=str(exc))
                         return
                     except Exception as exc:  # noqa: BLE001 - остальные типы продолжают разметку
                         session.rollback()
                         total["failed"] += 1
                         total["errors"].append(f"{meter_type.mit_number}: {exc}")
+                        _job_progress(key, current=index, total=len(type_ids), mit_number=meter_type.mit_number, failed=total["failed"])
             _job_finish(key, result=total)
         except Exception as exc:  # noqa: BLE001
             _job_finish(key, error=str(exc))
 
-    _job_start(key, f"ИИ-разметка: {scope}")
+    _job_start(key, f"ИИ-разметка: {scope}", total=len(type_ids))
     threading.Thread(target=work, name=key, daemon=True).start()
     return {"started": True, "job": key, "types": len(type_ids)}
 
@@ -580,7 +641,7 @@ def post_type_markup(
                     characteristics.refresh_description(session, meter_type)
                     session.commit()
                 stats = meter_market_markup.markup_type(
-                    session, meter_type, recheck=True, include_modifications=True
+                    session, meter_type, recheck=True, include_modifications=True, cell_mode=True
                 )
             logger.info(f"Рынок ПУ, расшифровка {si_type.mit_number}: {stats}")
             _job_finish(key, result=stats)
@@ -661,7 +722,7 @@ def post_manufacturer_markup(
                             characteristics.refresh_description(session, meter_type)
                             session.commit()
                         stats = meter_market_markup.markup_type(
-                            session, meter_type, recheck=True, include_modifications=True
+                            session, meter_type, recheck=True, include_modifications=True, cell_mode=True
                         )
                         total["types"] += 1
                         for field in ("script", "mapped", "created", "failed"):

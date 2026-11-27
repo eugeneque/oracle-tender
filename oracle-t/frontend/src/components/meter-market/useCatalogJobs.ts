@@ -35,5 +35,8 @@ export function useCatalogJobs(onCompleted: () => void, onError: (err: unknown, 
       return null;
     }
   }, [loadJobs, onError]);
-  return { jobs, startJob, hasRunning };
+  const cancelJob = useCallback((key: string) => {
+    void api.post(`/meter-market/catalog-jobs/${key}/cancel`, {}).then(loadJobs).catch((err) => onError(err, "Не удалось остановить задачу"));
+  }, [loadJobs, onError]);
+  return { jobs, startJob, cancelJob, hasRunning };
 }

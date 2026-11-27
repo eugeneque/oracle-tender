@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.adapters.fgis import SiSearchResult
-from app.models.meter_market import MeterMarketManufacturer, MeterMarketModification, MeterMarketType
+from app.models.meter_market import MeterMarketManufacturer, MeterMarketModification, MeterMarketType, MeterMarketVariant
 from app.services import meter_market_characteristics as characteristics
 from app.services import meter_market_dictionary as dictionary
 from app.services import meter_market_interface as interface_rules
@@ -299,3 +299,240 @@ def test_selected_types_markup_route_processes_only_requested_ids(client, admin_
     finally:
         with SessionLocal() as session:
             _delete_type(session, type_id)
+
+
+def test_output_limit_stops_markup_after_two_failed_chunks(db_session, monkeypatch):
+    from app.services import meter_market_markup
+
+    meter_type, _ = _modification(db_session)
+    for index in range(18):
+        variant = MeterMarketVariant(type_id=meter_type.id, raw=f"Написание {index}", norm_key=f"key-{index}")
+        db_session.add(variant)
+        db_session.flush()
+        db_session.execute(
+            text("INSERT INTO meter_verification_monthly (variant_id, month, count) VALUES (:v, '2026-07-01', 10)"),
+            {"v": variant.id},
+        )
+    calls = []
+
+    def fail(db, **kwargs):
+        calls.append(1)
+        raise ValueError("ответ оборван по лимиту токенов")
+
+    monkeypatch.setattr(meter_market_markup, "run_structured", fail)
+    stats = meter_market_markup.markup_type(db_session, meter_type, recheck=True)
+    assert stats["stopped"] == 1 and stats["failed"] == 2
+    assert len(calls) == 2
+
+
+def test_batch_markup_error_contains_partial_result_and_progress(client, admin_token, monkeypatch):
+    from app.db.session import SessionLocal
+    from app.services import meter_market_markup
+
+    with SessionLocal() as session:
+        first, _ = _modification(session)
+        second, _ = _modification(session)
+        session.commit()
+        ids = [first.id, second.id]
+    called = []
+
+    def fake_markup(session, meter_type, **kwargs):
+        called.append(meter_type.mit_number)
+        return {"script": 3, "mapped": 0, "created": 0, "failed": 2, "stopped": 1}
+
+    monkeypatch.setattr(meter_market_markup, "markup_type", fake_markup)
+    try:
+        response = client.post(
+            "/meter-market/types/markup",
+            json={"type_ids": ids},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert response.status_code == 200, response.text
+        key = response.json()["job"]
+        for _ in range(50):
+            jobs = client.get("/meter-market/catalog-jobs", headers={"Authorization": f"Bearer {admin_token}"}).json()
+            job = next(item for item in jobs if item["key"] == key)
+            if job["state"] != "running":
+                break
+        assert job["state"] == "error", job
+        assert job["result"]["types"] == 1 and job["result"]["script"] == 3
+        assert job["progress"]["current"] == 1 and job["progress"]["total"] == 2
+        assert len(called) == 1
+    finally:
+        with SessionLocal() as session:
+            for type_id in ids:
+                _delete_type(session, type_id)
+
+
+def test_full_markup_only_selects_types_with_missing_attributes(client, admin_token, monkeypatch):
+    from app.db.session import SessionLocal
+    from app.services import meter_market_markup
+
+    with SessionLocal() as session:
+        complete_type, complete = _modification(session)
+        complete.phase = "1ф"
+        complete.design = "cabinet"
+        complete.interface = "RS"
+        missing_type, missing = _modification(session)
+        missing.design = "nd"
+        session.commit()
+        ids = [complete_type.id, missing_type.id]
+        missing_mit = missing_type.mit_number
+    called = []
+
+    def fake_markup(session, meter_type, **kwargs):
+        called.append(meter_type.mit_number)
+        return {"script": 0, "mapped": 0, "created": 0, "failed": 0}
+
+    monkeypatch.setattr(meter_market_markup, "markup_type", fake_markup)
+    try:
+        response = client.post(
+            "/meter-market/types/markup",
+            json={"type_ids": None},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert response.status_code == 200, response.text
+        key = response.json()["job"]
+        for _ in range(50):
+            jobs = client.get("/meter-market/catalog-jobs", headers={"Authorization": f"Bearer {admin_token}"}).json()
+            job = next(item for item in jobs if item["key"] == key)
+            if job["state"] != "running":
+                break
+        assert job["state"] == "done", job
+        assert called == [missing_mit]
+    finally:
+        with SessionLocal() as session:
+            for type_id in ids:
+                _delete_type(session, type_id)
+
+
+def test_cancel_batch_markup_stops_with_partial_result(client, admin_token, monkeypatch):
+    import time
+
+    from app.db.session import SessionLocal
+    from app.services import meter_market_markup
+
+    with SessionLocal() as session:
+        first, _ = _modification(session)
+        second, _ = _modification(session)
+        session.commit()
+        ids = [first.id, second.id]
+    called = []
+
+    def fake_markup(session, meter_type, **kwargs):
+        called.append(meter_type.mit_number)
+        time.sleep(0.05)
+        return {"script": 1, "mapped": 0, "created": 0, "failed": 0}
+
+    monkeypatch.setattr(meter_market_markup, "markup_type", fake_markup)
+    try:
+        response = client.post(
+            "/meter-market/types/markup",
+            json={"type_ids": ids},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        key = response.json()["job"]
+        cancelled = client.post(f"/meter-market/catalog-jobs/{key}/cancel", headers={"Authorization": f"Bearer {admin_token}"})
+        assert cancelled.status_code == 200, cancelled.text
+        for _ in range(50):
+            jobs = client.get("/meter-market/catalog-jobs", headers={"Authorization": f"Bearer {admin_token}"}).json()
+            job = next(item for item in jobs if item["key"] == key)
+            if job["state"] != "running":
+                break
+        assert job["state"] == "error" and job["error"] == "Остановлено пользователем"
+        assert job["result"]["types"] <= 1
+        assert len(called) <= 1
+    finally:
+        with SessionLocal() as session:
+            for type_id in ids:
+                _delete_type(session, type_id)
+
+
+def _variant_with_count(db_session, meter_type, modification=None):
+    variant = MeterMarketVariant(
+        type_id=meter_type.id,
+        raw=FOBOS_RAW,
+        norm_key=f"variant-{uuid.uuid4().hex}",
+        modification_id=modification.id if modification else None,
+    )
+    db_session.add(variant)
+    db_session.flush()
+    db_session.execute(
+        text("INSERT INTO meter_verification_monthly (variant_id, month, count) VALUES (:v, '2026-07-01', 10)"),
+        {"v": variant.id},
+    )
+    return variant
+
+
+def test_cell_mode_requests_only_missing_fields_and_preserves_existing_values(db_session, monkeypatch):
+    from app.services import meter_market_markup
+
+    meter_type, modification = _modification(db_session)
+    meter_type.description_type_text = "Текст без структуры обозначения"
+    modification.phase = "1ф"
+    modification.interface = "RS"
+    modification.mpi_years = 16
+    modification.smart_890 = True
+    modification.design = "nd"
+    variant = _variant_with_count(db_session, meter_type, modification)
+    seen = {}
+
+    def fake(db, *, system_prompt, user_text, response_model, temperature):
+        seen["system"] = system_prompt
+        seen["text"] = user_text
+        return response_model(
+            items=[{
+                "id": variant.id,
+                "field": "design",
+                "value": "cabinet",
+                "confidence": "high",
+                "reason": "M(1) — шкафное исполнение",
+                "evidence": [{"code": "M(1)", "page": "6", "quote": "шкафное исполнение"}],
+            }]
+        )
+
+    monkeypatch.setattr(meter_market_markup, "run_structured", fake)
+    stats = meter_market_markup.markup_type(db_session, meter_type, recheck=True, cell_mode=True)
+    assert stats["corrected"] == 1
+    assert (modification.phase, modification.interface, modification.design) == ("1ф", "RS", "cabinet")
+    assert seen["system"] == meter_market_markup.CELL_SYSTEM_PROMPT
+    requested = seen["text"].split("Заполни ТОЛЬКО эти ячейки: ", 1)[1].splitlines()[0]
+    assert requested == "design"
+    metadata = characteristics.attributes_for(db_session, [modification.id])[modification.id]
+    assert metadata["design"]["status"] == "pending" and metadata["design"]["evidence"][0]["page"] == "6"
+
+
+def test_cell_mode_first_maps_spelling_then_fills_only_requested_cells(db_session, monkeypatch):
+    from app.services import meter_market_markup
+
+    meter_type, _ = _modification(db_session)
+    meter_type.description_type_text = "Текст без структуры обозначения и без фазности"
+    variant = _variant_with_count(db_session, meter_type)
+    calls = []
+
+    def fake(db, *, system_prompt, user_text, response_model, temperature):
+        calls.append(response_model.__name__)
+        if response_model.__name__ == "MappingAnswer":
+            return response_model(items=[{"id": variant.id, "name": "ФОБОС 1 IQOG(2)LM(1)-C", "confidence": "high", "reason": "Коды совпали"}])
+        return response_model(items=[{
+            "id": variant.id,
+            "field": "design",
+            "value": "cabinet",
+            "confidence": "high",
+            "reason": "M(1)",
+            "evidence": [],
+        }])
+
+    monkeypatch.setattr(meter_market_markup, "run_structured", fake)
+    stats = meter_market_markup.markup_type(db_session, meter_type, recheck=True, cell_mode=True)
+    modification = db_session.scalar(
+        select(MeterMarketModification).where(
+            MeterMarketModification.type_id == meter_type.id,
+            MeterMarketModification.name == "ФОБОС 1 IQOG(2)LM(1)-C",
+        )
+    )
+    assert stats["created"] == 1 and stats["mapped"] == 1 and stats["corrected"] == 1
+    assert calls == ["MappingAnswer", "CellAnswer"]
+    assert modification.design == "cabinet"
+    assert modification.phase is None and modification.interface is None and modification.smart_890 is None
+    assert modification.mpi_years is None

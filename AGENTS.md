@@ -92,7 +92,13 @@ oracle-tender-main/            ← корень git-репозитория
   подтверждения/исправления/отклонения в «Производители и приборы», ручные значения защищены
   метаданными `meter_market_modification_attribute_reviews` (131). Основной экран и «Новые типы» —
   плоские таблицы `DeviceCatalog`/`NewTypesTable`, не вложенные карточки; полная и выборочная
-  ИИ-разметка — `POST /meter-market/types/markup` (`type_ids`, null = весь справочник по кнопке) (132).
+  ИИ-разметка — `POST /meter-market/types/markup` (`type_ids`, null = весь справочник по кнопке;
+  `only_missing=true` по умолчанию — только с пробелами/unresolved) (132). Пачки по 8 написаний,
+  после двух обрывов ответа по output tokens задача останавливается с частичным результатом;
+  статус `CatalogJob.progress` показывает X из Y, ГРСИ и ошибки; остановка пользователем —
+  `POST /catalog-jobs/{key}/cancel` после текущего типа (133). «Опрос недостающих данных» —
+  `cell_mode=true`: `MappingAnswer` для привязки, затем `CellAnswer` только по пустым полям;
+  «Полный опрос» — `only_missing=false`, `cell_mode=false` (134).
 - НМЦК с НДС и без НДС из документации — `price_vat_service` (кодом, без ИИ; `tenders.price_vat`,
   блок в «Обзоре», колонки Excel); разделы 106, 124.
 - Обновление из интерфейса («Система → Обновление», только админ) — `system_update_service`,

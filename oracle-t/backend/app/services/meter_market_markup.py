@@ -66,7 +66,9 @@ from app.services.meter_market_dictionary import remap_auto
 from app.services import meter_market_characteristics as characteristics
 from app.services.meter_market_normalize import modification_key, normalize_interface
 
-CHUNK = 40
+CHUNK = 8  # Qwen обрывал JSON с доказательствами на 40 написаниях (28.11.2026, журнал 00:27)
+PROMPT_MODIFICATIONS_LIMIT = 80
+OUTPUT_LIMIT_FAILURES_STOP = 2
 NO_INTERFACE = "без интерфейса"
 
 SYSTEM_PROMPT = """\
@@ -135,6 +137,53 @@ class SpellingMarkup(pydantic.BaseModel):
 
 class MarkupAnswer(pydantic.BaseModel):
     items: list[SpellingMarkup]
+
+
+class MappingItem(pydantic.BaseModel):
+    id: int
+    modification_id: int | None = None
+    name: str = ""
+    confidence: str = "medium"
+    reason: str = ""
+
+
+class MappingAnswer(pydantic.BaseModel):
+    items: list[MappingItem]
+
+
+class CellItem(pydantic.BaseModel):
+    id: int
+    field: str
+    value: str = ""
+    confidence: str = "medium"
+    reason: str = ""
+    evidence: list[dict[str, Any]] = pydantic.Field(default_factory=list)
+
+
+class CellAnswer(pydantic.BaseModel):
+    items: list[CellItem]
+
+
+MAPPING_SYSTEM_PROMPT = """\
+Ты — эксперт по приборам учёта. Нужна ТОЛЬКО привязка написания к модификации, без характеристик.
+Верни id написания, modification_id существующей модификации или каноническое name новой.
+Не возвращай phase, design, interface, smart_890, mpi_years и evidence. Название содержит только
+значимые коды исполнения, без тока, напряжения и класса точности. confidence: high/medium/low;
+low используй при любой неоднозначности. reason — коротко, какие коды помогли сопоставлению.
+"""
+
+CELL_SYSTEM_PROMPT = """\
+Ты — эксперт по приборам учёта. Заполняешь ТОЛЬКО указанные пустые ячейки, а не всю строку.
+Для каждой ячейки (id, field) верни value, confidence (high/medium/low), короткий reason и
+доказательства evidence [{"code": "код из обозначения", "page": "лист или null", "quote": "цитата"}].
+Не возвращай другие поля и не переписывай существующие значения. Допустимые значения:
+phase — "1ф" или "3ф"; design — "din", "cabinet", "split", "nd";
+interface — каналы через " и " ("GSM и RS", "NB-Fi"), "без интерфейса" или "н/д";
+mpi_years — целое число лет; smart_890 — "yes", "no" или "unknown".
+Если уверенности нет — confidence low и value пустым. Не выдумывай коды и номера листов.
+"""
+
+CELL_FIELDS = ("phase", "design", "interface", "mpi_years", "smart_890")
 
 
 def designation_excerpt(db: Session, mit_number: str) -> str | None:
@@ -387,6 +436,180 @@ def apply_answer(
     return stats
 
 
+def _cell_user_text(
+    meter_type: MeterMarketType,
+    modifications: list[MeterMarketModification],
+    tasks: list[dict[str, Any]],
+    description: str | None,
+) -> str:
+    """Только недостающие ячейки и контекст для них, без запроса полной строки."""
+
+    text = _user_text(meter_type, modifications, [task["spelling"] for task in tasks], description)
+    fields = sorted({task["field"] for task in tasks})
+    current = {mod.id: mod.name for mod in modifications}
+    lines = [text, "", f"Заполни ТОЛЬКО эти ячейки: {', '.join(fields)}", "Ячейки (id; field; написание; модификация):"]
+    for task in tasks:
+        spelling = task["spelling"]
+        lines.append(
+            f"- id={spelling['id']}; field={task['field']}; {spelling['raw']}; "
+            f"{current.get(spelling.get('current'), 'не привязано')}"
+        )
+    return "\n".join(lines)
+
+
+def _missing_cells(db: Session, spellings: list[dict[str, Any]], modifications: list[MeterMarketModification]) -> list[dict[str, Any]]:
+    by_id = {mod.id: mod for mod in modifications}
+    reviews = characteristics.attributes_for(db, [mod.id for mod in modifications]) if modifications else {}
+    tasks = []
+    for spelling in spellings:
+        modification = by_id.get(spelling.get("current"))
+        if modification is None:
+            continue
+        metadata = reviews.get(modification.id, {})
+        for field in CELL_FIELDS:
+            value = getattr(modification, field)
+            unknown = value in characteristics.UNKNOWN_VALUES or metadata.get(field, {}).get("status") == "unresolved"
+            if unknown:
+                tasks.append({"spelling": spelling, "field": field})
+    return tasks
+
+
+def _apply_mapping_answer(
+    db: Session,
+    meter_type: MeterMarketType,
+    spellings: list[dict[str, Any]],
+    answer: MappingAnswer,
+    *,
+    recheck: bool,
+) -> dict[str, int]:
+    """Лёгкая привязка без запроса атрибутов; значения добираются затем по ячейкам."""
+
+    stats = {"mapped": 0, "created": 0, "skipped": 0}
+    by_id = {spelling["id"]: spelling for spelling in spellings}
+    modifications = db.scalars(select(MeterMarketModification).where(MeterMarketModification.type_id == meter_type.id)).all()
+    by_key = {modification_key(mod.name): mod for mod in modifications}
+    own_ids = {mod.id for mod in modifications}
+    for item in answer.items:
+        spelling = by_id.get(item.id)
+        if spelling is None:
+            continue
+        if item.confidence.strip().lower() == "low":
+            stats["skipped"] += 1
+            continue
+        target = None
+        if item.modification_id is not None and item.modification_id in own_ids:
+            target = db.get(MeterMarketModification, item.modification_id)
+        elif item.name.strip():
+            name = re.sub(r"\s+", " ", item.name).strip()[:500]
+            target = by_key.get(modification_key(name))
+            if target is None and not _foreign_modification(db, meter_type, name):
+                target = MeterMarketModification(
+                    type_id=meter_type.id,
+                    name=name,
+                    comment=f"Привязка ИИ по обозначению: {(item.reason or '').strip()}"[:1000],
+                )
+                db.add(target)
+                db.flush()
+                by_key[modification_key(name)] = target
+                own_ids.add(target.id)
+                stats["created"] += 1
+        if target is None:
+            stats["skipped"] += 1
+            continue
+        spelling["current"] = target.id
+        scope = "mapped_by IS DISTINCT FROM 'manual'" if recheck else "modification_id IS NULL"
+        result = db.execute(
+            sql_text(
+                "UPDATE meter_market_variants SET modification_id = :m, mapped_by = :by "
+                f"WHERE type_id = :t AND {scope} AND (id = :v OR norm_key = :k)"
+            ),
+            {"m": target.id, "by": MappedBy.AI.value, "t": meter_type.id, "v": spelling["id"], "k": spelling["norm_key"]},
+        )
+        stats["mapped"] += result.rowcount or 0
+    db.flush()
+    return stats
+
+
+def _cell_value(field: str, value: str) -> Any:
+    if field == "phase":
+        return value if value in ("1ф", "3ф") else None
+    if field == "design":
+        return _design(value)
+    if field == "interface":
+        return _interface(value)
+    if field == "mpi_years":
+        match = re.search(r"\d+", value or "")
+        return int(match.group()) if match else None
+    if field == "smart_890":
+        return {"yes": True, "no": False}.get(value.strip().lower())
+    return None
+
+
+def _apply_cell_answer(
+    db: Session,
+    meter_type: MeterMarketType,
+    tasks: list[dict[str, Any]],
+    answer: CellAnswer,
+) -> dict[str, int]:
+    """Применяет ответ только к запрошенным ячейкам; остальные поля строки не меняются."""
+
+    stats = {"corrected": 0, "skipped": 0}
+    expected = {(task["spelling"]["id"], task["field"]): task for task in tasks}
+    modifications = {
+        mod.id: mod
+        for mod in db.scalars(
+            select(MeterMarketModification).where(MeterMarketModification.type_id == meter_type.id)
+        ).all()
+    }
+    for item in answer.items:
+        key = (item.id, item.field)
+        task = expected.get(key)
+        if task is None:
+            continue
+        modification = modifications.get(task["spelling"].get("current"))
+        if modification is None:
+            continue
+        if item.confidence.strip().lower() == "low":
+            characteristics.mark_unresolved(
+                db,
+                modification,
+                item.field,
+                source=characteristics.AttributeSource.AI.value,
+                reason=(item.reason or "ИИ не смог определить значение ячейки").strip(),
+                confidence="low",
+            )
+            stats["skipped"] += 1
+            continue
+        value = _cell_value(item.field, item.value)
+        if value is None or (item.field == "design" and value == "nd") or (item.field == "interface" and value == "н/д"):
+            characteristics.mark_unresolved(
+                db,
+                modification,
+                item.field,
+                source=characteristics.AttributeSource.AI.value,
+                reason=(item.reason or "ИИ не смог определить значение ячейки").strip(),
+                confidence=item.confidence,
+            )
+            stats["skipped"] += 1
+            continue
+        changed = characteristics.apply_attribute(
+            db,
+            modification,
+            item.field,
+            value,
+            source=characteristics.AttributeSource.AI.value,
+            status=characteristics.AttributeReviewStatus.PENDING.value,
+            reason=(item.reason or "").strip(),
+            evidence=item.evidence,
+            confidence=item.confidence,
+            only_if_unknown=True,
+        )
+        if changed:
+            stats["corrected"] += 1
+    db.flush()
+    return stats
+
+
 def _pending(
     db: Session, type_id: int, min_count: int, since: datetime | None = None, *, recheck: bool = False
 ) -> list[dict[str, Any]]:
@@ -420,6 +643,7 @@ def markup_type(
     since: datetime | None = None,
     recheck: bool = False,
     include_modifications: bool = False,
+    cell_mode: bool = False,
 ) -> dict[str, int]:
     stats = {"mapped": 0, "created": 0, "skipped": 0, "corrected": 0, "failed": 0, "script": 0}
     stats["mapped"] += remap_auto(db, meter_type.id)
@@ -447,6 +671,7 @@ def markup_type(
         if full_description
         else None
     )
+    output_limit_failures = 0
     for start in range(0, len(spellings), CHUNK):
         chunk = spellings[start : start + CHUNK]
         mods = db.scalars(
@@ -454,18 +679,53 @@ def markup_type(
             .where(MeterMarketModification.type_id == meter_type.id)
             .order_by(MeterMarketModification.name)
         ).all()
+        current_ids = {spelling.get("current") for spelling in chunk}
+        current_mods = [mod for mod in mods if mod.id in current_ids]
+        mods = (current_mods + [mod for mod in mods if mod.id not in current_ids])[:PROMPT_MODIFICATIONS_LIMIT]
         try:
-            answer = run_structured(
-                db,
-                system_prompt=SYSTEM_PROMPT,
-                user_text=_user_text(meter_type, list(mods), chunk, description),
-                response_model=MarkupAnswer,
-                temperature=0.0,
-            )
-            for key, value in apply_answer(db, meter_type, chunk, answer, recheck=recheck).items():
-                stats[key] += value
+            if cell_mode:
+                unmapped = [spelling for spelling in chunk if spelling.get("current") is None]
+                if unmapped:
+                    mapping_answer = run_structured(
+                        db,
+                        system_prompt=MAPPING_SYSTEM_PROMPT,
+                        user_text=_user_text(meter_type, list(mods), unmapped, description),
+                        response_model=MappingAnswer,
+                        temperature=0.0,
+                    )
+                    for key, value in _apply_mapping_answer(db, meter_type, unmapped, mapping_answer, recheck=recheck).items():
+                        stats[key] += value
+                    db.commit()
+                    stats["script"] += characteristics.apply_script_to_type(db, meter_type, full_description)
+                    mods = db.scalars(
+                        select(MeterMarketModification)
+                        .where(MeterMarketModification.type_id == meter_type.id)
+                        .order_by(MeterMarketModification.name)
+                    ).all()
+                tasks = _missing_cells(db, chunk, list(mods))
+                if tasks:
+                    cell_answer = run_structured(
+                        db,
+                        system_prompt=CELL_SYSTEM_PROMPT,
+                        user_text=_cell_user_text(meter_type, list(mods), tasks, description),
+                        response_model=CellAnswer,
+                        temperature=0.0,
+                    )
+                    for key, value in _apply_cell_answer(db, meter_type, tasks, cell_answer).items():
+                        stats[key] += value
+            else:
+                answer = run_structured(
+                    db,
+                    system_prompt=SYSTEM_PROMPT,
+                    user_text=_user_text(meter_type, list(mods), chunk, description),
+                    response_model=MarkupAnswer,
+                    temperature=0.0,
+                )
+                for key, value in apply_answer(db, meter_type, chunk, answer, recheck=recheck).items():
+                    stats[key] += value
             stats["script"] += characteristics.apply_script_to_type(db, meter_type, full_description)
             db.commit()
+            output_limit_failures = 0
         except (AiNotConfiguredError, AiQuotaExceededError):
             # Ключа нет, отклонён или лимит исчерпан — следующие пачки упадут так же; ночное
             # задание не должно сотню раз писать одну и ту же ошибку в журнал ИИ.
@@ -475,6 +735,13 @@ def markup_type(
             db.rollback()
             stats["failed"] += 1
             logger.warning(f"Разметка ИИ: тип {meter_type.mit_number} не размечен: {exc}")
+            if "оборван по лимиту токенов" in str(exc).lower():
+                output_limit_failures += 1
+                if output_limit_failures >= OUTPUT_LIMIT_FAILURES_STOP:
+                    stats["stopped"] = 1
+                    break
+            else:
+                output_limit_failures = 0
     return stats
 
 
@@ -485,6 +752,7 @@ def run(
     min_count: int = 1,
     since: datetime | None = None,
     recheck: bool = False,
+    cell_mode: bool = False,
 ) -> dict[str, int]:
     """Размечает неразмеченные написания типов отчёта (или только `mit_numbers`; `since` — только
     новые написания, так зовёт ночное задание; `recheck` — расшифровать заново и привязанные)."""
@@ -508,7 +776,7 @@ def run(
             continue
         total["types"] += 1
         try:
-            done = markup_type(db, meter_type, min_count=min_count, since=since, recheck=recheck)
+            done = markup_type(db, meter_type, min_count=min_count, since=since, recheck=recheck, cell_mode=cell_mode)
         except (AiNotConfiguredError, AiQuotaExceededError) as exc:
             logger.warning(f"Разметка ИИ остановлена: {exc}")
             total["failed"] += 1
@@ -516,6 +784,9 @@ def run(
             break
         for key, value in done.items():
             total[key] += value
+        if done.get("stopped"):
+            total["stopped"] = 1
+            break
     return total
 
 

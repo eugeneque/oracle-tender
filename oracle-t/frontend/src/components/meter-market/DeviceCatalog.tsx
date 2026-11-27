@@ -45,7 +45,7 @@ export function DeviceCatalog({ canEdit, report, fail }: Props) {
     load();
     loadManufacturers();
   }, [load, loadManufacturers]);
-  const { jobs, startJob, hasRunning } = useCatalogJobs(refresh, fail);
+  const { jobs, startJob, cancelJob, hasRunning } = useCatalogJobs(refresh, fail);
   const selectedManufacturer = manufacturers.find((item) => item.id === manufacturerId) ?? null;
   const visibleManufacturers = manufacturers.filter((item) => item.name.toLowerCase().includes(manufacturerSearch.toLowerCase()));
   const typeIds = [...new Set((rows ?? []).map((row) => row.type_id))];
@@ -54,8 +54,13 @@ export function DeviceCatalog({ canEdit, report, fail }: Props) {
     setSelected(allVisibleSelected ? new Set() : new Set(typeIds));
   };
   const markupAll = () => {
-    if (window.confirm("Запустить полную разметку справочника? Сначала сработает скрипт, затем ИИ только для незаполненных полей. Ручные значения сохранятся.")) {
-      void startJob("/meter-market/types/markup", { type_ids: null });
+    if (window.confirm("Запустить полный опрос справочника со схемой ответа на всю строку? Ручные значения сохранятся, но расход токенов будет выше.")) {
+      void startJob("/meter-market/types/markup", { type_ids: null, only_missing: false, cell_mode: false });
+    }
+  };
+  const markupMissing = () => {
+    if (window.confirm("Опросить только недостающие ячейки? Сначала сработает скрипт, затем ИИ заполнит только пустые характеристики. Ручные значения сохранятся.")) {
+      void startJob("/meter-market/types/markup", { type_ids: null, only_missing: true, cell_mode: true });
     }
   };
   const markupSelected = () => {
@@ -64,7 +69,7 @@ export function DeviceCatalog({ canEdit, report, fail }: Props) {
   return (
     <Panel
       title="Производители и приборы"
-      subtitle="Каждая строка — модификация прибора. Отметьте типы для выборочной разметки или запустите полную. Сначала работает скрипт, затем ИИ; ручные значения сохраняются."
+      subtitle="Каждая строка — модификация прибора. «Опрос недостающих данных» вызывает ИИ только по пустым ячейкам; «Полный опрос» использует полную схему строки. Ручные значения сохраняются."
       actions={
         <form className="flex flex-wrap gap-2" onSubmit={(e) => { e.preventDefault(); setSearch(draftSearch); }}>
           <label className="relative">
@@ -102,9 +107,10 @@ export function DeviceCatalog({ canEdit, report, fail }: Props) {
             <span className="mr-auto text-xs text-zinc-400">{selectedManufacturer ? `${selectedManufacturer.name}: приборов ${selectedManufacturer.modifications}` : `Строк в таблице: ${rows?.length ?? "…"}`}{selected.size > 0 && ` · выбрано типов ${selected.size}`}</span>
             {selectedManufacturer && <button type="button" className={BUTTON} disabled={!canEdit || hasRunning} onClick={() => void startJob(`/meter-market/manufacturers/${selectedManufacturer.id}/sync`)}>Синхронизировать с ФГИС</button>}
             <button type="button" className={BUTTON} disabled={!canEdit || hasRunning || selected.size === 0} title={selected.size ? "Разметить только типы, отмеченные в таблице" : "Сначала отметьте типы"} onClick={markupSelected}>Разметить выбранные через ИИ</button>
-            <button type="button" className={PRIMARY} disabled={!canEdit || hasRunning} onClick={markupAll}>Разметить всё через ИИ</button>
+            <button type="button" className={BUTTON} disabled={!canEdit || hasRunning} onClick={markupMissing}>Опрос недостающих данных</button>
+            <button type="button" className={PRIMARY} disabled={!canEdit || hasRunning} onClick={markupAll}>Полный опрос</button>
           </div>
-          <CatalogJobs jobs={jobs} />
+          <CatalogJobs jobs={jobs} onCancel={cancelJob} />
           {!canEdit && <p className="text-xs text-zinc-500">{NO_RIGHT} — у вас просмотр.</p>}
           {!rows ? (
             <div className="py-12 text-center text-sm text-zinc-600">Загружаю таблицу…</div>

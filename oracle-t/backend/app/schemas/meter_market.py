@@ -58,6 +58,10 @@ class TypesMarkupIn(BaseModel):
     """Выбранные типы для ИИ-разметки; null — весь справочник по явной кнопке пользователя."""
 
     type_ids: list[int] | None = Field(default=None, min_length=1)
+    # Полная разметка — только с пробелами; выбранные типы можно перепроверить и полностью.
+    only_missing: bool = True
+    # true — ИИ только по пустым ячейкам; false — полная схема строки.
+    cell_mode: bool = True
 
 
 class TypeSmartIn(BaseModel):
