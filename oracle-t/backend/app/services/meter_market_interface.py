@@ -90,6 +90,11 @@ class CodeTable:
             return f"{base}/n", self.family[base]
         if number and base in self.exact:
             return base, self.exact[base]
+        parenthesized = re.fullmatch(r"([A-Z0-9]+)\(\d+\)", token)
+        if parenthesized:
+            key = parenthesized.group(1) + "()"
+            if key in self.family:
+                return parenthesized.group(1) + "(n)", self.family[key]
         return None
 
 
@@ -119,6 +124,8 @@ def parse_table(source: str | None) -> CodeTable:
         entry = CodeEntry(code, label, review, comment.strip())
         if code.endswith("/N"):
             table.family[code[:-2]] = entry
+        elif code.endswith("(N)"):
+            table.family[code[:-3] + "()"] = entry
         else:
             table.exact[code] = entry
     return table
@@ -180,6 +187,28 @@ def interface_tokens(raw: str) -> list[str]:
     return tokens
 
 
+def _embedded_parenthesized(raw: str, table: CodeTable) -> list[tuple[str, str, CodeEntry]]:
+    """Коды вида G(2) внутри склеенного обозначения IQOG(2)LM(1).
+
+    Ищутся только явные скобочные коды из словаря конкретного типа: произвольные буквы внутри
+    написания интерфейсами не считаются.
+    """
+
+    normalized = raw.upper().translate(_CYR_TO_LAT)
+    found: list[tuple[str, str, CodeEntry]] = []
+    for code, entry in table.exact.items():
+        if "(" in code and code in normalized:
+            found.append((code, code, entry))
+    for key, entry in table.family.items():
+        if not key.endswith("()"):
+            continue
+        prefix = key[:-2]
+        match = re.search(re.escape(prefix) + r"\(\d+\)", normalized)
+        if match:
+            found.append((match.group(0), prefix + "(n)", entry))
+    return found
+
+
 def decode(raw: str | None, table: CodeTable) -> Decision:
     """Интерфейс одного написания по таблице кодов типа."""
 
@@ -191,6 +220,8 @@ def decode(raw: str | None, table: CodeTable) -> Decision:
             found.append((token, *match))
         elif _LOOKS_LIKE.match(token):
             unknown.append(token)
+    known = {(token, code) for token, code, _ in found}
+    found.extend(item for item in _embedded_parenthesized(raw or "", table) if (item[0], item[1]) not in known)
     codes = tuple(dict.fromkeys(t for t, _, _ in found)) + tuple(unknown)
     if not found and not unknown:
         return Decision(NO_INTERFACE, None, None, NOTE_NO_CODE)
@@ -228,9 +259,19 @@ def decode(raw: str | None, table: CodeTable) -> Decision:
 
 # ── Черновик таблицы из описания типа ──────────────────────────────────────────────────────
 
-_BLOCK_START = re.compile(r"(основной|дополнительн\w*)\s+интерфейс", re.IGNORECASE)
+_BLOCK_START = re.compile(
+    r"(основной|дополнительн\w*)\s+интерфейс|наличие\s+(?:дополнительных\s+)?интерфейсов\s+связи",
+    re.IGNORECASE,
+)
 _BLOCK_END = re.compile(r"поддерживаемые протоколы|дополнительные функции|протокол|модификация\s+N", re.IGNORECASE)
-_LINE = re.compile(r"^\s*(?:\d+\s+)?([A-Z0-9][A-Za-z0-9/]{1,12})\s+[–—-]\s+(.+)$")
+_LINE = re.compile(
+    r"^\s*(?:\d+\s+)?(?:[–—-]\s*)?(?:модификация\s+)?([A-Z0-9][A-Za-z0-9/()]{0,20}\*{0,2})\s+[–—-]\s+(.+)$",
+    re.IGNORECASE,
+)
+_PAREN_RANGE = re.compile(
+    r"([A-Z])\((\d+)\)\s*[–—-]\s*\1\((\d+)\)(?:\s*,\s*\1\((\d+)\))?\s*[–—-]\s+(.+)$",
+    re.IGNORECASE,
+)
 _DESCRIPTION_LABELS = (
     (re.compile(r"RS-?485", re.I), "RS"),
     (re.compile(r"RS-?232", re.I), "RS-232"),
@@ -251,35 +292,59 @@ _DESCRIPTION_LABELS = (
 
 
 def codes_from_description(description: str | None) -> str:
-    """Черновик таблицы кодов из блоков «Основной / Дополнительные интерфейсы» описания типа.
-    Описание называет вид канала, а не модуль: «радиоинтерфейс 2400 МГц» — ZigBee или Bluetooth, «GSM/GPRS
-    G/n» — у НАРТИС G/5 оказался NB-IoT. Такие строки помечены «?» (на согласование)."""
+    """Черновик таблицы кодов из блоков интерфейсов описания типа.
+
+    Помимо позиционных `RS485` и `G/n` понимает оформление «модификация R» и перечисления
+    `G(1) – G(5), G(6) – GSM …, NB-IoT соответственно`. Неоднозначный канал по-прежнему
+    помечается «?», а исходная формулировка сохраняется комментарием для проверки.
+    """
 
     lines: list[str] = []
     seen: set[str] = set()
     inside = False
-    for line in (description or "").splitlines():
+
+    def append(code: str, what: str, forced_label: str | None = None) -> None:
+        if re.search(r"оптическ\w*\s+порт|показатели\s+качества|контрол\w*\s+силы\s+тока", what, re.I):
+            return
+        code = _normalize_code(code).replace("/N", "/n").replace("*", "")
+        if code in seen:
+            return
+        seen.add(code)
+        label = forced_label or next((lab for pattern, lab in _DESCRIPTION_LABELS if pattern.search(what)), "?")
+        if label is None:
+            lines.append(f"{code} = ?  # {FROM_DESCRIPTION}: {what}; ZigBee или Bluetooth — по РЭ")
+        elif code.endswith(("/n", "(n)")) and label == "GSM":
+            lines.append(f"{code} = ? {label}  # {FROM_DESCRIPTION}: {what}; канал зависит от номера модуля")
+        else:
+            lines.append(f"{code} = {label}  # {FROM_DESCRIPTION}: {what}")
+
+    source_lines = (description or "").splitlines()
+    for line_index, line in enumerate(source_lines):
         if _BLOCK_START.search(line):
             inside = True
         elif inside and _BLOCK_END.search(line):
             inside = False
         if not inside:
             continue
-        match = _LINE.match(line.split(":", 1)[-1] if _BLOCK_START.search(line) else line)
-        if not match:
+        candidate = line.split(":", 1)[-1] if _BLOCK_START.search(line) else line
+        candidate = re.sub(r"^\s*(?:\d+\s+)?[–—-]\s*", "", candidate)
+        candidate = re.sub(r"^модификация\s+", "", candidate, flags=re.IGNORECASE).strip()
+        ranged = _PAREN_RANGE.match(candidate)
+        if ranged:
+            letter, first, last, extra, what = ranged.groups()
+            what = re.split(r",\s*где\b", what)[0].strip()
+            if line_index + 1 < len(source_lines) and re.match(r"\s*NB[- ]?IoT\s+соответственно", source_lines[line_index + 1], re.I):
+                what += " " + source_lines[line_index + 1].strip()
+            numbers = list(range(int(first), int(last) + 1)) + ([int(extra)] if extra else [])
+            for number in numbers:
+                forced = "GSM" if re.search(r"GSM", what, re.I) else None
+                if extra and number == int(extra) and "соответственно" in what and re.search(r"NB[- ]?IoT", what, re.I):
+                    forced = "NB-IoT"
+                append(f"{letter}({number})", what, forced)
             continue
-        code = _normalize_code(match.group(1)).replace("/N", "/n")
-        what = re.split(r",\s*где\b", match.group(2))[0].strip()
-        if code in seen:
-            continue
-        seen.add(code)
-        label = next((lab for pattern, lab in _DESCRIPTION_LABELS if pattern.search(what)), "?")
-        if label is None:
-            lines.append(f"{code} = ?  # {FROM_DESCRIPTION}: {what}; ZigBee или Bluetooth — по РЭ")
-        elif code.endswith("/n") and label == "GSM":  # G/5 у НАРТИС — NB-IoT: модем по номеру модуля
-            lines.append(f"{code} = ? {label}  # {FROM_DESCRIPTION}: {what}; канал зависит от номера модуля")
-        else:
-            lines.append(f"{code} = {label}  # {FROM_DESCRIPTION}: {what}")
+        match = _LINE.match(candidate)
+        if match:
+            append(match.group(1), re.split(r",\s*где\b", match.group(2))[0].strip())
     return "\n".join(lines)
 
 

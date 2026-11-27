@@ -78,6 +78,8 @@ def _position(row: dict[str, Any], names: dict[int, str], limits: list[tuple[int
         else "Производитель — владелец описания типа (правило 1 ТЗ)"
     )
     rules.append(f"ПП 890: {smart_status} — {smart_reason}")
+    if row.get("design_attribute"):
+        rules.append(_attribute_rule("Исполнение", _design(row.get("design")), row["design_attribute"]))
     interface_rule = _interface_rule(row, unmapped)
     if interface_rule:
         rules.append(interface_rule)
@@ -126,6 +128,13 @@ def _position(row: dict[str, Any], names: dict[int, str], limits: list[tuple[int
     }
 
 
+def _attribute_rule(label: str, value: str, metadata: str) -> str:
+    source, _, status = metadata.partition(":")
+    source_label = {"script": "разбор описания типа", "ai": "ИИ", "manual": "решение аналитика", "import": "справочник аналитика"}.get(source, source)
+    status_label = {"pending": "требует подтверждения", "unresolved": "не определено"}.get(status)
+    return f"{label}: {value} — {source_label}" + (f" ({status_label})" if status_label else "")
+
+
 def _interface_rule(row: dict[str, Any], unmapped: bool) -> str | None:
     """Откуда взят интерфейс позиции (раздел 122): решение аналитика, код в написании или модификация."""
 
@@ -140,6 +149,8 @@ def _interface_rule(row: dict[str, Any], unmapped: bool) -> str | None:
         )
     if row.get("variant_interface_source") == "rule":
         return f"Интерфейс: {row.get('interface')} — {row.get('interface_note')}"
+    if row.get("interface_attribute"):
+        return _attribute_rule("Интерфейс", row.get("interface") or report.NO_DATA, row["interface_attribute"])
     return "Интерфейс — из модификации справочника (у типа нет таблицы кодов интерфейсов)"
 
 
@@ -151,13 +162,17 @@ _ROW_SQL = (
     f"{report.SMART_AT_SQL} AS smart_890_at, m.manufacturer_override_id AS override_id, (v.modification_id IS NULL) AS unmapped, "
     f"{report._MANUFACTURER_SQL} AS manufacturer_id, extract(year FROM mv.month)::int AS year, "
     "v.smart_890_source AS variant_smart_source, v.interface_source AS variant_interface_source, "
-    "v.interface_note, v.interface_review, v.interface_suggested, m.interface AS mod_interface, sum(mv.count) AS count "
+    "v.interface_note, v.interface_review, v.interface_suggested, m.interface AS mod_interface, "
+    "(SELECT r.source || ':' || r.status FROM meter_market_modification_attribute_reviews r "
+    " WHERE r.modification_id = m.id AND r.field_name = 'design') AS design_attribute, "
+    "(SELECT r.source || ':' || r.status FROM meter_market_modification_attribute_reviews r "
+    " WHERE r.modification_id = m.id AND r.field_name = 'interface') AS interface_attribute, sum(mv.count) AS count "
     "FROM meter_verification_monthly mv "
     "JOIN meter_market_variants v ON v.id = mv.variant_id "
     "JOIN meter_market_types t ON t.id = v.type_id "
     "LEFT JOIN meter_market_modifications m ON m.id = v.modification_id "
 )
-_ROW_GROUP = " GROUP BY " + ", ".join(str(i) for i in range(1, 32))
+_ROW_GROUP = " GROUP BY " + ", ".join(str(i) for i in range(1, 34))
 
 # Сведения о написании без агрегата поверок — для детализации «Локализации» по написаниям (24.11.2026).
 _VARIANT_INFO_SQL = (
@@ -167,7 +182,11 @@ _VARIANT_INFO_SQL = (
     f"{report.SMART_NOTE_SQL} AS smart_890_note, {report.SMART_AT_SQL} AS smart_890_at, "
     f"m.manufacturer_override_id AS override_id, {report._MANUFACTURER_SQL} AS manufacturer_id, "
     "v.smart_890_source AS variant_smart_source, v.interface_source AS variant_interface_source, "
-    "v.interface_note, v.interface_review, v.interface_suggested, m.interface AS mod_interface "
+    "v.interface_note, v.interface_review, v.interface_suggested, m.interface AS mod_interface, "
+    "(SELECT r.source || ':' || r.status FROM meter_market_modification_attribute_reviews r "
+    " WHERE r.modification_id = m.id AND r.field_name = 'design') AS design_attribute, "
+    "(SELECT r.source || ':' || r.status FROM meter_market_modification_attribute_reviews r "
+    " WHERE r.modification_id = m.id AND r.field_name = 'interface') AS interface_attribute "
     "FROM meter_market_variants v JOIN meter_market_types t ON t.id = v.type_id "
     "LEFT JOIN meter_market_modifications m ON m.id = v.modification_id WHERE v.id = ANY(:ids)"
 )

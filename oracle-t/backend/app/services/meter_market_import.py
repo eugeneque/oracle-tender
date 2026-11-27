@@ -10,8 +10,8 @@
 датой, то строкой, табуляции в названиях, «н/д» и «-» в числовых полях. Лист растянут до
 1 038 697 строк, из них значимых 1 194 — чтение останавливается на длинной полосе пустых строк.
 
-Повторный импорт безопасен: ручная разметка (`mapped_by = manual`) и ручная локализация
-(`localization_source = manual`) не перезаписываются.
+Повторный импорт безопасен: ручная разметка (`mapped_by = manual`), ручная локализация
+(`localization_source = manual`) и подтверждённые характеристики (`manual` в метаданных) не перезаписываются.
 
 Запуск: `python -m app.services.meter_market_import "<путь к xlsx>"`.
 """
@@ -40,6 +40,7 @@ from app.models.meter_market import (
     MeterMarketVariant,
     TypeReviewStatus,
 )
+from app.services import meter_market_characteristics as characteristics
 from app.services.meter_market_normalize import (
     EMPTY_MODIFICATION,
     clean_text,
@@ -298,10 +299,16 @@ def import_rows(db: Session, rows: list[ImportRow]) -> ImportStats:
                 db.add(modification)
                 existing_mods[name] = modification
                 stats.modifications += 1
-            modification.phase = phase
-            modification.design = design
-            modification.interface = interface
-            modification.mpi_years = mpi
+            for field_name, value in (("phase", phase), ("design", design), ("interface", interface), ("mpi_years", mpi)):
+                characteristics.apply_attribute(
+                    db,
+                    modification,
+                    field_name,
+                    value,
+                    source=characteristics.AttributeSource.IMPORT.value,
+                    status=characteristics.AttributeReviewStatus.CONFIRMED.value,
+                    reason="Импорт справочника аналитика из Excel",
+                )
             modification.manufacturer_override_id = override_id
             modification.comment = next((r.comment for r in members if r.comment), modification.comment)
             if modification.localization_source != LocalizationSource.MANUAL.value:

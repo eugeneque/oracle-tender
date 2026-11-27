@@ -95,6 +95,23 @@ class LocalizationSource(str, enum.Enum):
     MANUAL = "manual"
 
 
+class AttributeSource(str, enum.Enum):
+    """Откуда взялась характеристика модификации (27.11.2026, справочник приборов)."""
+
+    SCRIPT = "script"
+    AI = "ai"
+    MANUAL = "manual"
+    IMPORT = "import"
+
+
+class AttributeReviewStatus(str, enum.Enum):
+    """Подтверждено значение человеком/правилом, предложено ИИ или осталось неизвестным."""
+
+    CONFIRMED = "confirmed"
+    PENDING = "pending"
+    UNRESOLVED = "unresolved"
+
+
 class LoadKind(str, enum.Enum):
     SNAPSHOT = "snapshot"
     DELTA = "delta"
@@ -175,6 +192,13 @@ class MeterMarketType(Base):
     # Таблица кодов интерфейсов типа (23.11.2026, раздел 122): «RF2400/1 = ZigBee», «G/n = ? GSM» — по ней
     # интерфейс берётся из кода в написании (`meter_market_interface`), а не из модификации.
     interface_codes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Собственная копия «Описания типа» для типов, догруженных справочником приборов из ФГИС.
+    # У прежних записей текст остаётся в si_types и читается по si_code (27.11.2026).
+    description_type_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_type_mirror_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_type_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    description_type_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_type_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -215,6 +239,36 @@ class MeterMarketModification(Base):
     smart_890_source: Mapped[str | None] = mapped_column(String(10), nullable=True)  # ai | manual
     smart_890_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     smart_890_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class MeterMarketAttributeReview(Base):
+    """Происхождение и проверка одной характеристики модификации.
+
+    Само значение остаётся в `meter_market_modifications`: отчёт и Excel не зависят от
+    отдельной EAV-модели. Здесь только доказательство и решение аналитика (27.11.2026).
+    """
+
+    __tablename__ = "meter_market_modification_attribute_reviews"
+    __table_args__ = (
+        UniqueConstraint("modification_id", "field_name", name="uq_meter_market_attribute_review_field"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    modification_id: Mapped[int] = mapped_column(
+        ForeignKey("meter_market_modifications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    field_name: Mapped[str] = mapped_column(String(32), nullable=False)
+    source: Mapped[str] = mapped_column(String(10), nullable=False)
+    status: Mapped[str] = mapped_column(String(12), nullable=False)
+    confidence: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence: Mapped[list[dict]] = mapped_column(JSONB, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

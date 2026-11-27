@@ -27,6 +27,7 @@ const TAB_KEY = "home.tab";
 // С 24.10.2026 у нововведений центральной плитки нет: главное — Мира, большим блоком над
 // мозаикой (`MiraSpotlight`), поэтому её `id` в раскладке не встречается.
 const NEWS_AREAS = [
+  "meter-device-catalog meter-device-catalog meter-device-catalog meter-device-catalog",
   "tender-list tender-list sidebar palette",
   "bitrix-deal bitrix-deal apps ai-models",
   "positions verdicts matrix matrix",

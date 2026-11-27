@@ -2420,6 +2420,9 @@ export interface MarketStatus {
   unmapped_variants: number;
   /** Написаний с интерфейсом на согласовании (раздел 122). */
   interface_review: number;
+  /** Характеристик модификаций, предложенных ИИ и ожидающих проверки. */
+  attribute_review: number;
+  attribute_unresolved: number;
   thresholds: { year: number; min_score: number }[];
   can_edit: boolean;
 }
@@ -2554,10 +2557,26 @@ export interface MarketType {
   /** Таблица кодов интерфейсов: «RF2400/1 = ZigBee», «G/n = ? GSM» (раздел 122). */
   interface_codes: string | null;
   interface_review: number;
+  attribute_review: number;
+  attribute_unresolved: number;
+  has_description: boolean;
+  description_type_url: string | null;
+  description_type_mirror_url: string | null;
+  description_type_version: string | null;
+  description_type_fetched_at: string | null;
   created_at: string;
   modifications: number;
   unmapped: number;
   count: number;
+}
+
+export interface MarketAttributeMetadata {
+  source: "script" | "ai" | "manual" | "import";
+  status: "confirmed" | "pending" | "unresolved";
+  confidence: string | null;
+  reason: string | null;
+  evidence: { code: string | null; page: string | null; quote: string }[];
+  updated_at: string;
 }
 
 export interface MarketModification {
@@ -2580,6 +2599,7 @@ export interface MarketModification {
   smart_890_note: string | null;
   variants: number;
   count: number;
+  attributes: Record<string, MarketAttributeMetadata>;
 }
 
 export interface MarketManufacturer {
@@ -2587,6 +2607,17 @@ export interface MarketManufacturer {
   name: string;
   synonyms: string[];
   types: number;
+  modifications: number;
+  attribute_review: number;
+  attribute_unresolved: number;
+}
+
+export interface MarketCatalogJob {
+  key: string;
+  label: string;
+  state: "running" | "done" | "error";
+  result: Record<string, unknown> | null;
+  error: string | null;
 }
 
 export interface MarketGroup {

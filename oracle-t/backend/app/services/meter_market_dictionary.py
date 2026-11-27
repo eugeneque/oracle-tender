@@ -28,6 +28,7 @@ from app.models.meter_market import (
     TypeReviewStatus,
 )
 from app.models.user import User, UserRole
+from app.services import meter_market_characteristics as characteristics
 from app.services import meter_market_interface as interface_rules
 from app.services import meter_market_rules as rules
 from app.services.meter_market_normalize import (
@@ -169,7 +170,21 @@ def update_modification(
 ) -> MeterMarketModification:
     values = _validate_mod(dict(values))
     for key in _MOD_FIELDS:
-        if key in values:
+        if key not in values:
+            continue
+        if key in characteristics.TRACKED_FIELDS:
+            if getattr(modification, key) != values[key]:
+                characteristics.apply_attribute(
+                    db,
+                    modification,
+                    key,
+                    values[key],
+                    source=characteristics.AttributeSource.MANUAL.value,
+                    status=characteristics.AttributeReviewStatus.CONFIRMED.value,
+                    reason="Решение аналитика в справочнике приборов",
+                    force=True,
+                )
+        else:
             setattr(modification, key, values[key])
     if any(key in values for key in _LOC_FIELDS):
         for key in _LOC_FIELDS:
@@ -180,13 +195,22 @@ def update_modification(
         # Решение аналитика: переопределяет ИИ и им не перезаписывается; None — вернуть решение ИИ.
         # Форма правки шлёт поле всегда: без решения аналитика None — «не трогать ИИ».
         if values["smart_890"] is not None:
-            modification.smart_890 = values["smart_890"]
-            modification.smart_890_source = "manual"
+            characteristics.apply_attribute(
+                db,
+                modification,
+                "smart_890",
+                values["smart_890"],
+                source=characteristics.AttributeSource.MANUAL.value,
+                status=characteristics.AttributeReviewStatus.CONFIRMED.value,
+                reason="Решение аналитика в справочнике приборов",
+                force=True,
+            )
         elif modification.smart_890_source == "manual":
             modification.smart_890 = None
             modification.smart_890_source = None
             modification.smart_890_note = None
             modification.smart_890_at = None  # ИИ оценит заново при следующем запуске
+            characteristics.reset_attribute(db, modification, "smart_890")
     if add:
         db.add(modification)
     db.flush()
@@ -271,11 +295,7 @@ def interface_codes_draft(db: Session, type_id: int) -> str:
     """Черновик таблицы кодов из «Описания типа» ГРСИ (блоки «Основной / Дополнительные интерфейсы»)."""
 
     si_type = _get(db, MeterMarketType, type_id, "Описание типа")
-    description = db.execute(
-        text("SELECT description_type_text FROM si_types WHERE si_code = :c AND description_type_text IS NOT NULL "
-             "ORDER BY length(description_type_text) DESC LIMIT 1"),
-        {"c": si_type.mit_number},
-    ).scalar()
+    description = characteristics.description_text(db, si_type)
     if not description:
         raise HTTPException(status_code=404, detail="Текста описания типа в каталоге нет — таблицу кодов заполните вручную")
     draft = interface_rules.codes_from_description(description)
@@ -297,8 +317,18 @@ def set_type_smart(db: Session, type_id: int, value: bool | None) -> int:
         if value is None:
             if mod.smart_890_source == "manual":
                 mod.smart_890, mod.smart_890_source, mod.smart_890_note, mod.smart_890_at = None, None, None, None
+                characteristics.reset_attribute(db, mod, "smart_890")
         else:
-            mod.smart_890, mod.smart_890_source = value, "manual"
+            characteristics.apply_attribute(
+                db,
+                mod,
+                "smart_890",
+                value,
+                source=characteristics.AttributeSource.MANUAL.value,
+                status=characteristics.AttributeReviewStatus.CONFIRMED.value,
+                reason="Решение аналитика для всех модификаций типа",
+                force=True,
+            )
     db.flush()
     return len(rows)
 
@@ -330,7 +360,11 @@ def modifications(db: Session, type_id: int) -> list[dict[str, Any]]:
         ),
         {"t": type_id},
     ).mappings()
-    return [dict(r) for r in rows]
+    items = [dict(r) for r in rows]
+    metadata = characteristics.attributes_for(db, [item["id"] for item in items])
+    for item in items:
+        item["attributes"] = metadata.get(item["id"], {})
+    return items
 
 
 def variants_of(db: Session, modification_id: int) -> list[dict[str, Any]]:
@@ -350,9 +384,14 @@ def variants_of(db: Session, modification_id: int) -> list[dict[str, Any]]:
 # ── Типы ───────────────────────────────────────────────────────────────────────────────────
 
 
-def types(db: Session, *, review_status: str | None = None, search: str | None = None) -> list[dict[str, Any]]:
+def types(
+    db: Session, *, review_status: str | None = None, search: str | None = None, manufacturer_id: int | None = None
+) -> list[dict[str, Any]]:
     params: dict[str, Any] = {}
     where = ["true"]
+    if manufacturer_id is not None:
+        where.append("t.manufacturer_id = :manufacturer_id")
+        params["manufacturer_id"] = manufacturer_id
     if review_status:
         where.append("t.review_status = :s")
         params["s"] = review_status
@@ -363,6 +402,13 @@ def types(db: Session, *, review_status: str | None = None, search: str | None =
         text(
             "SELECT t.id, t.mit_number, t.title, t.notation, t.manufacturer_id, mf.name AS manufacturer, "
             "t.cert_valid_to, t.mpi_years, t.in_report, t.review_status, t.code_notes, t.interface_codes, t.created_at, "
+            "t.description_type_url, t.description_type_mirror_url, t.description_type_version, t.description_type_fetched_at, "
+            "(t.description_type_text IS NOT NULL OR EXISTS (SELECT 1 FROM si_types s WHERE s.si_code = t.mit_number "
+            " AND s.description_type_text IS NOT NULL)) AS has_description, "
+            "(SELECT count(*) FROM meter_market_modifications m JOIN meter_market_modification_attribute_reviews r "
+            " ON r.modification_id = m.id AND r.status = 'pending' WHERE m.type_id = t.id) AS attribute_review, "
+            "(SELECT count(*) FROM meter_market_modifications m JOIN meter_market_modification_attribute_reviews r "
+            " ON r.modification_id = m.id AND r.status = 'unresolved' WHERE m.type_id = t.id) AS attribute_unresolved, "
             "(SELECT count(*) FROM meter_market_variants v WHERE v.type_id = t.id AND v.interface_review IS NOT NULL) AS interface_review, "
             "(SELECT count(*) FROM meter_market_modifications m WHERE m.type_id = t.id) AS modifications, "
             "(SELECT count(*) FROM meter_market_variants v WHERE v.type_id = t.id AND v.modification_id IS NULL) AS unmapped, "
@@ -405,7 +451,15 @@ def manufacturers(db: Session) -> list[dict[str, Any]]:
     rows = db.execute(
         text(
             "SELECT mf.id, mf.name, mf.synonyms, (SELECT count(*) FROM meter_market_types t WHERE t.manufacturer_id = mf.id) "
-            "AS types FROM meter_market_manufacturers mf ORDER BY mf.name"
+            "AS types, (SELECT count(*) FROM meter_market_modifications m JOIN meter_market_types t ON t.id = m.type_id "
+            " WHERE t.manufacturer_id = mf.id) AS modifications, "
+            "(SELECT count(*) FROM meter_market_modifications m JOIN meter_market_types t ON t.id = m.type_id "
+            " JOIN meter_market_modification_attribute_reviews r ON r.modification_id = m.id AND r.status = 'pending' "
+            " WHERE t.manufacturer_id = mf.id) AS attribute_review, "
+            "(SELECT count(*) FROM meter_market_modifications m JOIN meter_market_types t ON t.id = m.type_id "
+            " JOIN meter_market_modification_attribute_reviews r ON r.modification_id = m.id AND r.status = 'unresolved' "
+            " WHERE t.manufacturer_id = mf.id) AS attribute_unresolved "
+            "FROM meter_market_manufacturers mf ORDER BY mf.name"
         )
     ).mappings()
     return [dict(r) for r in rows]

@@ -246,6 +246,12 @@ def status(db: Session) -> dict[str, Any]:
         "interface_review": db.execute(
             text("SELECT count(*) FROM meter_market_variants WHERE interface_review IS NOT NULL AND excluded_reason IS NULL")
         ).scalar(),
+        "attribute_review": db.execute(
+            text("SELECT count(*) FROM meter_market_modification_attribute_reviews WHERE status = 'pending'")
+        ).scalar(),
+        "attribute_unresolved": db.execute(
+            text("SELECT count(*) FROM meter_market_modification_attribute_reviews WHERE status = 'unresolved'")
+        ).scalar(),
         "unmapped_variants": db.execute(
             text(
                 "SELECT count(*) FROM meter_market_variants v JOIN meter_market_types t ON t.id = v.type_id "

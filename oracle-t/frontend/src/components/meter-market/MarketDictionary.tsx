@@ -1,8 +1,9 @@
 import { Plus, Search, Upload, X } from "lucide-react";
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, api, uploadFile } from "../../api/client";
 import type {
+  MarketCatalogJob,
   MarketGroup,
   MarketManufacturer,
   MarketModification,
@@ -11,6 +12,7 @@ import type {
   MarketUnmappedItem,
 } from "../../api/types";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { AttributeCell } from "./AttributeCell";
 import { Panel } from "./common";
 import { BUTTON, DESIGNS, INPUT, ModificationForm, NO_RIGHT, PRIMARY } from "./ModificationForm";
 import { InterfaceCodes, InterfaceReviewQueue } from "./InterfaceReview";
@@ -51,7 +53,7 @@ export function MarketDictionary({ status, onChanged }: { status: MarketStatus; 
           { value: "unmapped", label: `Разметить${status.unmapped_variants ? ` · ${fmt(status.unmapped_variants)}` : ""}` },
           { value: "review", label: `На согласование${status.interface_review ? ` · ${fmt(status.interface_review)}` : ""}` },
           { value: "new", label: `Новые типы${status.new_types ? ` · ${status.new_types}` : ""}` },
-          { value: "types", label: "Типы и модификации" },
+          { value: "types", label: `Производители и приборы${status.attribute_review ? ` · ${fmt(status.attribute_review)}` : ""}` },
           { value: "groups", label: "Группы компаний" },
           { value: "thresholds", label: "Пороги баллов" },
           { value: "import", label: "Импорт" },
@@ -171,21 +173,68 @@ const REVIEW_LABEL: Record<MarketType["review_status"], string> = {
   excluded: "не в отчёте",
 };
 
+function catalogJobText(job: MarketCatalogJob): string {
+  if (job.state === "running") return "выполняется…";
+  if (job.state === "error") return job.error ?? "Ошибка";
+  const result = job.result ?? {};
+  const parts = [
+    ["типов", result.types],
+    ["скриптом", result.script],
+    ["сопоставлено", result.mapped],
+    ["новых", result.created],
+    ["ошибок", result.failed],
+  ].filter(([, value]) => typeof value === "number").map(([label, value]) => `${label} ${String(value)}`);
+  return `готово${parts.length ? `: ${parts.join(", ")}` : ""}`;
+}
+
 function TypesList({ canEdit, report, fail, reviewStatus }: EditProps & { reviewStatus?: "new" }) {
   const [search, setSearch] = useState("");
+  const [manufacturerSearch, setManufacturerSearch] = useState("");
+  const [manufacturerId, setManufacturerId] = useState<number | null>(null);
   const [types, setTypes] = useState<MarketType[] | null>(null);
   const [manufacturers, setManufacturers] = useState<MarketManufacturer[]>([]);
+  const [jobs, setJobs] = useState<MarketCatalogJob[]>([]);
   const [openId, setOpenId] = useState<number | null>(null);
   const load = useCallback(() => {
     const params = new URLSearchParams();
     if (reviewStatus) params.set("review_status", reviewStatus);
     if (search) params.set("search", search);
+    if (manufacturerId !== null) params.set("manufacturer_id", String(manufacturerId));
     api.get<MarketType[]>(`/meter-market/types?${params}`).then(setTypes).catch((err) => fail(err, "Не удалось загрузить типы"));
-  }, [reviewStatus, search, fail]);
-  useEffect(load, [load]);
-  useEffect(() => {
+  }, [reviewStatus, search, manufacturerId, fail]);
+  const loadManufacturers = useCallback(() => {
     api.get<MarketManufacturer[]>("/meter-market/manufacturers").then(setManufacturers).catch(() => undefined);
   }, []);
+  const loadJobs = useCallback(() => {
+    api.get<MarketCatalogJob[]>("/meter-market/catalog-jobs").then(setJobs).catch(() => undefined);
+  }, []);
+  useEffect(load, [load]);
+  useEffect(loadManufacturers, [loadManufacturers]);
+  useEffect(loadJobs, [loadJobs]);
+  const jobsRunning = jobs.some((job) => job.state === "running");
+  const jobsRef = useRef(jobsRunning);
+  jobsRef.current = jobsRunning;
+  useEffect(() => {
+    if (!jobsRunning) return;
+    const timer = window.setInterval(() => {
+      api.get<MarketCatalogJob[]>("/meter-market/catalog-jobs").then((next) => {
+        setJobs(next);
+        if (jobsRef.current && !next.some((job) => job.state === "running")) {
+          load();
+          loadManufacturers();
+        }
+      }).catch(() => undefined);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [jobsRunning, load, loadManufacturers]);
+  const startJob = async (path: string) => {
+    try {
+      await api.post(path, {});
+      loadJobs();
+    } catch (err) {
+      fail(err, "Не удалось запустить задачу");
+    }
+  };
 
   const patch = async (type: MarketType, body: Record<string, unknown>, message: string) => {
     try {
@@ -196,10 +245,12 @@ function TypesList({ canEdit, report, fail, reviewStatus }: EditProps & { review
       fail(err, "Не удалось сохранить тип");
     }
   };
+  const selectedManufacturer = manufacturers.find((item) => item.id === manufacturerId) ?? null;
+  const visibleManufacturers = manufacturers.filter((item) => item.name.toLowerCase().includes(manufacturerSearch.toLowerCase()));
 
   return (
     <Panel
-      title={reviewStatus ? "Новые описания типа счётчиков ЭЭ" : "Описания типа (ГРСИ)"}
+      title={reviewStatus ? "Новые описания типа счётчиков ЭЭ" : "Производители и приборы"}
       subtitle={
         reviewStatus
           ? "Впервые встретились в поверках ФГИС. Интеллектуальный ли это счётчик по ПП 890 и включать ли его в отчёт — решение аналитика."
@@ -214,6 +265,42 @@ function TypesList({ canEdit, report, fail, reviewStatus }: EditProps & { review
         )
       }
     >
+      <div className={reviewStatus ? "" : "grid gap-4 lg:grid-cols-[15rem_minmax(0,1fr)]"}>
+        {!reviewStatus && (
+          <aside className="rounded-xl border border-white/[0.06] p-2">
+            <label className="relative mb-2 block">
+              <Search size={13} className="absolute left-2.5 top-2.5 text-zinc-500" />
+              <input className={`${INPUT} w-full pl-7`} placeholder="Производитель" value={manufacturerSearch} onChange={(e) => setManufacturerSearch(e.target.value)} />
+            </label>
+            <button type="button" className={`mb-1 w-full rounded-lg px-2 py-1.5 text-left text-xs ${manufacturerId === null ? "bg-indigo-500/15 text-indigo-200" : "text-zinc-400 hover:bg-white/5"}`} onClick={() => setManufacturerId(null)}>
+              Все производители
+            </button>
+            <div className="max-h-[32rem] space-y-0.5 overflow-y-auto">
+              {visibleManufacturers.map((item) => (
+                <button key={item.id} type="button" className={`w-full rounded-lg px-2 py-1.5 text-left text-xs ${manufacturerId === item.id ? "bg-indigo-500/15 text-indigo-200" : "text-zinc-400 hover:bg-white/5"}`} onClick={() => setManufacturerId(item.id)}>
+                  <span className="block">{item.name}</span>
+                  <span className="text-[10px] text-zinc-600">
+                    типов {item.types} · приборов {item.modifications}
+                    {item.attribute_review > 0 && <span className="text-amber-400"> · проверить {item.attribute_review}</span>}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </aside>
+        )}
+        <div className="min-w-0">
+          {selectedManufacturer && (
+            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-white/[0.06] p-2.5">
+              <span className="mr-auto text-xs text-zinc-400">{selectedManufacturer.name}: типов {selectedManufacturer.types}, приборов {selectedManufacturer.modifications}</span>
+              <button type="button" className={BUTTON} disabled={!canEdit || jobsRunning} onClick={() => void startJob(`/meter-market/manufacturers/${selectedManufacturer.id}/sync`)}>Синхронизировать с ФГИС</button>
+              <button type="button" className={PRIMARY} disabled={!canEdit || jobsRunning} onClick={() => void startJob(`/meter-market/manufacturers/${selectedManufacturer.id}/markup`)}>Разобрать характеристики</button>
+            </div>
+          )}
+          {jobs.slice(-3).map((job) => (
+            <div key={job.key} className={`mb-2 rounded-lg px-3 py-2 text-xs ${job.state === "error" ? "bg-red-500/10 text-red-300" : job.state === "done" ? "bg-emerald-500/10 text-emerald-300" : "bg-indigo-500/10 text-indigo-200"}`}>
+              {job.label}: {catalogJobText(job)}
+            </div>
+          ))}
       {!types ? (
         <div className="py-12 text-center text-sm text-zinc-600">Загружаю…</div>
       ) : types.length === 0 ? (
@@ -230,6 +317,8 @@ function TypesList({ canEdit, report, fail, reviewStatus }: EditProps & { review
                     {[type.title, type.manufacturer ?? "производитель не указан", `${fmt(type.count)} поверок`].filter(Boolean).join(" · ")}
                     {type.unmapped > 0 && <span className="text-amber-400"> · неразмечено {type.unmapped}</span>}
                     {type.interface_review > 0 && <span className="text-amber-400"> · интерфейс на согласовании {type.interface_review}</span>}
+                    {type.attribute_review > 0 && <span className="text-amber-400"> · характеристик проверить {type.attribute_review}</span>}
+                    {type.attribute_unresolved > 0 && <span className="text-zinc-500"> · не определено {type.attribute_unresolved}</span>}
                   </span>
                 </button>
                 <div className="flex items-center gap-2">
@@ -260,6 +349,17 @@ function TypesList({ canEdit, report, fail, reviewStatus }: EditProps & { review
                   )}
                 </div>
               </div>
+              {openId === type.id && (
+                <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
+                  {(type.description_type_url || type.description_type_mirror_url) && (
+                    <a className="text-indigo-300 hover:underline" href={type.description_type_mirror_url || type.description_type_url || undefined} target="_blank" rel="noreferrer">Описание типа (PDF)</a>
+                  )}
+                  <button type="button" className={BUTTON} disabled={!canEdit || jobsRunning} onClick={() => void startJob(`/meter-market/types/${type.id}/markup?refresh=true`)}>
+                    Обновить описание и разобрать
+                  </button>
+                  <span className="text-zinc-600">{type.has_description ? "текст описания загружен" : "описание будет загружено из ФГИС"}</span>
+                </div>
+              )}
               {openId === type.id && <CodeNotes type={type} canEdit={canEdit} report={report} fail={fail} onSaved={load} />}
               {openId === type.id && <InterfaceCodes type={type} canEdit={canEdit} report={report} fail={fail} onSaved={load} />}
               {openId === type.id && <Modifications typeId={type.id} canEdit={canEdit} report={report} fail={fail} />}
@@ -267,6 +367,8 @@ function TypesList({ canEdit, report, fail, reviewStatus }: EditProps & { review
           ))}
         </div>
       )}
+        </div>
+      </div>
     </Panel>
   );
 }
@@ -331,11 +433,16 @@ const DESIGN_LABEL = Object.fromEntries(DESIGNS.map((d) => [d.value, d.label]));
 function Modifications({ typeId, canEdit, report, fail }: EditProps & { typeId: number }) {
   const [mods, setMods] = useState<MarketModification[] | null>(null);
   const [editing, setEditing] = useState<number | null>(null);
+  const [attributeFilter, setAttributeFilter] = useState<"all" | "pending" | "unresolved">("all");
   const [variants, setVariants] = useState<Record<number, { id: number; raw: string; count: number; mapped_by: string | null }[]>>({});
   const load = useCallback(() => {
     api.get<MarketModification[]>(`/meter-market/types/${typeId}/modifications`).then(setMods).catch((err) => fail(err, "Не удалось загрузить модификации"));
   }, [typeId, fail]);
   useEffect(load, [load]);
+  const done = (message: string) => {
+    report(message);
+    load();
+  };
   const showVariants = (id: number) => {
     if (variants[id]) {
       setVariants(({ [id]: _, ...rest }) => rest);
@@ -357,6 +464,7 @@ function Modifications({ typeId, canEdit, report, fail }: EditProps & { typeId: 
     }
   };
   if (!mods) return <p className="py-3 text-xs text-zinc-600">Загружаю модификации…</p>;
+  const visibleMods = attributeFilter === "all" ? mods : mods.filter((m) => Object.values(m.attributes).some((a) => a.status === attributeFilter));
   return (
     <div className="mt-2 overflow-x-auto rounded-xl border border-white/[0.06]">
       <div className="flex flex-wrap items-center gap-2 px-3 py-2 text-xs text-zinc-500">
@@ -370,14 +478,20 @@ function Modifications({ typeId, canEdit, report, fail }: EditProps & { typeId: 
         <button type="button" className={BUTTON} disabled={!canEdit} title={canEdit ? "Снять ручные отметки — ИИ оценит заново" : NO_RIGHT} onClick={() => void markAll(null)}>
           Сбросить
         </button>
+        <select className={`${INPUT} ml-auto py-1`} value={attributeFilter} onChange={(e) => setAttributeFilter(e.target.value as typeof attributeFilter)} aria-label="Фильтр характеристик">
+          <option value="all" className="bg-zinc-900">Все характеристики</option>
+          <option value="pending" className="bg-zinc-900">Требует проверки</option>
+          <option value="unresolved" className="bg-zinc-900">Не определено</option>
+        </select>
       </div>
-      <table className="w-full min-w-[760px] text-xs">
+      <table className="w-full min-w-[860px] text-xs">
         <thead>
           <tr className="text-zinc-500">
             <th className="px-3 py-2 text-left font-medium">Модификация</th>
             <th className="px-3 py-2 text-left font-medium">Тип</th>
             <th className="px-3 py-2 text-left font-medium">Исполнение</th>
             <th className="px-3 py-2 text-left font-medium">Интерфейс</th>
+            <th className="px-3 py-2 text-left font-medium">МПИ</th>
             <th className="px-3 py-2 text-left font-medium">РПП</th>
             <th className="px-3 py-2 text-left font-medium">ПП 890</th>
             <th className="px-3 py-2 text-right font-medium">Написаний</th>
@@ -386,19 +500,19 @@ function Modifications({ typeId, canEdit, report, fail }: EditProps & { typeId: 
           </tr>
         </thead>
         <tbody>
-          {mods.map((m) => (
+          {visibleMods.map((m) => (
             <Fragment key={m.id}>
               <tr className="border-t border-white/[0.05] text-zinc-300">
                 <td className="px-3 py-1.5 text-zinc-100">{m.name}</td>
-                <td className="px-3 py-1.5">{m.phase ?? "—"}</td>
-                <td className="px-3 py-1.5">{DESIGN_LABEL[m.design] ?? m.design}</td>
-                <td className="px-3 py-1.5">{m.interface ?? "—"}</td>
+                <td className="px-3 py-1.5"><AttributeCell modificationId={m.id} field="phase" value={m.phase ?? "нет данных"} metadata={m.attributes.phase} canEdit={canEdit} onEdit={() => setEditing(m.id)} onDone={done} onError={fail} /></td>
+                <td className="px-3 py-1.5"><AttributeCell modificationId={m.id} field="design" value={DESIGN_LABEL[m.design] ?? m.design} metadata={m.attributes.design} canEdit={canEdit} onEdit={() => setEditing(m.id)} onDone={done} onError={fail} /></td>
+                <td className="px-3 py-1.5"><AttributeCell modificationId={m.id} field="interface" value={m.interface ?? "нет данных"} metadata={m.attributes.interface} canEdit={canEdit} onEdit={() => setEditing(m.id)} onDone={done} onError={fail} /></td>
+                <td className="px-3 py-1.5"><AttributeCell modificationId={m.id} field="mpi_years" value={m.mpi_years === null ? "нет данных" : `${m.mpi_years} лет`} metadata={m.attributes.mpi_years} canEdit={canEdit} onEdit={() => setEditing(m.id)} onDone={done} onError={fail} /></td>
                 <td className="px-3 py-1.5">
                   {m.in_rpp ? `${m.score ?? "?"} б.${m.rpp_included_at ? ` с ${m.rpp_included_at.split("-").reverse().join(".")}` : ""}` : "нет"}
                 </td>
                 <td className="px-3 py-1.5" title={m.smart_890_note ?? undefined}>
-                  {m.smart_890 === null ? "—" : m.smart_890 ? "да" : "нет"}
-                  {m.smart_890_source === "manual" && <span className="ml-1 text-zinc-500">(вручную)</span>}
+                  <AttributeCell modificationId={m.id} field="smart_890" value={m.smart_890 === null ? "нет данных" : m.smart_890 ? "да" : "нет"} metadata={m.attributes.smart_890} canEdit={canEdit} onEdit={() => setEditing(m.id)} onDone={done} onError={fail} />
                 </td>
                 <td className="px-3 py-1.5 text-right">
                   <button type="button" className="tabular-nums text-indigo-300 hover:underline" onClick={() => showVariants(m.id)}>
@@ -415,7 +529,7 @@ function Modifications({ typeId, canEdit, report, fail }: EditProps & { typeId: 
               </tr>
               {variants[m.id] && (
                 <tr key={`${m.id}-v`}>
-                  <td colSpan={9} className="px-6 pb-2 text-zinc-500">
+                  <td colSpan={10} className="px-6 pb-2 text-zinc-500">
                     {variants[m.id].map((v) => (
                       <div key={v.id} className="flex justify-between gap-3">
                         <span className="whitespace-pre-wrap font-mono">«{v.raw}»</span>
@@ -427,7 +541,7 @@ function Modifications({ typeId, canEdit, report, fail }: EditProps & { typeId: 
               )}
               {editing === m.id && (
                 <tr key={`${m.id}-e`}>
-                  <td colSpan={9} className="px-3 pb-3">
+                  <td colSpan={10} className="px-3 pb-3">
                     <ModificationForm
                       initial={m}
                       submitLabel="Сохранить"

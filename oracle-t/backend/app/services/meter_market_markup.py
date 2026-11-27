@@ -22,6 +22,11 @@
 уверенностью не применяется — написание остаётся в «Разметить»: ложная привязка хуже честного
 «не размечено».
 
+27.11.2026 (раздел 131): сначала `meter_market_characteristics` заполняет доказанные скриптом
+атрибуты, включая удалённые таблицы PDF и скобочные коды. Значения ИИ получают метаданные
+`pending` с цитатой/листом и подсвечиваются до решения аналитика; скрипт заменяет ещё не
+подтверждённое предложение ИИ, ручные значения не перезаписываются.
+
 Расшифровка кодов аналитика и перепроверка (13.11.2026, раздел 108). Аналитик (Тайпит): «надо, чтобы
 Сова расшифровывала модификацию из Аршина по описанию типа и РЭ, а не сопоставляла с таблицей» —
 в таблице несколько исполнений сведены в одну строку («НЕВА СТ221 G4/G3» — «GSM и RS»), хотя G3 —
@@ -54,21 +59,15 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 
 from app.models.meter_market import DESIGN_LABELS, MappedBy, MeterMarketModification, MeterMarketType
-from app.services.ai_client import run_structured
+from app.services.ai_client import fit_chars, run_structured
 from app.services.ai_provider_service import AiNotConfiguredError, AiQuotaExceededError
 from app.services import meter_market_rules as rules
 from app.services.meter_market_dictionary import remap_auto
+from app.services import meter_market_characteristics as characteristics
 from app.services.meter_market_normalize import modification_key, normalize_interface
 
-# Сколько знаков «Описания типа» передавать: расшифровка обозначения бывает на 3–4 листе
-# (у НЕВА МТ 1 — с 4,5 тыс. знака), поэтому берётся окно вокруг неё, а не только начало.
-DESCRIPTION_HEAD_CHARS = 2500
-STRUCTURE_CHARS = 7000
 CHUNK = 40
 NO_INTERFACE = "без интерфейса"
-
-_DESCRIPTION_HEAD = re.compile(r"описание\s+средства\s+измерени", re.IGNORECASE)
-_STRUCTURE = re.compile(r"структур\w*\s+условного\s+обозначени|условн\w*\s+обозначени\w*\s+счетчик", re.IGNORECASE)
 
 SYSTEM_PROMPT = """\
 Ты — эксперт по приборам учёта электрической энергии и разметчик справочника модификаций.
@@ -114,6 +113,9 @@ SYSTEM_PROMPT = """\
    "medium" — по описанию и знаниям о линейке; "low" — догадка (такую разметку не применят).
 4. reason — одна короткая фраза по-русски: какие коды что означают («114 — корпус для крепления
    винтами; AS — только активная; E4 — EIA 485»).
+5. evidence — для заполненных phase/design/interface/mpi_years/smart_890 объекты
+   {"field": "design", "code": "M(1)", "page": "6", "quote": "точная цитата из описания"}.
+   Не выдумывай номер листа: если он не виден во фрагменте, оставь page пустым.
 Не придумывай кодов, которых нет в описании типа. Если написание — только обозначение типа без
 кодов («НЕВА МТ 1», «Нет модификации»), а у типа несколько исполнений — confidence "low"."""
 
@@ -128,6 +130,7 @@ class SpellingMarkup(pydantic.BaseModel):
     smart_890: str = "unknown"
     confidence: str = "medium"
     reason: str = ""
+    evidence: list[dict[str, Any]] = pydantic.Field(default_factory=list)
 
 
 class MarkupAnswer(pydantic.BaseModel):
@@ -135,26 +138,13 @@ class MarkupAnswer(pydantic.BaseModel):
 
 
 def designation_excerpt(db: Session, mit_number: str) -> str | None:
-    """Начало раздела «Описание средства измерений» и окно вокруг «структуры условного
-    обозначения» — там расшифровка кодов, без которой написание не разобрать."""
+    """Все релевантные разделы описания, включая отдельные таблицы интерфейсов и корпусов."""
 
-    value = db.execute(
-        sql_text("SELECT description_type_text FROM si_types WHERE si_code = :c AND description_type_text <> '' LIMIT 1"),
-        {"c": mit_number},
-    ).scalar()
-    if not value:
+    meter_type = db.scalar(select(MeterMarketType).where(MeterMarketType.mit_number == mit_number))
+    if meter_type is None:
         return None
-    head = _DESCRIPTION_HEAD.search(value)
-    start = head.start() if head else 0
-    parts = [value[start : start + DESCRIPTION_HEAD_CHARS]]
-    structure = _STRUCTURE.search(value, start)
-    if structure:
-        begin = max(structure.start() - 300, start + DESCRIPTION_HEAD_CHARS)
-        if begin < structure.start() + STRUCTURE_CHARS:
-            parts.append(value[begin : structure.start() + STRUCTURE_CHARS])
-    else:
-        parts.append(value[start + DESCRIPTION_HEAD_CHARS : start + DESCRIPTION_HEAD_CHARS + STRUCTURE_CHARS])
-    return re.sub(r"[ \t]+", " ", "\n…\n".join(p for p in parts if p)).strip()
+    value = characteristics.description_text(db, meter_type)
+    return characteristics.relevant_description(value) if value else None
 
 
 def _user_text(
@@ -223,8 +213,15 @@ def _known(value: str | None) -> bool:
     return bool(value) and value not in ("н/д", "nd")
 
 
+def _item_evidence(item: SpellingMarkup, field_name: str) -> list[dict[str, Any]]:
+    evidence = [dict(e) for e in item.evidence if e.get("field") == field_name]
+    if evidence:
+        return evidence
+    return [{"code": None, "page": None, "quote": (item.reason or "").strip()}] if item.reason else []
+
+
 def _correct_existing(
-    meter_type: MeterMarketType, mod: MeterMarketModification, item: SpellingMarkup, now: datetime
+    db: Session, meter_type: MeterMarketType, mod: MeterMarketModification, item: SpellingMarkup, now: datetime
 ) -> bool:
     """Написание — ровно эта модификация, а расшифровка даёт другой интерфейс/исполнение. Правит
     строку, только если у типа есть расшифровка кодов аналитика или в строке «н/д»: иначе слово
@@ -235,12 +232,37 @@ def _correct_existing(
     changes = []
     interface = _interface(item.interface)
     if _known(interface) and interface != mod.interface and (meter_type.code_notes or not _known(mod.interface)):
-        changes.append(f"интерфейс «{mod.interface or 'н/д'}» → «{interface}»")
-        mod.interface = interface
+        previous = mod.interface
+        applied = characteristics.apply_attribute(
+            db=db,
+            modification=mod,
+            field_name="interface",
+            value=interface,
+            source=characteristics.AttributeSource.AI.value,
+            status=characteristics.AttributeReviewStatus.PENDING.value,
+            reason=(item.reason or "").strip(),
+            evidence=_item_evidence(item, "interface"),
+            confidence=item.confidence,
+            only_if_unknown=not bool(meter_type.code_notes),
+        )
+        if applied:
+            changes.append(f"интерфейс «{previous or 'н/д'}» → «{interface}»")
     design = _design(item.design)
     if design != "nd" and mod.design == "nd":
-        changes.append(f"исполнение «н/д» → «{DESIGN_LABELS.get(design, design)}»")
-        mod.design = design
+        applied = characteristics.apply_attribute(
+            db=db,
+            modification=mod,
+            field_name="design",
+            value=design,
+            source=characteristics.AttributeSource.AI.value,
+            status=characteristics.AttributeReviewStatus.PENDING.value,
+            reason=(item.reason or "").strip(),
+            evidence=_item_evidence(item, "design"),
+            confidence=item.confidence,
+            only_if_unknown=True,
+        )
+        if applied:
+            changes.append(f"исполнение «н/д» → «{DESIGN_LABELS.get(design, design)}»")
     if not changes:
         return False
     note = f"ИИ по расшифровке кодов ({now:%d.%m.%Y}): {', '.join(changes)}; {(item.reason or '').strip()}"
@@ -271,6 +293,18 @@ def apply_answer(
             continue  # модель выдумала id или повторила написание
         if item.confidence.strip().lower() == "low":
             stats["skipped"] += 1
+            current_mod = db.get(MeterMarketModification, spelling["current"]) if spelling.get("current") else None
+            if current_mod is not None:
+                for field_name in ("phase", "design", "interface"):
+                    if not _known(getattr(current_mod, field_name)):
+                        characteristics.mark_unresolved(
+                            db,
+                            current_mod,
+                            field_name,
+                            source=characteristics.AttributeSource.AI.value,
+                            reason=(item.reason or "ИИ не смог однозначно расшифровать обозначение").strip(),
+                            confidence="low",
+                        )
             continue
         target: MeterMarketModification | None = None
         if item.modification_id is not None and item.modification_id in own_ids:
@@ -287,7 +321,7 @@ def apply_answer(
             if target is None and _foreign_modification(db, meter_type, name):
                 stats["skipped"] += 1
                 continue
-            if target is not None and _correct_existing(meter_type, target, item, now):
+            if target is not None and _correct_existing(db, meter_type, target, item, now):
                 stats["corrected"] += 1
             if target is None:
                 verdict = item.smart_890.strip().lower()
@@ -310,6 +344,26 @@ def apply_answer(
                 )
                 db.add(target)
                 db.flush()
+                for field_name, value in (
+                    ("phase", target.phase),
+                    ("design", target.design),
+                    ("interface", target.interface),
+                    ("mpi_years", target.mpi_years),
+                    ("smart_890", target.smart_890),
+                ):
+                    if value is None or (field_name == "design" and value == "nd"):
+                        continue
+                    characteristics.apply_attribute(
+                        db,
+                        target,
+                        field_name,
+                        value,
+                        source=characteristics.AttributeSource.AI.value,
+                        status=characteristics.AttributeReviewStatus.PENDING.value,
+                        reason=reason,
+                        evidence=_item_evidence(item, field_name),
+                        confidence=item.confidence,
+                    )
                 by_key[modification_key(name)] = target
                 own_ids.add(target.id)
                 stats["created"] += 1
@@ -365,14 +419,34 @@ def markup_type(
     min_count: int = 1,
     since: datetime | None = None,
     recheck: bool = False,
+    include_modifications: bool = False,
 ) -> dict[str, int]:
-    stats = {"mapped": 0, "created": 0, "skipped": 0, "corrected": 0, "failed": 0}
+    stats = {"mapped": 0, "created": 0, "skipped": 0, "corrected": 0, "failed": 0, "script": 0}
     stats["mapped"] += remap_auto(db, meter_type.id)
     db.commit()
+    full_description = characteristics.description_text(db, meter_type)
+    stats["script"] += characteristics.apply_script_to_type(db, meter_type, full_description)
+    db.commit()
     spellings = _pending(db, meter_type.id, min_count, since, recheck=recheck)
+    if include_modifications:
+        covered = {s.get("current") for s in spellings}
+        direct = db.scalars(
+            select(MeterMarketModification).where(MeterMarketModification.type_id == meter_type.id)
+        ).all()
+        for mod in direct:
+            if mod.id in covered or (mod.phase and mod.design != "nd" and _known(mod.interface)):
+                continue
+            spellings.append({"id": -mod.id, "raw": mod.name, "norm_key": modification_key(mod.name), "current": mod.id, "count": 0})
     if not spellings:
         return stats
-    description = designation_excerpt(db, meter_type.mit_number)
+    description = (
+        characteristics.relevant_description(
+            full_description,
+            max_chars=fit_chars(db, 30_000, reserved=14_000),
+        )
+        if full_description
+        else None
+    )
     for start in range(0, len(spellings), CHUNK):
         chunk = spellings[start : start + CHUNK]
         mods = db.scalars(
@@ -390,6 +464,7 @@ def markup_type(
             )
             for key, value in apply_answer(db, meter_type, chunk, answer, recheck=recheck).items():
                 stats[key] += value
+            stats["script"] += characteristics.apply_script_to_type(db, meter_type, full_description)
             db.commit()
         except (AiNotConfiguredError, AiQuotaExceededError):
             # Ключа нет, отклонён или лимит исчерпан — следующие пачки упадут так же; ночное
@@ -427,7 +502,7 @@ def run(
             {"s": since},
         ).scalars()
     )
-    total = {"types": 0, "mapped": 0, "created": 0, "skipped": 0, "corrected": 0, "failed": 0}
+    total = {"types": 0, "mapped": 0, "created": 0, "skipped": 0, "corrected": 0, "failed": 0, "script": 0}
     for meter_type in db.scalars(query.order_by(MeterMarketType.mit_number)).all():
         if meter_type.id not in pending_types:
             continue

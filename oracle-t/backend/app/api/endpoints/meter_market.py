@@ -11,11 +11,12 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_analytics
 from app.db.session import get_db
-from app.models.meter_market import MeterMarketModification, MeterMarketType
+from app.models.meter_market import MeterMarketManufacturer, MeterMarketModification, MeterMarketType
 from app.models.user import User
 from app.schemas.meter_market import (
     GroupIn,
@@ -29,6 +30,7 @@ from app.schemas.meter_market import (
     VariantSmartIn,
     VariantMapIn,
 )
+from app.services import meter_market_characteristics as characteristics
 from app.services import meter_market_dictionary as dictionary
 from app.services import meter_market_explain as explain
 from app.services import meter_market_report as report
@@ -415,10 +417,11 @@ def get_interface_codes_draft(
 def get_types(
     review_status: str | None = None,
     search: str | None = None,
+    manufacturer_id: int | None = None,
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
-    return dictionary.types(db, review_status=review_status, search=search)
+    return dictionary.types(db, review_status=review_status, search=search, manufacturer_id=manufacturer_id)
 
 
 @router.patch("/types/{type_id}")
@@ -461,13 +464,35 @@ def post_type_smart(
 
 
 _markup_running: set[int] = set()
+_catalog_jobs: dict[str, dict[str, Any]] = {}
+
+
+def _job_start(key: str, label: str) -> None:
+    _catalog_jobs[key] = {"key": key, "label": label, "state": "running", "result": None, "error": None}
+
+
+def _job_finish(key: str, *, result: Any = None, error: str | None = None) -> None:
+    _catalog_jobs[key] = {
+        **_catalog_jobs.get(key, {"key": key}),
+        "state": "error" if error else "done",
+        "result": result,
+        "error": error,
+    }
+
+
+@router.get("/catalog-jobs")
+def get_catalog_jobs(_: User = Depends(get_current_user)) -> list[dict[str, Any]]:
+    return sorted(_catalog_jobs.values(), key=lambda item: item["key"])
 
 
 @router.post("/types/{type_id}/markup")
-def post_type_markup(type_id: int, db: Session = Depends(get_db), user: User = Depends(require_analytics)) -> dict[str, Any]:
-    """«Расшифровать заново» (раздел 108): ИИ заново расшифровывает все написания типа, кроме
-    размеченных вручную, с учётом «Расшифровки кодов» аналитика. Десятки обращений к модели —
-    в фоновом потоке; результат виден в справочнике и отчёте через несколько минут."""
+def post_type_markup(
+    type_id: int,
+    refresh: bool = False,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_analytics),
+) -> dict[str, Any]:
+    """Обновить описание при необходимости и расшифровать тип скриптом, затем ИИ."""
 
     import threading
 
@@ -483,21 +508,113 @@ def post_type_markup(type_id: int, db: Session = Depends(get_db), user: User = D
         raise HTTPException(status_code=409, detail="Расшифровка этого типа уже идёт — дождитесь окончания")
     log_action(db, component="meter_market", action=f"type_markup:{si_type.mit_number}", result="success", user_id=user.id)
     db.commit()
+    key = f"type-markup:{type_id}"
 
     def work() -> None:
         try:
             with SessionLocal() as session:
                 meter_type = session.get(MeterMarketType, type_id)
-                stats = meter_market_markup.markup_type(session, meter_type, recheck=True)
+                if refresh or not characteristics.description_text(session, meter_type):
+                    characteristics.refresh_description(session, meter_type)
+                    session.commit()
+                stats = meter_market_markup.markup_type(
+                    session, meter_type, recheck=True, include_modifications=True
+                )
             logger.info(f"Рынок ПУ, расшифровка {si_type.mit_number}: {stats}")
-        except Exception as exc:  # noqa: BLE001 - фоновый поток: ошибка только в журнал
+            _job_finish(key, result=stats)
+        except Exception as exc:  # noqa: BLE001 - фоновый поток: ошибка видна и в справочнике
             logger.warning(f"Рынок ПУ, расшифровка {si_type.mit_number} не выполнена: {exc}")
+            _job_finish(key, error=str(exc))
         finally:
             _markup_running.discard(type_id)
 
     _markup_running.add(type_id)
+    _job_start(key, f"Разбор {si_type.mit_number} {si_type.notation or ''}")
     threading.Thread(target=work, name=f"meter-markup-{type_id}", daemon=True).start()
-    return {"started": True}
+    return {"started": True, "job": key}
+
+
+@router.post("/manufacturers/{manufacturer_id}/sync")
+def post_manufacturer_sync(
+    manufacturer_id: int, db: Session = Depends(get_db), user: User = Depends(require_analytics)
+) -> dict[str, Any]:
+    import threading
+
+    from app.db.session import SessionLocal
+    from app.services import meter_market_sync
+
+    manufacturer = db.get(MeterMarketManufacturer, manufacturer_id)
+    if manufacturer is None:
+        raise HTTPException(status_code=404, detail="Производитель не найден")
+    key = f"manufacturer-sync:{manufacturer_id}"
+    if _catalog_jobs.get(key, {}).get("state") == "running":
+        raise HTTPException(status_code=409, detail="Синхронизация этого производителя уже идёт")
+    log_action(db, component="meter_market", action=f"manufacturer_sync:{manufacturer_id}", result="success", user_id=user.id)
+    db.commit()
+
+    def work() -> None:
+        try:
+            with SessionLocal() as session:
+                stats = meter_market_sync.sync_manufacturer(session, session.get(MeterMarketManufacturer, manufacturer_id))
+                session.commit()
+            _job_finish(key, result=stats.__dict__)
+        except Exception as exc:  # noqa: BLE001
+            _job_finish(key, error=str(exc))
+
+    _job_start(key, f"Синхронизация {manufacturer.name} с ФГИС")
+    threading.Thread(target=work, name=f"meter-sync-{manufacturer_id}", daemon=True).start()
+    return {"started": True, "job": key}
+
+
+@router.post("/manufacturers/{manufacturer_id}/markup")
+def post_manufacturer_markup(
+    manufacturer_id: int, db: Session = Depends(get_db), user: User = Depends(require_analytics)
+) -> dict[str, Any]:
+    import threading
+
+    from app.db.session import SessionLocal
+    from app.services import meter_market_markup
+
+    manufacturer = db.get(MeterMarketManufacturer, manufacturer_id)
+    if manufacturer is None:
+        raise HTTPException(status_code=404, detail="Производитель не найден")
+    key = f"manufacturer-markup:{manufacturer_id}"
+    if _catalog_jobs.get(key, {}).get("state") == "running":
+        raise HTTPException(status_code=409, detail="Разбор этого производителя уже идёт")
+    type_ids = [row[0] for row in db.execute(
+        text("SELECT id FROM meter_market_types WHERE manufacturer_id = :m ORDER BY mit_number"),
+        {"m": manufacturer_id},
+    ).all()]
+    log_action(db, component="meter_market", action=f"manufacturer_markup:{manufacturer_id}", result="success", user_id=user.id)
+    db.commit()
+
+    def work() -> None:
+        total: dict[str, Any] = {"types": 0, "script": 0, "mapped": 0, "created": 0, "failed": 0, "errors": []}
+        try:
+            with SessionLocal() as session:
+                for type_id in type_ids:
+                    meter_type = session.get(MeterMarketType, type_id)
+                    try:
+                        if not characteristics.description_text(session, meter_type):
+                            characteristics.refresh_description(session, meter_type)
+                            session.commit()
+                        stats = meter_market_markup.markup_type(
+                            session, meter_type, recheck=True, include_modifications=True
+                        )
+                        total["types"] += 1
+                        for field in ("script", "mapped", "created", "failed"):
+                            total[field] += stats.get(field, 0)
+                    except Exception as exc:  # noqa: BLE001 - один тип не останавливает производителя
+                        session.rollback()
+                        total["failed"] += 1
+                        total["errors"].append(f"{meter_type.mit_number}: {exc}")
+            _job_finish(key, result=total)
+        except Exception as exc:  # noqa: BLE001
+            _job_finish(key, error=str(exc))
+
+    _job_start(key, f"Разбор приборов {manufacturer.name}")
+    threading.Thread(target=work, name=f"meter-manufacturer-markup-{manufacturer_id}", daemon=True).start()
+    return {"started": True, "job": key}
 
 
 @router.get("/types/{type_id}/modifications")
@@ -554,6 +671,50 @@ def patch_modification(
     )
     db.commit()
     return {"id": modification.id}
+
+
+def _attribute_action(
+    modification_id: int,
+    field_name: str,
+    action: str,
+    db: Session,
+    user: User,
+) -> dict[str, Any]:
+    if field_name not in characteristics.TRACKED_FIELDS:
+        raise HTTPException(status_code=422, detail="Неизвестная характеристика модификации")
+    modification = db.get(MeterMarketModification, modification_id)
+    if modification is None:
+        raise HTTPException(status_code=404, detail="Модификация не найдена")
+    changed = (
+        characteristics.confirm_attribute(db, modification, field_name)
+        if action == "confirm"
+        else characteristics.reject_attribute(db, modification, field_name)
+    )
+    if not changed:
+        raise HTTPException(status_code=409, detail="У этой характеристики нет предложения ИИ, ожидающего решения")
+    log_action(
+        db,
+        component="meter_market",
+        action=f"attribute_{action}:{modification_id}:{field_name}",
+        result="success",
+        user_id=user.id,
+    )
+    db.commit()
+    return {"id": modification_id, "field": field_name, "attributes": characteristics.attributes_for(db, [modification_id])[modification_id]}
+
+
+@router.post("/modifications/{modification_id}/attributes/{field_name}/confirm")
+def confirm_modification_attribute(
+    modification_id: int, field_name: str, db: Session = Depends(get_db), user: User = Depends(require_analytics)
+) -> dict[str, Any]:
+    return _attribute_action(modification_id, field_name, "confirm", db, user)
+
+
+@router.post("/modifications/{modification_id}/attributes/{field_name}/reject")
+def reject_modification_attribute(
+    modification_id: int, field_name: str, db: Session = Depends(get_db), user: User = Depends(require_analytics)
+) -> dict[str, Any]:
+    return _attribute_action(modification_id, field_name, "reject", db, user)
 
 
 @router.get("/modifications/{modification_id}/variants")
