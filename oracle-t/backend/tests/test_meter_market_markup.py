@@ -69,7 +69,7 @@ def test_markup_creates_modification_and_maps_spellings(db_session, monkeypatch)
     known = _variant(db_session, meter_type.id, "НЕВА МТ 115 2AR2S E4PC 5(80)A")
     seen = {}
 
-    def fake(db, *, system_prompt, user_text, response_model, temperature):
+    def fake(db, *, system_prompt, user_text, response_model, temperature, **_):
         seen["text"] = user_text
         return response_model(
             items=[
@@ -138,7 +138,7 @@ def test_recheck_splits_grouped_modification_by_analyst_codes(db_session, monkey
     db_session.flush()
     seen = {}
 
-    def fake(db, *, system_prompt, user_text, response_model, temperature):
+    def fake(db, *, system_prompt, user_text, response_model, temperature, **_):
         seen["text"] = user_text
         return response_model(
             items=[

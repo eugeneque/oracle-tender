@@ -245,6 +245,39 @@ def test_dispatcher_calls_only_the_active_client(db_session, monkeypatch):
     assert calls == ["qwen", "yandex", "qwen"]
 
 
+def test_short_markup_falls_back_to_deepseek_after_qwen_length(db_session, monkeypatch):
+    """Обрыв маленького CellAnswer не повторяется в Qwen: тот же запрос уходит в DeepSeek,
+    а ограничение ответа применяется к обеим моделям."""
+
+    class Answer(pydantic.BaseModel):
+        text: str
+
+    calls = []
+
+    def fake_routerai(db, **kwargs):
+        calls.append((kwargs["provider"], kwargs["max_output_tokens"]))
+        if kwargs["provider"] == "qwen":
+            raise ai_client.AiResponseTruncatedError("ответ оборван по лимиту токенов")
+        return Answer(text="ok")
+
+    monkeypatch.setattr(ai_client, "get_active_provider", lambda db: "qwen")
+    monkeypatch.setattr(ai_client, "is_provider_enabled", lambda db, provider: True)
+    monkeypatch.setattr(ai_client, "is_provider_configured", lambda db, provider: True)
+    monkeypatch.setattr(ai_client, "_discard_if_disabled_meanwhile", lambda *args: None)
+    monkeypatch.setattr(ai_client.routerai_client, "run_structured", fake_routerai)
+
+    answer = ai_client.run_structured(
+        db_session,
+        system_prompt="s",
+        user_text="u",
+        response_model=Answer,
+        max_output_tokens=2000,
+        fallback_on_length=True,
+    )
+    assert answer.text == "ok"
+    assert calls == [("qwen", 2000), ("deepseek", 2000)]
+
+
 def test_strict_schema_closes_objects_and_drops_titles():
     from app.services.routerai_client import _strict_schema
 

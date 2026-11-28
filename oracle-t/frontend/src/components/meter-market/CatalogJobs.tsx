@@ -6,8 +6,14 @@ function resultCounts(result: Record<string, unknown>): string {
     ["скриптом", result.script],
     ["сопоставлено", result.mapped],
     ["новых", result.created],
+    ["заполнено ИИ", result.corrected],
     ["ошибок", result.failed],
   ].filter(([, value]) => typeof value === "number").map(([label, value]) => `${label} ${String(value)}`).join(", ");
+}
+
+function resultErrors(job: MarketCatalogJob): string {
+  const errors = job.result?.errors;
+  return Array.isArray(errors) ? errors.map(String).join("; ") : "";
 }
 
 function resultText(job: MarketCatalogJob): string {
@@ -31,6 +37,7 @@ export function CatalogJobs({ jobs, onCancel }: { jobs: MarketCatalogJob[]; onCa
             <span>{job.label}: {resultText(job)}</span>
             {job.state === "running" && onCancel && <button type="button" className="shrink-0 text-red-300 hover:text-red-200" onClick={() => onCancel(job.key)}>Остановить</button>}
           </div>
+          {job.state !== "running" && resultErrors(job) && <div className="mt-1 text-[11px] opacity-80">{resultErrors(job)}</div>}
         </div>
       ))}
     </>

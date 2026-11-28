@@ -174,8 +174,8 @@ low используй при любой неоднозначности. reason 
 
 CELL_SYSTEM_PROMPT = """\
 Ты — эксперт по приборам учёта. Заполняешь ТОЛЬКО указанные пустые ячейки, а не всю строку.
-Для каждой ячейки (id, field) верни value, confidence (high/medium/low), короткий reason и
-доказательства evidence (не больше двух элементов) [{"code": "код из обозначения", "page": "лист или null", "quote": "до 300 знаков"}].
+Для каждой ячейки (id, field) верни value, confidence (high/medium/low), reason до 120 знаков и
+одно доказательство evidence [{"code": "код из обозначения", "page": "лист или null", "quote": "до 180 знаков"}].
 Не возвращай другие поля и не переписывай существующие значения. Допустимые значения:
 phase — "1ф" или "3ф"; design — "din", "cabinet", "split", "nd";
 interface — каналы через " и " ("GSM и RS", "NB-Fi"), "без интерфейса" или "н/д";
@@ -184,9 +184,11 @@ mpi_years — целое число лет; smart_890 — "yes", "no" или "un
 """
 
 CELL_FIELDS = ("phase", "design", "interface", "mpi_years", "smart_890")
-CELL_TASKS_LIMIT = 4  # до 40 ячеек с цитатами Qwen обрывал JSON даже при max_tokens=50000 (28.11.2026)
-CELL_EVIDENCE_LIMIT = 2
-CELL_QUOTE_CHARS = 300
+CELL_TASKS_LIMIT = 2  # одна-две ячейки: ответ с обоснованием не должен превращаться в сотни токенов рассуждений
+CELL_EVIDENCE_LIMIT = 1
+CELL_QUOTE_CHARS = 180
+CELL_DESCRIPTION_CHARS = 12_000
+CELL_MAX_OUTPUT_TOKENS = 2_000
 
 
 def designation_excerpt(db: Session, mit_number: str) -> str | None:
@@ -447,7 +449,11 @@ def _cell_user_text(
 ) -> str:
     """Только недостающие ячейки и контекст для них, без запроса полной строки."""
 
-    text = _user_text(meter_type, modifications, [task["spelling"] for task in tasks], description)
+    needed = {task["spelling"].get("current") for task in tasks}
+    modifications = [mod for mod in modifications if mod.id in needed]
+    unique_spellings = list({task["spelling"]["id"]: task["spelling"] for task in tasks}.values())
+    excerpt = characteristics.relevant_description(description, max_chars=CELL_DESCRIPTION_CHARS) if description else None
+    text = _user_text(meter_type, modifications, unique_spellings, excerpt)
     fields = sorted({task["field"] for task in tasks})
     current = {mod.id: mod.name for mod in modifications}
     lines = [text, "", f"Заполни ТОЛЬКО эти ячейки: {', '.join(fields)}", "Ячейки (id; field; написание; модификация):"]
@@ -464,16 +470,21 @@ def _missing_cells(db: Session, spellings: list[dict[str, Any]], modifications: 
     by_id = {mod.id: mod for mod in modifications}
     reviews = characteristics.attributes_for(db, [mod.id for mod in modifications]) if modifications else {}
     tasks = []
+    seen: set[tuple[int, str]] = set()
     for spelling in spellings:
         modification = by_id.get(spelling.get("current"))
         if modification is None:
             continue
         metadata = reviews.get(modification.id, {})
         for field in CELL_FIELDS:
+            key = (modification.id, field)
+            if key in seen:
+                continue
             value = getattr(modification, field)
             unknown = value in characteristics.UNKNOWN_VALUES or metadata.get(field, {}).get("status") == "unresolved"
             if unknown:
                 tasks.append({"spelling": spelling, "field": field})
+                seen.add(key)
     return tasks
 
 
@@ -702,6 +713,8 @@ def markup_type(
                         user_text=_user_text(meter_type, list(mods), unmapped, description),
                         response_model=MappingAnswer,
                         temperature=0.0,
+                        max_output_tokens=4_000,
+                        fallback_on_length=True,
                     )
                     for key, value in _apply_mapping_answer(db, meter_type, unmapped, mapping_answer, recheck=recheck).items():
                         stats[key] += value
@@ -721,9 +734,13 @@ def markup_type(
                         user_text=_cell_user_text(meter_type, list(mods), task_chunk, description),
                         response_model=CellAnswer,
                         temperature=0.0,
+                        max_output_tokens=CELL_MAX_OUTPUT_TOKENS,
+                        fallback_on_length=True,
                     )
                     for key, value in _apply_cell_answer(db, meter_type, task_chunk, cell_answer).items():
                         stats[key] += value
+                    # Следующий сбой не отменяет уже полученные ячейки этой пачки написаний.
+                    db.commit()
             else:
                 answer = run_structured(
                     db,
@@ -731,6 +748,7 @@ def markup_type(
                     user_text=_user_text(meter_type, list(mods), chunk, description),
                     response_model=MarkupAnswer,
                     temperature=0.0,
+                    fallback_on_length=True,
                 )
                 for key, value in apply_answer(db, meter_type, chunk, answer, recheck=recheck).items():
                     stats[key] += value

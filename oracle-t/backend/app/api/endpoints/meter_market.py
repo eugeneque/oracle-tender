@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from loguru import logger
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -518,7 +519,7 @@ def cancel_catalog_job(job_key: str, db: Session = Depends(get_db), _: User = De
     if job["state"] != "running":
         raise HTTPException(status_code=409, detail="Задача уже завершена")
     job["cancel_requested"] = True
-    result = job.get("result") or {"types": 0, "script": 0, "mapped": 0, "created": 0, "failed": 0, "errors": []}
+    result = job.get("result") or {"types": 0, "script": 0, "mapped": 0, "created": 0, "corrected": 0, "failed": 0, "errors": []}
     _job_finish(job_key, result=result, error="Остановлено пользователем")
     return _catalog_jobs[job_key]
 
@@ -566,7 +567,7 @@ def post_types_markup(
     def work() -> None:
         from app.services.ai_provider_service import AiNotConfiguredError, AiQuotaExceededError
 
-        total: dict[str, Any] = {"types": 0, "script": 0, "mapped": 0, "created": 0, "failed": 0, "errors": []}
+        total: dict[str, Any] = {"types": 0, "script": 0, "mapped": 0, "created": 0, "corrected": 0, "failed": 0, "errors": []}
         try:
             with SessionLocal() as session:
                 for index, type_id in enumerate(type_ids, start=1):
@@ -583,8 +584,11 @@ def post_types_markup(
                             session, meter_type, recheck=True, include_modifications=True, cell_mode=payload.cell_mode
                         )
                         total["types"] += 1
-                        for field in ("script", "mapped", "created", "failed"):
+                        for field in ("script", "mapped", "created", "corrected", "failed"):
                             total[field] += stats.get(field, 0)
+                        logger.info(f"Рынок ПУ, пакетная разметка {meter_type.mit_number}: {stats}")
+                        if stats.get("failed") and not stats.get("stopped"):
+                            total["errors"].append(f"{meter_type.mit_number}: не обработано пачек {stats['failed']}")
                         _job_progress(key, current=index, total=len(type_ids), mit_number=meter_type.mit_number, failed=total["failed"])
                         if stats.get("stopped"):
                             total["errors"].append(f"{meter_type.mit_number}: ответ модели оборван по лимиту токенов")
@@ -712,7 +716,7 @@ def post_manufacturer_markup(
     db.commit()
 
     def work() -> None:
-        total: dict[str, Any] = {"types": 0, "script": 0, "mapped": 0, "created": 0, "failed": 0, "errors": []}
+        total: dict[str, Any] = {"types": 0, "script": 0, "mapped": 0, "created": 0, "corrected": 0, "failed": 0, "errors": []}
         try:
             with SessionLocal() as session:
                 for type_id in type_ids:
@@ -725,7 +729,7 @@ def post_manufacturer_markup(
                             session, meter_type, recheck=True, include_modifications=True, cell_mode=True
                         )
                         total["types"] += 1
-                        for field in ("script", "mapped", "created", "failed"):
+                        for field in ("script", "mapped", "created", "corrected", "failed"):
                             total[field] += stats.get(field, 0)
                     except Exception as exc:  # noqa: BLE001 - один тип не останавливает производителя
                         session.rollback()

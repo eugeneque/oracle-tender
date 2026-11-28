@@ -165,6 +165,26 @@ def test_qwen_goes_through_routerai_without_reasoning(db_session, routerai):
     assert record.provider == "qwen"
 
 
+def test_truncated_response_has_usage_and_is_not_retried(db_session, routerai):
+    """Одинаковый повтор при temperature=0 лишь тратит токены; в ошибке должны остаться
+    счётчики шлюза, длина видимого ответа и рассуждений для диагностики обрыва Qwen."""
+
+    job, _ = _job_with_tender(db_session)
+    routerai["responses"] = [httpx.Response(200, json={
+        "choices": [{"message": {"content": '{"text":', "reasoning": "думаю"}, "finish_reason": "length"}],
+        "usage": {"prompt_tokens": 123, "completion_tokens": 2000},
+    })]
+    with running_job(datetime.now(timezone.utc), job.id):
+        with pytest.raises(ai_client.AiResponseTruncatedError) as caught:
+            routerai_client.run_structured(
+                db_session, system_prompt="s", user_text="u", response_model=Answer, provider="qwen", max_output_tokens=2000
+            )
+    message = str(caught.value)
+    assert "max_tokens=2000" in message and "completion_tokens" in message and "2000" in message
+    assert "content_chars=8" in message and "reasoning_chars=5" in message
+    assert len(routerai["bodies"]) == 1
+
+
 def test_model_limits_validation_budget_and_reset(db_session, admin_user):
     with pytest.raises(ValueError, match="половины окна"):
         ai_provider_service.update_model_limits(

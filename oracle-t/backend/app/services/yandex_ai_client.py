@@ -173,6 +173,7 @@ def run_structured(
     response_model: type[ResponseT],
     model_name: str = DEFAULT_MODEL,
     temperature: float = 0.0,
+    max_output_tokens: int | None = None,
 ) -> ResponseT:
     """Запрос к YandexGPT со structured output (JSON по схеме `response_model`).
 
@@ -188,7 +189,8 @@ def run_structured(
     from yandex_ai_studio_sdk import AIStudio
 
     api_key, folder_id = get_credentials(db)
-    max_tokens = get_model_limits(db, PROVIDER_YANDEX).max_output_tokens
+    configured_limit = get_model_limits(db, PROVIDER_YANDEX).max_output_tokens
+    max_tokens = min(configured_limit, max_output_tokens) if max_output_tokens is not None else configured_limit
 
     sdk = AIStudio(folder_id=folder_id, auth=api_key)
     model = sdk.models.completions(model_name).configure(

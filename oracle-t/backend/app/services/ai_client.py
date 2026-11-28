@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import TypeVar
 
 import pydantic
+from loguru import logger
 from sqlalchemy.orm import Session
 
 from app.services import routerai_client, yandex_ai_client
@@ -30,12 +31,15 @@ from app.models.user import User
 from app.services.ai_log_service import log_ai_event
 from app.services.ai_context import JobCancelled, current_user_id, forced_provider, job_started_at
 from app.services.ai_provider_service import (
+    PROVIDER_DEEPSEEK,
     PROVIDER_LABELS,
+    PROVIDER_QWEN,
     PROVIDER_YANDEX,
     ROUTERAI_PROVIDERS,
     AiModelDisabledError,
     AiNotConfiguredError,
     AiQuotaExceededError,
+    AiResponseTruncatedError,
     AiUnavailableError,
     disabled_since,
     get_active_provider,
@@ -52,6 +56,7 @@ __all__ = [
     "AiModelDisabledError",
     "AiNotConfiguredError",
     "AiQuotaExceededError",
+    "AiResponseTruncatedError",
     "AiUnavailableError",
     "active_model",
     "chunk_text",
@@ -68,6 +73,8 @@ def run_structured(
     user_text: str,
     response_model: type[ResponseT],
     temperature: float = 0.0,
+    max_output_tokens: int | None = None,
+    fallback_on_length: bool = False,
 ) -> ResponseT:
     """Structured output (JSON по схеме `response_model`) от активного провайдера.
 
@@ -84,6 +91,8 @@ def run_structured(
             user_text=user_text,
             response_model=response_model,
             temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            fallback_on_length=fallback_on_length,
         )
     except Exception as exc:
         _log_failure(db, exc, getattr(response_model, "__name__", None))
@@ -123,6 +132,8 @@ def _run_structured(
     user_text: str,
     response_model: type[ResponseT],
     temperature: float = 0.0,
+    max_output_tokens: int | None = None,
+    fallback_on_length: bool = False,
 ) -> ResponseT:
     _stop_if_disabled_during_job(db)
     _stop_if_cancelled()
@@ -147,6 +158,7 @@ def _run_structured(
                 response_model=response_model,
                 temperature=temperature,
                 provider=provider,
+                max_output_tokens=max_output_tokens,
             )
         except AiQuotaExceededError as exc:
             # Лимит расходов ключа RouterAI исчерпан (28.09.2026: DeepSeek — системная модель,
@@ -158,6 +170,30 @@ def _run_structured(
             ):
                 raise
             _warn_quota_fallback(db, provider, exc)
+        except AiResponseTruncatedError as exc:
+            if not fallback_on_length:
+                raise
+            # Для короткого извлечения Qwen иногда расходует весь потолок на рассуждения,
+            # не успевая записать JSON. Сначала пробуем DeepSeek на том же шлюзе, затем Yandex.
+            fallback = PROVIDER_DEEPSEEK if provider == PROVIDER_QWEN else PROVIDER_YANDEX
+            if not is_provider_configured(db, fallback) or not is_provider_enabled(db, fallback):
+                fallback = PROVIDER_YANDEX
+            if fallback == provider or not is_provider_configured(db, fallback) or not is_provider_enabled(db, fallback):
+                raise
+            _warn_length_fallback(db, provider, fallback, exc)
+            if fallback in ROUTERAI_PROVIDERS:
+                result = routerai_client.run_structured(
+                    db,
+                    system_prompt=system_prompt,
+                    user_text=user_text,
+                    response_model=response_model,
+                    temperature=temperature,
+                    provider=fallback,
+                    max_output_tokens=max_output_tokens,
+                )
+                _discard_if_disabled_meanwhile(db, fallback, called_at)
+                return result
+            provider = fallback
         else:
             _discard_if_disabled_meanwhile(db, provider, called_at)
             return result
@@ -168,6 +204,7 @@ def _run_structured(
         user_text=user_text,
         response_model=response_model,
         temperature=temperature,
+        max_output_tokens=max_output_tokens,
     )
     _discard_if_disabled_meanwhile(db, provider, called_at)
     return result
@@ -244,6 +281,25 @@ def _warn_quota_fallback(db: Session, provider: str, exc: Exception) -> None:
             result="fallback",
             provider=provider,
         )
+
+
+def _warn_length_fallback(db: Session, provider: str, fallback: str, exc: Exception) -> None:
+    """Обрыв короткого ответа не должен превращаться в бесконечные одинаковые повторы Qwen."""
+
+    text = (
+        f"{PROVIDER_LABELS.get(provider, provider)} оборвал ответ по лимиту токенов — "
+        f"запрос передан {PROVIDER_LABELS.get(fallback, fallback)}"
+    )
+    yandex_ai_client._note_fallback(text)
+    logger.warning(f"{text}: {exc}")
+    log_ai_event(
+        db,
+        action=text,
+        error=exc,
+        level=LogLevel.WARNING,
+        result="fallback",
+        provider=provider,
+    )
 
 
 def active_model(db: Session) -> tuple[str, str | None]:

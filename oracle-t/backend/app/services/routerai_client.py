@@ -30,6 +30,7 @@ from app.services.ai_provider_service import (
     PROVIDER_LABELS,
     PROVIDER_QWEN,
     AiQuotaExceededError,
+    AiResponseTruncatedError,
     AiUnavailableError,
     get_model_limits,
     get_routerai_credentials,
@@ -74,6 +75,10 @@ class RouterAiUnavailableError(RouterAiError, AiUnavailableError):
 
 class RouterAiQuotaError(RouterAiError, AiQuotaExceededError):
     """Лимит расходов ключа или баланс исчерпан — повторять запрос бессмысленно."""
+
+
+class RouterAiResponseTruncatedError(RouterAiError, AiResponseTruncatedError):
+    """JSON оборван по `finish_reason=length`; счётчики и хвост ответа остаются в сообщении."""
 
 
 def _strict_schema(schema: Any) -> Any:
@@ -202,6 +207,7 @@ def run_structured(
     response_model: type[ResponseT],
     temperature: float = 0.0,
     provider: str = PROVIDER_DEEPSEEK,
+    max_output_tokens: int | None = None,
 ) -> ResponseT:
     """Запрос к модели через RouterAI со structured output — контракт тот же, что у
     `yandex_ai_client.run_structured`: те же аргументы, тот же тип результата, те же повторы.
@@ -209,7 +215,8 @@ def run_structured(
 
     api_key, model, base_url = get_routerai_credentials(db, provider)
     name = f"{PROVIDER_LABELS.get(provider, provider)} (RouterAI)"
-    max_tokens = get_model_limits(db, provider).max_output_tokens
+    configured_limit = get_model_limits(db, provider).max_output_tokens
+    max_tokens = min(configured_limit, max_output_tokens) if max_output_tokens is not None else configured_limit
     prompt_chars = len(system_prompt) + len(user_text)
 
     schema = _strict_schema(response_model.model_json_schema())
@@ -265,14 +272,27 @@ def run_structured(
                     f"использование: {payload.get('usage')})"
                 )
             choice = payload["choices"][0]
-            raw_text = _strip_fences(_message_text(choice.get("message") or {}))
+            message = choice.get("message") or {}
+            raw_text = _strip_fences(_message_text(message))
             if choice.get("finish_reason") == "length":
-                raise RouterAiError("ответ оборван по лимиту токенов")
+                reasoning = message.get("reasoning")
+                reasoning_chars = len(reasoning) if isinstance(reasoning, str) else len(json.dumps(reasoning, ensure_ascii=False)) if reasoning else 0
+                usage = json.dumps(payload.get("usage") or {}, ensure_ascii=False)
+                raise RouterAiResponseTruncatedError(
+                    f"ответ оборван по лимиту токенов; max_tokens={max_tokens}; usage={usage}; "
+                    f"content_chars={len(raw_text)}; reasoning_chars={reasoning_chars}; "
+                    f"конец ответа: {raw_text[-240:]!r}"
+                )
             result = response_model.model_validate(_coerce_shape(raw_text, response_model))
             _record("success")
             return result
         except AiQuotaExceededError as exc:
             _record("quota", exc)
+            raise
+        except AiResponseTruncatedError as exc:
+            # При temperature=0 повтор с теми же сообщениями и потолком снова сжигает токены;
+            # вызывающий сервис решает, уменьшить ли задачу или переключить модель.
+            _record("invalid", exc)
             raise
         except (pydantic.ValidationError, ValueError) as exc:
             _record("invalid", exc)

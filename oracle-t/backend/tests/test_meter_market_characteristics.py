@@ -277,7 +277,7 @@ def test_selected_types_markup_route_processes_only_requested_ids(client, admin_
 
     def fake_markup(session, meter_type, **kwargs):
         called.append(meter_type.mit_number)
-        return {"script": 2, "mapped": 0, "created": 0, "failed": 0}
+        return {"script": 2, "mapped": 0, "created": 0, "corrected": 2, "failed": 0}
 
     monkeypatch.setattr(meter_market_markup, "markup_type", fake_markup)
     try:
@@ -294,7 +294,7 @@ def test_selected_types_markup_route_processes_only_requested_ids(client, admin_
             if job["state"] != "running":
                 break
         assert job["state"] == "done", job
-        assert job["result"]["script"] == 2
+        assert job["result"]["script"] == 2 and job["result"]["corrected"] == 2
         assert called == [mit_number]
     finally:
         with SessionLocal() as session:
@@ -477,7 +477,7 @@ def test_cell_mode_requests_only_missing_fields_and_preserves_existing_values(db
     variant = _variant_with_count(db_session, meter_type, modification)
     seen = {}
 
-    def fake(db, *, system_prompt, user_text, response_model, temperature):
+    def fake(db, *, system_prompt, user_text, response_model, temperature, **_):
         seen["system"] = system_prompt
         seen["text"] = user_text
         return response_model(
@@ -504,8 +504,8 @@ def test_cell_mode_requests_only_missing_fields_and_preserves_existing_values(db
     assert requested == "design"
     metadata = characteristics.attributes_for(db_session, [modification.id])[modification.id]
     assert metadata["design"]["status"] == "pending" and metadata["design"]["evidence"][0]["page"] == "6"
-    assert len(metadata["design"]["evidence"]) == 2
-    assert all(len(item["quote"]) <= 300 for item in metadata["design"]["evidence"])
+    assert len(metadata["design"]["evidence"]) == 1
+    assert all(len(item["quote"]) <= 180 for item in metadata["design"]["evidence"])
 
 
 def test_cell_mode_first_maps_spelling_then_fills_only_requested_cells(db_session, monkeypatch):
@@ -516,7 +516,7 @@ def test_cell_mode_first_maps_spelling_then_fills_only_requested_cells(db_sessio
     variant = _variant_with_count(db_session, meter_type)
     calls = []
 
-    def fake(db, *, system_prompt, user_text, response_model, temperature):
+    def fake(db, *, system_prompt, user_text, response_model, temperature, **_):
         calls.append(response_model.__name__)
         if response_model.__name__ == "MappingAnswer":
             return response_model(items=[{"id": variant.id, "name": "ФОБОС 1 IQOG(2)LM(1)-C", "confidence": "high", "reason": "Коды совпали"}])
@@ -538,7 +538,7 @@ def test_cell_mode_first_maps_spelling_then_fills_only_requested_cells(db_sessio
         )
     )
     assert stats["created"] == 1 and stats["mapped"] == 1 and stats["corrected"] == 1
-    assert calls == ["MappingAnswer", "CellAnswer", "CellAnswer"]
+    assert calls == ["MappingAnswer", "CellAnswer", "CellAnswer", "CellAnswer"]
     assert modification.design == "cabinet"
     assert modification.phase is None and modification.interface is None and modification.smart_890 is None
     assert modification.mpi_years is None
@@ -557,11 +557,36 @@ def test_cell_mode_splits_missing_cells_into_small_batches(db_session, monkeypat
     _variant_with_count(db_session, meter_type, modification, raw=FOBOS_RAW + " A")
     calls = []
 
-    def fake(db, *, system_prompt, user_text, response_model, temperature):
+    def fake(db, *, system_prompt, user_text, response_model, temperature, **_):
         cells = user_text.split("Ячейки (id; field; написание; модификация):", 1)[1]
         calls.append((response_model.__name__, cells.count("- id=")))
         return response_model(items=[])
 
     monkeypatch.setattr(meter_market_markup, "run_structured", fake)
     meter_market_markup.markup_type(db_session, meter_type, recheck=True, cell_mode=True)
-    assert calls == [("CellAnswer", 4), ("CellAnswer", 4), ("CellAnswer", 2)]
+    assert calls == [("CellAnswer", 2), ("CellAnswer", 2), ("CellAnswer", 1)]
+
+
+def test_cell_mode_commits_successful_batch_before_next_output_limit(db_session, monkeypatch):
+    from app.services import meter_market_markup
+
+    meter_type, modification = _modification(db_session)
+    meter_type.description_type_text = "Текст без структуры обозначения"
+    variant = _variant_with_count(db_session, meter_type, modification)
+    calls = []
+
+    def fake(db, *, response_model, **_):
+        calls.append(1)
+        if len(calls) == 2:
+            raise ValueError("ответ оборван по лимиту токенов")
+        return response_model(items=[
+            {"id": variant.id, "field": "phase", "value": "1ф", "confidence": "high", "reason": "однофазный", "evidence": []},
+            {"id": variant.id, "field": "design", "value": "cabinet", "confidence": "high", "reason": "M(1)", "evidence": []},
+        ])
+
+    monkeypatch.setattr(meter_market_markup, "run_structured", fake)
+    stats = meter_market_markup.markup_type(db_session, meter_type, recheck=True, cell_mode=True)
+    db_session.refresh(modification)
+    assert stats["corrected"] == 2 and stats["failed"] == 1
+    assert (modification.phase, modification.design) == ("1ф", "cabinet")
+    assert len(calls) == 2
