@@ -448,10 +448,10 @@ def test_cancel_batch_markup_stops_with_partial_result(client, admin_token, monk
                 _delete_type(session, type_id)
 
 
-def _variant_with_count(db_session, meter_type, modification=None):
+def _variant_with_count(db_session, meter_type, modification=None, raw=FOBOS_RAW):
     variant = MeterMarketVariant(
         type_id=meter_type.id,
-        raw=FOBOS_RAW,
+        raw=raw,
         norm_key=f"variant-{uuid.uuid4().hex}",
         modification_id=modification.id if modification else None,
     )
@@ -487,7 +487,11 @@ def test_cell_mode_requests_only_missing_fields_and_preserves_existing_values(db
                 "value": "cabinet",
                 "confidence": "high",
                 "reason": "M(1) — шкафное исполнение",
-                "evidence": [{"code": "M(1)", "page": "6", "quote": "шкафное исполнение"}],
+                "evidence": [
+                    {"code": "M(1)", "page": "6", "quote": "шкафное исполнение"},
+                    {"code": "M(1)", "page": "6", "quote": "вторая цитата"},
+                    {"code": "M(1)", "page": "6", "quote": "X" * 500},
+                ],
             }]
         )
 
@@ -500,6 +504,8 @@ def test_cell_mode_requests_only_missing_fields_and_preserves_existing_values(db
     assert requested == "design"
     metadata = characteristics.attributes_for(db_session, [modification.id])[modification.id]
     assert metadata["design"]["status"] == "pending" and metadata["design"]["evidence"][0]["page"] == "6"
+    assert len(metadata["design"]["evidence"]) == 2
+    assert all(len(item["quote"]) <= 300 for item in metadata["design"]["evidence"])
 
 
 def test_cell_mode_first_maps_spelling_then_fills_only_requested_cells(db_session, monkeypatch):
@@ -532,7 +538,30 @@ def test_cell_mode_first_maps_spelling_then_fills_only_requested_cells(db_sessio
         )
     )
     assert stats["created"] == 1 and stats["mapped"] == 1 and stats["corrected"] == 1
-    assert calls == ["MappingAnswer", "CellAnswer"]
+    assert calls == ["MappingAnswer", "CellAnswer", "CellAnswer"]
     assert modification.design == "cabinet"
     assert modification.phase is None and modification.interface is None and modification.smart_890 is None
     assert modification.mpi_years is None
+
+
+def test_cell_mode_splits_missing_cells_into_small_batches(db_session, monkeypatch):
+    from app.services import meter_market_markup
+
+    meter_type, modification = _modification(db_session)
+    meter_type.description_type_text = "Текст без структуры обозначения"
+    modification.design = "nd"
+    modification.interface = None
+    modification.mpi_years = None
+    modification.smart_890 = None
+    _variant_with_count(db_session, meter_type, modification)
+    _variant_with_count(db_session, meter_type, modification, raw=FOBOS_RAW + " A")
+    calls = []
+
+    def fake(db, *, system_prompt, user_text, response_model, temperature):
+        cells = user_text.split("Ячейки (id; field; написание; модификация):", 1)[1]
+        calls.append((response_model.__name__, cells.count("- id=")))
+        return response_model(items=[])
+
+    monkeypatch.setattr(meter_market_markup, "run_structured", fake)
+    meter_market_markup.markup_type(db_session, meter_type, recheck=True, cell_mode=True)
+    assert calls == [("CellAnswer", 4), ("CellAnswer", 4), ("CellAnswer", 2)]

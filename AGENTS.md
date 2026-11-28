@@ -98,7 +98,8 @@ oracle-tender-main/            ← корень git-репозитория
   статус `CatalogJob.progress` показывает X из Y, ГРСИ и ошибки; остановка пользователем —
   `POST /catalog-jobs/{key}/cancel` после текущего типа (133). «Опрос недостающих данных» —
   `cell_mode=true`: `MappingAnswer` для привязки, затем `CellAnswer` только по пустым полям;
-  «Полный опрос» — `only_missing=false`, `cell_mode=false` (134).
+  «Полный опрос» — `only_missing=false`, `cell_mode=false` (134). CellAnswer разбивается максимум
+  по 4 ячейки, evidence ≤ 2 цитат по 300 знаков, чтобы Qwen не обрывал JSON (135).
 - НМЦК с НДС и без НДС из документации — `price_vat_service` (кодом, без ИИ; `tenders.price_vat`,
   блок в «Обзоре», колонки Excel); разделы 106, 124.
 - Обновление из интерфейса («Система → Обновление», только админ) — `system_update_service`,

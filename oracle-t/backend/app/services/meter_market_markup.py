@@ -175,7 +175,7 @@ low используй при любой неоднозначности. reason 
 CELL_SYSTEM_PROMPT = """\
 Ты — эксперт по приборам учёта. Заполняешь ТОЛЬКО указанные пустые ячейки, а не всю строку.
 Для каждой ячейки (id, field) верни value, confidence (high/medium/low), короткий reason и
-доказательства evidence [{"code": "код из обозначения", "page": "лист или null", "quote": "цитата"}].
+доказательства evidence (не больше двух элементов) [{"code": "код из обозначения", "page": "лист или null", "quote": "до 300 знаков"}].
 Не возвращай другие поля и не переписывай существующие значения. Допустимые значения:
 phase — "1ф" или "3ф"; design — "din", "cabinet", "split", "nd";
 interface — каналы через " и " ("GSM и RS", "NB-Fi"), "без интерфейса" или "н/д";
@@ -184,6 +184,9 @@ mpi_years — целое число лет; smart_890 — "yes", "no" или "un
 """
 
 CELL_FIELDS = ("phase", "design", "interface", "mpi_years", "smart_890")
+CELL_TASKS_LIMIT = 4  # до 40 ячеек с цитатами Qwen обрывал JSON даже при max_tokens=50000 (28.11.2026)
+CELL_EVIDENCE_LIMIT = 2
+CELL_QUOTE_CHARS = 300
 
 
 def designation_excerpt(db: Session, mit_number: str) -> str | None:
@@ -545,6 +548,13 @@ def _cell_value(field: str, value: str) -> Any:
     return None
 
 
+def _cell_evidence(item: CellItem) -> list[dict[str, Any]]:
+    evidence = []
+    for entry in item.evidence[:CELL_EVIDENCE_LIMIT]:
+        evidence.append({**entry, "quote": str(entry.get("quote") or "")[:CELL_QUOTE_CHARS]})
+    return evidence
+
+
 def _apply_cell_answer(
     db: Session,
     meter_type: MeterMarketType,
@@ -600,7 +610,7 @@ def _apply_cell_answer(
             source=characteristics.AttributeSource.AI.value,
             status=characteristics.AttributeReviewStatus.PENDING.value,
             reason=(item.reason or "").strip(),
-            evidence=item.evidence,
+            evidence=_cell_evidence(item),
             confidence=item.confidence,
             only_if_unknown=True,
         )
@@ -703,15 +713,16 @@ def markup_type(
                         .order_by(MeterMarketModification.name)
                     ).all()
                 tasks = _missing_cells(db, chunk, list(mods))
-                if tasks:
+                for task_start in range(0, len(tasks), CELL_TASKS_LIMIT):
+                    task_chunk = tasks[task_start : task_start + CELL_TASKS_LIMIT]
                     cell_answer = run_structured(
                         db,
                         system_prompt=CELL_SYSTEM_PROMPT,
-                        user_text=_cell_user_text(meter_type, list(mods), tasks, description),
+                        user_text=_cell_user_text(meter_type, list(mods), task_chunk, description),
                         response_model=CellAnswer,
                         temperature=0.0,
                     )
-                    for key, value in _apply_cell_answer(db, meter_type, tasks, cell_answer).items():
+                    for key, value in _apply_cell_answer(db, meter_type, task_chunk, cell_answer).items():
                         stats[key] += value
             else:
                 answer = run_structured(
